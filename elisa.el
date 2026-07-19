@@ -360,7 +360,7 @@ FOREIGN KEY(collection_id) REFERENCES collections(rowid)
 
 (defun elisa-vector-to-sqlite (data)
   "Convert DATA to sqlite vector representation."
-  (format "vector_from_json(json('%s'))" (json-encode data)))
+  (format "vec_f32('%s')" (json-encode data)))
 
 (defun elisa-sqlite-escape (string)
   "Escape single quotes in STRING for sqlite."
@@ -514,9 +514,9 @@ SELECT rowid FROM collections WHERE name IN %s
 vector_search AS (
   SELECT rowid, distance
   FROM data_embeddings
-  WHERE vss_search(embedding, %s)
+  WHERE embedding MATCH %s
+    AND k = 40
   ORDER BY distance ASC
-  LIMIT 40
 ),
 semantic_search AS (
   SELECT rowid, RANK () OVER (ORDER BY distance ASC) AS rank
@@ -1230,8 +1230,7 @@ Call ON-DONE callback with result as an argument after FUNC evaluation done."
 		    ,(async-inject-variables "elisa-pandoc-executable")
 		    ,(async-inject-variables "ellama-long-lines-length")
 		    ,(async-inject-variables "elisa-reranker-enabled")
-		    ,(async-inject-variables "elisa-sqlite-vector-path")
-		    ,(async-inject-variables "elisa-sqlite-vss-path")
+		    ,(async-inject-variables "elisa-sqlite-vec-path")
 		    ,(async-inject-variables "load-path")
 		    ,(async-inject-variables "Info-directory-list")
 		    (require 'elisa)
