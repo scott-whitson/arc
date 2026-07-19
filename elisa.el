@@ -720,6 +720,12 @@ When FORCE parse even if already parsed."
 	      (not prev-hash)
 	      (not (string-equal hash prev-hash)))
       (with-current-buffer buf
+	;; Opened rawfile (unibyte); decode to UTF-8 multibyte so non-ASCII
+	;; content (em-dashes etc.) embeds cleanly — llm's json-serialize
+	;; rejects raw unibyte bytes (wrong-type-argument json-value-p).
+	(unless enable-multibyte-characters
+	  (decode-coding-region (point-min) (point-max) 'utf-8)
+	  (set-buffer-multibyte t))
 	(let ((chunks (elisa-split-semantically))
 	      (old-row-ids
 	       (flatten-tree (sqlite-select
