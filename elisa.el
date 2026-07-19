@@ -144,17 +144,10 @@
   "Path to tar executable."
   :type 'string)
 
-(defcustom elisa-sqlite-vss-version "v0.1.2"
-  "Sqlite VSS version."
-  :type 'string)
-
-(defcustom elisa-sqlite-vss-path nil
-  "Path to sqlite-vss extension."
-  :type 'file)
-
-(defcustom elisa-sqlite-vector-path nil
-  "Path to sqlite-vector extension."
-  :type 'file)
+(defcustom elisa-sqlite-vec-path (getenv "ELISA_VEC0_PATH")
+  "Path to the sqlite-vec (vec0) loadable extension.
+Defaults to the ELISA_VEC0_PATH environment variable (set by Nix)."
+  :type '(choice (const nil) file))
 
 (defcustom elisa-semantic-split-function #'elisa-split-by-paragraph
   "Function for semantic text split."
@@ -289,58 +282,6 @@ If set, all quotes with similarity less than threshold will be filtered out."
   (cl-find (file-name-extension path)
 	   elisa-supported-complex-document-extensions :test #'string=))
 
-(defun elisa-sqlite-vss-download-url ()
-  "Generate sqlite vss download url based on current system.
-Sqlite vss is an extension to sqlite providing vector search
-similarity support that used to retrieve relevant data from
-database."
-  (cond  ((eq system-type 'darwin)
-	  (if (or (string-prefix-p "aarch64" system-configuration)
-		  (string-prefix-p "arm" system-configuration))
-	      (format
-	       "https://github.com/asg017/sqlite-vss/releases/download/%s/sqlite-vss-%s-loadable-macos-aarch64.tar.gz"
-	       elisa-sqlite-vss-version
-	       elisa-sqlite-vss-version)
-	    (format
-	     "https://github.com/asg017/sqlite-vss/releases/download/%s/sqlite-vss-%s-loadable-macos-x86_64.tar.gz"
-	     elisa-sqlite-vss-version
-	     elisa-sqlite-vss-version)))
-	 ((eq system-type 'gnu/linux)
-	  (format
-	   "https://github.com/asg017/sqlite-vss/releases/download/%s/sqlite-vss-%s-loadable-linux-x86_64.tar.gz"
-	   elisa-sqlite-vss-version
-	   elisa-sqlite-vss-version))
-	 (t (user-error "Can't determine download url"))))
-
-(defun elisa--vss-path ()
-  "Path to vss sqlite extension."
-  (or elisa-sqlite-vss-path
-      (let* ((ext (if (eq system-type 'darwin) "dylib" "so"))
-	     (file (format "vss0.%s" ext)))
-	(file-name-concat elisa-db-directory file))))
-
-(defun elisa--vector-path ()
-  "Path to vector sqlite extension."
-  (or elisa-sqlite-vector-path
-      (let* ((ext (if (string-equal system-type 'darwin) "dylib" "so"))
-	     (file (format "vector0.%s" ext)))
-	(file-name-concat elisa-db-directory file))))
-
-;;;###autoload
-(defun elisa-download-sqlite-vss ()
-  "Download sqlite vss."
-  (interactive)
-  (let ((file-name
-	 (file-truename
-	  (file-name-concat
-	   elisa-db-directory
-	   (format "sqlite-vss-%s.tar.gz" elisa-sqlite-vss-version))))
-	(default-directory elisa-db-directory))
-    (make-directory elisa-db-directory t)
-    (url-copy-file (elisa-sqlite-vss-download-url) file-name t)
-    (process-lines (executable-find elisa-tar-executable) "-xf" file-name)
-    (delete-file file-name))
-  (elisa--reopen-db))
 
 (defun elisa-get-embedding-size ()
   "Get embedding size."
@@ -352,7 +293,7 @@ database."
 
 (defun elisa-data-embeddings-create-table-sql ()
   "Generate sql for create data embeddings table."
-  (format "CREATE VIRTUAL TABLE IF NOT EXISTS data_embeddings USING vss0(embedding(%d));"
+  (format "CREATE VIRTUAL TABLE IF NOT EXISTS data_embeddings USING vec0(embedding float[%d]);"
 	  (elisa-get-embedding-size)))
 
 (defun elisa-data-embeddings-drop-table-sql ()
@@ -397,11 +338,10 @@ FOREIGN KEY(collection_id) REFERENCES collections(rowid)
 
 (defun elisa--init-db (db)
   "Initialize elisa DB."
-  (if (not (file-exists-p (elisa--vss-path)))
-      (warn "Please run M-x `elisa-download-sqlite-vss' to use this package")
+  (if (not (and elisa-sqlite-vec-path (file-exists-p elisa-sqlite-vec-path)))
+      (warn "Set `elisa-sqlite-vec-path' (or ELISA_VEC0_PATH) to the sqlite-vec vec0 extension")
     (sqlite-pragma db "PRAGMA journal_mode=WAL;")
-    (sqlite-load-extension db (elisa--vector-path))
-    (sqlite-load-extension db (elisa--vss-path))
+    (sqlite-load-extension db elisa-sqlite-vec-path)
     (sqlite-execute db (elisa-embeddings-create-table-sql))
     (sqlite-execute db (elisa-info-create-table-sql))
     (sqlite-execute db (elisa-collections-create-table-sql))
