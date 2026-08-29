@@ -29,10 +29,9 @@
 ;; arc is a fork of ELISA by Sergey Kostyaev
 ;; (http://github.com/s-kostyaev/elisa).  Changes from upstream: the vector
 ;; backend was ported from sqlite-vss to sqlite-vec; the schema gained a
-;; `sources' table carrying per-chunk source identity; web search and
-;; third-party document-conversion services were removed; org-roam node,
-;; NixOS option and Home-Manager option source kinds were added; the answer
-;; UI was replaced.
+;; `sources' table carrying per-chunk source identity; web search, Apache
+;; Tika and pandoc extraction were removed; org-roam node, NixOS option and
+;; Home-Manager option source kinds were added; the answer UI was replaced.
 
 ;;; Commentary:
 ;;
@@ -62,7 +61,7 @@
 
 (defcustom arc-chat-provider (progn (require 'llm-ollama)
 				      (make-llm-ollama
-				       :chat-model "sskostyaev/openchat:8k-rag"
+				       :chat-model "qwen2.5-coder:3b"
 				       :embedding-model "nomic-embed-text"))
   "Chat provider."
   :type '(sexp :validate llm-standard-provider-p))
