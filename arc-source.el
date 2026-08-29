@@ -43,16 +43,26 @@ LINE, when given, is the line number a file link should target."
 
 (defun arc--follow-option (root option)
   "Open OPTION's declaration under ROOT, or report it when ROOT is unset.
-`process-lines' signals an error when the process it runs exits
-non-zero, and `grep' exits 1 whenever it finds nothing -- the routine
-\"not declared here\" case, not a failure.  `ignore-errors' turns that
-into the same \"no declaration found\" report a genuine miss produces,
-rather than letting a plain grep miss surface as a stack trace."
+Branches explicitly on `grep''s exit status instead of treating every
+failure as a miss: 0 is a hit (the first matching file is opened), 1
+is a genuine miss (OPTION really has no declaration under ROOT, an
+ordinary outcome reported via `message'), and anything else -- grep
+missing, a permission error, a bad pattern, a signal -- is a tool
+failure and is reported as one, with its status and whatever grep
+wrote to its output, rather than being misreported as \"no declaration
+found\"."
   (if (and root (file-directory-p root))
-      (let ((hit (car (ignore-errors
-                         (process-lines "grep" "-rl" "--include=*.nix"
-                                        (format "%s" option) root)))))
-        (if hit (find-file hit) (message "arc: no declaration found for %s" option)))
+      (with-temp-buffer
+        (let ((status (call-process "grep" nil (list t t) nil "-rl" "--include=*.nix"
+                                     (format "%s" option) root)))
+          (cond
+           ((eq status 0)
+            (find-file (car (split-string (buffer-string) "\n" t))))
+           ((eq status 1)
+            (message "arc: no declaration found for %s" option))
+           (t
+            (message "arc: grep failed (status %s) looking for %s: %s"
+                     status option (string-trim (buffer-string)))))))
     (message "arc: %s (set arc-nixpkgs-directory to jump to declarations)" option)))
 
 (defun arc-source-register-link-types ()

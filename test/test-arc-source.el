@@ -44,10 +44,32 @@
   (should (assoc "nixopt" org-link-parameters))
   (should (assoc "hmopt" org-link-parameters)))
 
+(ert-deftest as-follow-option-no-root-reports-message ()
+  "With no root configured, report the option instead of erroring."
+  (let ((captured nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (setq captured (apply #'format fmt args)))))
+      (should (arc--follow-option nil "services.syncthing.enable"))
+      (should (stringp captured))
+      (should (string-match-p "services.syncthing.enable" captured)))))
+
+(ert-deftest as-follow-option-hit-opens-file ()
+  "grep exit 0 -- a genuine hit -- opens the file it found."
+  (let* ((tmp (make-temp-file "arc-source-test" t))
+         (nix (expand-file-name "opt.nix" tmp))
+         (opened nil))
+    (unwind-protect
+        (progn
+          (with-temp-file nix (insert "services.syncthing.enable = true;\n"))
+          (cl-letf (((symbol-function 'find-file)
+                     (lambda (file) (setq opened file))))
+            (arc--follow-option tmp "services.syncthing.enable"))
+          (should (equal opened nix)))
+      (delete-directory tmp t))))
+
 (ert-deftest as-follow-option-grep-miss-produces-message-not-error ()
-  "A `grep' miss (exit 1, the normal 'not declared here' case) must
-report via `message', not propagate `process-lines''s non-zero-exit
-error as an uncaught signal."
+  "grep exit 1 (the normal \"not declared here\" case) is reported via
+`message', not raised as an error."
   (let* ((tmp (make-temp-file "arc-source-test" t))
          (captured nil))
     (unwind-protect
@@ -58,14 +80,25 @@ error as an uncaught signal."
           (should (string-match-p "no declaration found" captured)))
       (delete-directory tmp t))))
 
-(ert-deftest as-follow-option-no-root-reports-message ()
-  "With no root configured, report the option instead of erroring."
-  (let ((captured nil))
-    (cl-letf (((symbol-function 'message)
-               (lambda (fmt &rest args) (setq captured (apply #'format fmt args)))))
-      (should (arc--follow-option nil "services.syncthing.enable"))
-      (should (stringp captured))
-      (should (string-match-p "services.syncthing.enable" captured)))))
+(ert-deftest as-follow-option-grep-failure-reports-status-and-output ()
+  "A grep exit status of 2 or more is a genuine tool failure -- grep
+missing, a permission error, a bad pattern -- and must be reported as
+one, not misrepresented as \"no declaration found\"."
+  (let ((tmp (make-temp-file "arc-source-test" t))
+        (captured nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args) (setq captured (apply #'format fmt args))))
+                  ((symbol-function 'call-process)
+                   (lambda (&rest _args)
+                     (insert "grep: /no/such/dir: No such file or directory")
+                     2)))
+          (arc--follow-option tmp "services.syncthing.enable")
+          (should (stringp captured))
+          (should (string-match-p "grep failed" captured))
+          (should (string-match-p "status 2" captured))
+          (should (string-match-p "No such file or directory" captured)))
+      (delete-directory tmp t))))
 
 (provide 'test-arc-source)
 ;;; test-arc-source.el ends here
