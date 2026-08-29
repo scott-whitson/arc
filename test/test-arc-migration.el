@@ -8,14 +8,17 @@
             "/nix/store/77440dch8lnph95xaj5fs634iwvgvmja-sqlite-vec-0.1.6/lib/vec0.so"))
 (require 'arc)
 
-(ert-deftest am-unmigrated-list-has-exactly-six-entries ()
+(ert-deftest am-unmigrated-list-has-exactly-five-entries ()
   "This list may only shrink as Tasks 10/11 migrate each function.
 If it grows, or a migrated entry is left in it, this test should be
 the thing that says so -- update the expected count deliberately.
 Task 10 migrated `arc-parse-info-manual' (it is now a pure function
 returning an alist, with its SQL moved to Task 11's indexer), so the
-count drops from 7 to 6."
-  (should (= (length arc--unmigrated-functions) 6)))
+count dropped from 7 to 6.  Task 11 migrated `arc-retrieve-ask' (its
+query now joins `data' to `sources' via `arc--retrieve-rows', and
+`arc--add-context-row' replaces its old kind dispatch), dropping the
+count from 6 to 5."
+  (should (= (length arc--unmigrated-functions) 5)))
 
 (ert-deftest am-unmigrated-functions-still-exist ()
   "Every guarded symbol must still be a real function.
@@ -33,7 +36,6 @@ naming the owning task, rather than with a raw SQL error."
     (arc-parse-directory . ("x"))
     (arc-remove-collection . ())
     (arc-add-file-to-collection . ("x" "y"))
-    (arc-retrieve-ask . (nil nil))
     (arc-recalculate-embeddings . ()))
   "Dummy arguments, matching each guarded function's arity, used only
 to reach the `arc--not-yet-migrated' call at the top of its body.

@@ -61,14 +61,21 @@
     arc-parse-directory
     arc-remove-collection
     arc-add-file-to-collection
-    arc-retrieve-ask
     arc-recalculate-embeddings)
   "Functions still written against the pre-`sources' schema.
 Task 4 replaced `data(path, hash, data)' and dropped the `files' table;
 these have not been rewritten yet.  Task 11 owns that work and deletes
 each guard as it goes.  `arc-parse-info-manual' was here too, until
 Task 10 rewrote it as a pure function (see `arc-source-info.el') and
-removed its guard.  This list may only shrink.")
+removed its guard.  `arc-retrieve-ask' was here too, until Task 11
+rewrote its query across `data' and `sources' (see `arc--retrieve-rows'
+and `arc--add-context-row' below) and removed its guard -- it is the
+query path, and arc cannot answer a question while it stays guarded.
+The remaining five are collection-management and bulk-reindex
+functions that `arc-index.el''s `arc-index-source' and
+`arc-reindex-all' already supersede; migrating them is not required to
+prove the corpus real or to answer a question, so they stay guarded.
+This list may only shrink.")
 
 (defun arc--not-yet-migrated (fn)
   "Signal that FN has not been ported to the `sources' schema."
@@ -597,35 +604,54 @@ Call ACTION with new prompt."
 	   :on-done action))
       (funcall action prompt))))
 
+(defun arc--retrieve-rows (ids)
+  "Return a (KIND PATH INFO-NODE ORG-ID OPTION-NAME CHUNK) row per id in IDS.
+IDS are `data' row ids (the same rowids `data_embeddings' and
+`data_fts' use).  Joins across to `sources' for whichever locator
+column KIND actually uses; the other three come back nil.  Returns
+nil, rather than erroring, when IDS is empty -- an empty SQL IN-list
+is invalid syntax."
+  (when ids
+    (sqlite-select
+     (arc-db)
+     (format
+      "SELECT s.kind, s.path, s.info_node, s.org_id, s.option_name, d.chunk
+FROM data AS d
+JOIN sources AS s ON s.id = d.source_id
+WHERE d.id IN %s;"
+      (arc-sqlite-format-int-list ids)))))
+
+(defun arc--add-context-row (row)
+  "Add one ROW from `arc--retrieve-rows' to the ellama context.
+A row with no chunk text (the join found no data, which should not
+happen for a live id, but is not this function's place to signal
+that) is silently skipped.  `file' and `info' get arc's pre-existing,
+jump-to-source-noninteractive quote types; the remaining kinds have no
+such type yet, so they go in as plain labelled text -- a citation you
+can read but not yet jump to."
+  (pcase-let ((`(,kind ,path ,info-node ,org-id ,option-name ,chunk) row))
+    (when chunk
+      (pcase kind
+        ("file"
+         (ellama-context-add-file-quote-noninteractive path chunk))
+        ("info"
+         (ellama-context-add-info-node-quote-noninteractive info-node chunk))
+        ("org-node"
+         (ellama-context-add-text (format "org-roam node %s:\n%s" org-id chunk)))
+        ((or "nix-option" "hm-option")
+         (ellama-context-add-text (format "Option %s:\n%s" option-name chunk)))))))
+
 (defun arc-retrieve-ask (query prompt)
   "Retrieve data with QUERY and ask arc for PROMPT."
-  (arc--not-yet-migrated 'arc-retrieve-ask)
   (arc--async-do
    (lambda () (let* ((raw-ids (flatten-tree (sqlite-select (arc-db) query)))
 		     (ids (if arc-reranker-enabled
 			      (arc-rerank prompt raw-ids)
 			    (take arc-limit raw-ids))))
-		(when ids
-		  (sqlite-select
-		   (arc-db)
-		   (format
-		    "SELECT k.name, d.path, d.data
-FROM data AS d
-LEFT JOIN kinds k ON k.rowid = d.kind_id
-WHERE d.rowid in %s;"
-		    (arc-sqlite-format-int-list ids))))))
+		(arc--retrieve-rows ids)))
    (lambda (result)
-     (if result (mapc
-		 (lambda (row)
-		   (when-let ((kind (cl-first row))
-			      (path (cl-second row))
-			      (text (cl-third row)))
-		     (pcase kind
-		       ("file"
-			(ellama-context-add-file-quote-noninteractive path text))
-		       ("info"
-			(ellama-context-add-info-node-quote-noninteractive path text)))))
-		 result)
+     (if result
+         (mapc #'arc--add-context-row result)
        (ellama-context-add-text "No related documents found."))
      (ellama-chat
       (format arc-chat-prompt-template prompt)
