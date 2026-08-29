@@ -2,9 +2,9 @@
 # Run every ERT suite in this directory. Exits non-zero if any suite fails.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-export AUGUR_VEC0_PATH="${AUGUR_VEC0_PATH:-/nix/store/77440dch8lnph95xaj5fs634iwvgvmja-sqlite-vec-0.1.6/lib/vec0.so}"
-if [ ! -f "$AUGUR_VEC0_PATH" ]; then
-  echo "AUGUR_VEC0_PATH does not exist: $AUGUR_VEC0_PATH" >&2
+export ARC_VEC0_PATH="${ARC_VEC0_PATH:-/nix/store/77440dch8lnph95xaj5fs634iwvgvmja-sqlite-vec-0.1.6/lib/vec0.so}"
+if [ ! -f "$ARC_VEC0_PATH" ]; then
+  echo "ARC_VEC0_PATH does not exist: $ARC_VEC0_PATH" >&2
   exit 2
 fi
 fail=0

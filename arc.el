@@ -1,11 +1,11 @@
-;;; augur.el --- Local config-aware oracle for eminix -*- lexical-binding: t -*-
+;;; arc.el --- Local config-aware oracle for eminix -*- lexical-binding: t -*-
 
 ;; Copyright (C) 2024, 2025 Free Software Foundation, Inc.
 ;; Copyright (C) 2026 Scott Whitson
 
 ;; Author: Sergey Kostyaev <sskostyaev@gmail.com>
 ;; Maintainer: Scott Whitson
-;; URL: http://github.com/scott-whitson/augur
+;; URL: http://github.com/scott-whitson/arc
 ;; Keywords: help local tools
 ;; Package-Requires: ((emacs "29.2") (ellama "0.11.2") (llm "0.18.1") (async "1.9.8") (plz "0.9"))
 ;; Version: 0.1.0
@@ -26,7 +26,7 @@
 
 ;;; Changes:
 ;;
-;; augur is a fork of ELISA by Sergey Kostyaev
+;; arc is a fork of ELISA by Sergey Kostyaev
 ;; (http://github.com/s-kostyaev/elisa).  Changes from upstream: the vector
 ;; backend was ported from sqlite-vss to sqlite-vec; the schema gained a
 ;; `sources' table carrying per-chunk source identity; web search, Apache
@@ -35,7 +35,7 @@
 
 ;;; Commentary:
 ;;
-;; augur is a local, offline, config-aware oracle.  It answers Emacs, Elisp,
+;; arc is a local, offline, config-aware oracle.  It answers Emacs, Elisp,
 ;; Linux, NixOS and org-roam questions grounded in this machine's actual
 ;; configuration, and cites sources you can jump to.
 
@@ -51,55 +51,55 @@
 (require 'json)
 (require 'sqlite)
 
-(defgroup augur nil
+(defgroup arc nil
   "RAG implementation for `ellama'."
   :group 'tools)
 
-(defcustom augur-embeddings-provider (progn (require 'llm-ollama)
+(defcustom arc-embeddings-provider (progn (require 'llm-ollama)
 					    (make-llm-ollama
 					     :embedding-model "nomic-embed-text"))
   "Embeddings provider to generate embeddings."
   :type '(sexp :validate llm-standard-provider-p))
 
-(defcustom augur-chat-provider (progn (require 'llm-ollama)
+(defcustom arc-chat-provider (progn (require 'llm-ollama)
 				      (make-llm-ollama
 				       :chat-model "sskostyaev/openchat:8k-rag"
 				       :embedding-model "nomic-embed-text"))
   "Chat provider."
   :type '(sexp :validate llm-standard-provider-p))
 
-(defcustom augur-db-directory (file-truename
+(defcustom arc-db-directory (file-truename
 			       (file-name-concat
-				user-emacs-directory "augur"))
-  "Directory for augur database."
+				user-emacs-directory "arc"))
+  "Directory for arc database."
   :type 'directory)
 
-(defcustom augur-limit 5
+(defcustom arc-limit 5
   "Count quotes to pass into llm context for answer."
   :type 'natnum)
 
-(defcustom augur-find-executable find-program
+(defcustom arc-find-executable find-program
   "Path to find executable."
   :type 'string)
 
-(defcustom augur-tar-executable "tar"
+(defcustom arc-tar-executable "tar"
   "Path to tar executable."
   :type 'string)
 
-(defcustom augur-sqlite-vec-path (getenv "AUGUR_VEC0_PATH")
+(defcustom arc-sqlite-vec-path (getenv "ARC_VEC0_PATH")
   "Path to the sqlite-vec (vec0) loadable extension.
-Defaults to the AUGUR_VEC0_PATH environment variable (set by Nix)."
+Defaults to the ARC_VEC0_PATH environment variable (set by Nix)."
   :type '(choice (const nil) file))
 
-(defcustom augur-semantic-split-function #'augur-split-by-paragraph
+(defcustom arc-semantic-split-function #'arc-split-by-paragraph
   "Function for semantic text split."
   :type 'function)
 
-(defcustom augur-prompt-rewriting-enabled t
+(defcustom arc-prompt-rewriting-enabled t
   "Enable prompt rewriting for better retrieving."
   :type 'boolean)
 
-(defcustom augur-chat-prompt-template
+(defcustom arc-chat-prompt-template
   "Answer user query based on context above. \
 If you can answer it partially do it. \
 Provide list of open questions if any. \
@@ -113,7 +113,7 @@ inserted at the end and all this result prompt will be sent to
 LLM together with context."
   :type 'string)
 
-(defcustom augur-rewrite-prompt-template
+(defcustom arc-rewrite-prompt-template
   "<INSTRUCTIONS>
 You are professional search agent. With given context and user
 prompt you need to create new prompt for search **IN THE SAME
@@ -136,41 +136,41 @@ How to buy a pony?
   "Prompt template for prompt rewriting."
   :type 'string)
 
-(defcustom augur-tika-url "http://localhost:9998/"
+(defcustom arc-tika-url "http://localhost:9998/"
   "Apache tika url for file parsing."
   :type 'string)
 
-(defcustom augur-searxng-url "http://localhost:8080/"
+(defcustom arc-searxng-url "http://localhost:8080/"
   "Searxng url for web search.  Json format should be enabled for this instance."
   :type 'string)
 
-(defcustom augur-pandoc-executable "pandoc"
+(defcustom arc-pandoc-executable "pandoc"
   "Path to pandoc (https://pandoc.org/) executable."
   :type 'string)
 
-(defcustom augur-webpage-extraction-function #'augur-get-webpage-buffer
+(defcustom arc-webpage-extraction-function #'arc-get-webpage-buffer
   "Function to get buffer with webpage content."
   :type 'function)
 
-(defcustom augur-complex-file-extraction-function #'augur-parse-with-tika-buffer
+(defcustom arc-complex-file-extraction-function #'arc-parse-with-tika-buffer
   "Function to get buffer with complex file (like pdf, odt etc.) content."
   :type 'function)
 
-(defcustom augur-web-search-function #'augur-search-duckduckgo
+(defcustom arc-web-search-function #'arc-search-duckduckgo
   "Function to search the web.
 Function should get prompt and return list of urls."
   :type 'function)
 
-(defcustom augur-web-pages-limit 10
+(defcustom arc-web-pages-limit 10
   "Limit of web pages to parse during web search."
   :type 'natnum)
 
-(defcustom augur-breakpoint-threshold-amount 0.4
+(defcustom arc-breakpoint-threshold-amount 0.4
   "Breakpoint threshold amount.
 Increase it if you need decrease semantic split granularity."
   :type 'number)
 
-(defcustom augur-reranker-enabled nil
+(defcustom arc-reranker-enabled nil
   "Enable reranker to improve retrieving quality.
 Reranker is a service to improve answer quality by mesure
 relevance of text chunks to user query and sort chunks by
@@ -178,7 +178,7 @@ relevance.  See https://github.com/s-kostyaev/reranker for more
 details."
   :type 'boolean)
 
-(defcustom augur-reranker-url "http://127.0.0.1:8787/"
+(defcustom arc-reranker-url "http://127.0.0.1:8787/"
   "Reranker service url.
 Reranker is a service to improve answer quality by mesure
 relevance of text chunks to user query and sort chunks by
@@ -186,87 +186,87 @@ relevance.  See https://github.com/s-kostyaev/reranker for more
 details."
   :type 'string)
 
-(defcustom augur-reranker-similarity-threshold 0
+(defcustom arc-reranker-similarity-threshold 0
   "Reranker similarity threshold.
 If set, all quotes with similarity less than threshold will be filtered out."
   :type 'number)
 
-(defcustom augur-reranker-limit 20
+(defcustom arc-reranker-limit 20
   "Number of quotes for send to reranker."
   :type 'integer)
 
-(defcustom augur-ignore-patterns-files '(".gitignore" ".ignore" ".rgignore")
+(defcustom arc-ignore-patterns-files '(".gitignore" ".ignore" ".rgignore")
   "Files with patterns to ignore during file parsing."
   :type '(repeat string))
 
-(defcustom augur-ignore-invisible-files t
+(defcustom arc-ignore-invisible-files t
   "Ignore invisible files and directories during file parsing."
   :type 'boolean)
 
-(defcustom augur-enabled-collections '("builtin manuals" "external manuals")
-  "Enabled collections for augur chat."
+(defcustom arc-enabled-collections '("builtin manuals" "external manuals")
+  "Enabled collections for arc chat."
   :type '(repeat string))
 
-(defcustom augur-supported-complex-document-extensions '("doc" "dot" "ppt" "xls" "rtf" "docx" "pptx" "xlsx" "xlsm" "pdf" "epub" "msg" "odt" "odp" "ods" "odg" "docm")
+(defcustom arc-supported-complex-document-extensions '("doc" "dot" "ppt" "xls" "rtf" "docx" "pptx" "xlsx" "xlsm" "pdf" "epub" "msg" "odt" "odp" "ods" "odg" "docm")
   "Supported complex document file extensions."
   :type '(repeat string))
 
-(defcustom augur-batch-embeddings-enabled nil
+(defcustom arc-batch-embeddings-enabled nil
   "Enable batch embeddings if supported."
   :type 'boolean)
 
-(defcustom augur-batch-size 300
+(defcustom arc-batch-size 300
   "Batch size to send to provider during batch embeddings calculation."
   :type 'integer)
 
-(defun augur-supported-complex-document-p (path)
+(defun arc-supported-complex-document-p (path)
   "Check if PATH contain supported complex document."
   (cl-find (file-name-extension path)
-	   augur-supported-complex-document-extensions :test #'string=))
+	   arc-supported-complex-document-extensions :test #'string=))
 
 
-(defun augur-get-embedding-size ()
+(defun arc-get-embedding-size ()
   "Get embedding size."
-  (length (llm-embedding augur-embeddings-provider "test")))
+  (length (llm-embedding arc-embeddings-provider "test")))
 
-(defun augur-embeddings-create-table-sql ()
+(defun arc-embeddings-create-table-sql ()
   "Generate sql for create embeddings table."
-  "DROP TABLE IF EXISTS augur_embeddings;")
+  "DROP TABLE IF EXISTS arc_embeddings;")
 
-(defun augur-data-embeddings-create-table-sql ()
+(defun arc-data-embeddings-create-table-sql ()
   "Generate sql for create data embeddings table."
   (format "CREATE VIRTUAL TABLE IF NOT EXISTS data_embeddings USING vec0(embedding float[%d]);"
-	  (augur-get-embedding-size)))
+	  (arc-get-embedding-size)))
 
-(defun augur-data-embeddings-drop-table-sql ()
+(defun arc-data-embeddings-drop-table-sql ()
   "Generate sql for drop data embeddings table."
   "DROP TABLE IF EXISTS data_embeddings;")
 
-(defun augur-data-fts-create-table-sql ()
+(defun arc-data-fts-create-table-sql ()
   "Generate sql for create full text search table."
   "CREATE VIRTUAL TABLE IF NOT EXISTS data_fts USING FTS5(data);")
 
-(defun augur-info-create-table-sql ()
+(defun arc-info-create-table-sql ()
   "Generate sql for create info table."
   "DROP TABLE IF EXISTS info;")
 
-(defun augur-collections-create-table-sql ()
+(defun arc-collections-create-table-sql ()
   "Generate sql for create collections table."
   "CREATE TABLE IF NOT EXISTS collections (name TEXT UNIQUE);")
 
-(defun augur-kinds-create-table-sql ()
+(defun arc-kinds-create-table-sql ()
   "Generate sql for create kinds table."
   "CREATE TABLE IF NOT EXISTS kinds (name TEXT UNIQUE);")
 
-(defun augur-fill-kinds-sql ()
+(defun arc-fill-kinds-sql ()
   "Generate sql for fill kinds table."
   "INSERT INTO KINDS (name) VALUES ('web'), ('file'), ('info') ON CONFLICT DO NOTHING;")
 
-(defun augur-files-create-table-sql ()
+(defun arc-files-create-table-sql ()
   "Generate sql for create files table."
   "CREATE TABLE IF NOT EXISTS files (path TEXT UNIQUE, hash TEXT)")
 
-(defun augur-data-create-table-sql ()
+(defun arc-data-create-table-sql ()
   "Generate sql for create data table."
   "CREATE TABLE IF NOT EXISTS data (
 kind_id INTEGER,
@@ -278,33 +278,33 @@ FOREIGN KEY(kind_id) REFERENCES kinds(rowid),
 FOREIGN KEY(collection_id) REFERENCES collections(rowid)
 );")
 
-(defun augur--init-db (db)
-  "Initialize augur DB."
-  (if (not (and augur-sqlite-vec-path (file-exists-p augur-sqlite-vec-path)))
-      (warn "Set `augur-sqlite-vec-path' (or AUGUR_VEC0_PATH) to the sqlite-vec vec0 extension")
+(defun arc--init-db (db)
+  "Initialize arc DB."
+  (if (not (and arc-sqlite-vec-path (file-exists-p arc-sqlite-vec-path)))
+      (warn "Set `arc-sqlite-vec-path' (or ARC_VEC0_PATH) to the sqlite-vec vec0 extension")
     (sqlite-pragma db "PRAGMA journal_mode=WAL;")
-    (sqlite-load-extension db augur-sqlite-vec-path)
-    (sqlite-execute db (augur-embeddings-create-table-sql))
-    (sqlite-execute db (augur-info-create-table-sql))
-    (sqlite-execute db (augur-collections-create-table-sql))
-    (sqlite-execute db (augur-kinds-create-table-sql))
-    (sqlite-execute db (augur-fill-kinds-sql))
-    (sqlite-execute db (augur-files-create-table-sql))
-    (sqlite-execute db (augur-data-create-table-sql))
-    (sqlite-execute db (augur-data-embeddings-create-table-sql))
-    (sqlite-execute db (augur-data-fts-create-table-sql))))
+    (sqlite-load-extension db arc-sqlite-vec-path)
+    (sqlite-execute db (arc-embeddings-create-table-sql))
+    (sqlite-execute db (arc-info-create-table-sql))
+    (sqlite-execute db (arc-collections-create-table-sql))
+    (sqlite-execute db (arc-kinds-create-table-sql))
+    (sqlite-execute db (arc-fill-kinds-sql))
+    (sqlite-execute db (arc-files-create-table-sql))
+    (sqlite-execute db (arc-data-create-table-sql))
+    (sqlite-execute db (arc-data-embeddings-create-table-sql))
+    (sqlite-execute db (arc-data-fts-create-table-sql))))
 
-(defvar augur-db
-  (let ((_ (make-directory augur-db-directory t))
-        (db (sqlite-open (file-name-concat augur-db-directory "augur.sqlite"))))
-    (augur--init-db db)
+(defvar arc-db
+  (let ((_ (make-directory arc-db-directory t))
+        (db (sqlite-open (file-name-concat arc-db-directory "arc.sqlite"))))
+    (arc--init-db db)
     db))
 
-(defun augur-vector-to-sqlite (data)
+(defun arc-vector-to-sqlite (data)
   "Convert DATA to sqlite vector representation."
   (format "vec_f32('%s')" (json-encode data)))
 
-(defun augur-sqlite-escape (string)
+(defun arc-sqlite-escape (string)
   "Escape single quotes in STRING for sqlite."
   (let ((reps '(("'" . "''")
                 ("\\" . "\\\\")
@@ -314,30 +314,30 @@ FOREIGN KEY(collection_id) REFERENCES collections(rowid)
      (lambda (str) (alist-get str reps nil nil #'string=))
      string nil t)))
 
-(defun augur-sqlite-format-int-list (ids)
+(defun arc-sqlite-format-int-list (ids)
   "Convert list of integer IDS list to sqlite list representation."
   (format
    "(%s)"
    (mapconcat (lambda (id) (format "%d" id)) ids ", ")))
 
-(defun augur-sqlite-format-string-list (names)
+(defun arc-sqlite-format-string-list (names)
   "Convert list of string NAMES list to sqlite list representation."
   (format
    "(%s)"
    (mapconcat (lambda (name)
 		(format "'%s'"
-			(augur-sqlite-escape name)))
+			(arc-sqlite-escape name)))
               names ", ")))
 
-(defun augur-avg (list)
+(defun arc-avg (list)
   "Calculate arithmetic average value of LIST."
   (cl-loop for elem in list for count from 0
            summing elem into sum
            finally (return (/ sum (float count)))))
 
-(defun augur-std-dev (lst)
+(defun arc-std-dev (lst)
   "Calculate standart deviation value of LST."
-  (let ((avg (augur-avg lst))
+  (let ((avg (arc-avg lst))
 	(len (length lst)))
     (sqrt (/ (cl-reduce
 	      #'+
@@ -346,52 +346,52 @@ FOREIGN KEY(collection_id) REFERENCES collections(rowid)
 	       lst))
 	     len))))
 
-(defun augur-calculate-threshold (k distances)
+(defun arc-calculate-threshold (k distances)
   "Calculate breakpoint threshold for DISTANCES based on K standard deviations."
-  (+ (augur-avg distances) (* k (augur-std-dev distances))))
+  (+ (arc-avg distances) (* k (arc-std-dev distances))))
 
-(defun augur-string-empty-p (s)
+(defun arc-string-empty-p (s)
   "Check if string S contain only spacing."
   (length= (string-trim s) 0))
 
-(defun augur-filter-strings (chunks)
+(defun arc-filter-strings (chunks)
   "Filter out empty CHUNKS."
-  (cl-remove-if #'augur-string-empty-p chunks))
+  (cl-remove-if #'arc-string-empty-p chunks))
 
-(defun augur-embeddings (chunks)
+(defun arc-embeddings (chunks)
   "Calculate embeddings for CHUNKS.
 Return list of vectors."
-  (let ((provider augur-embeddings-provider))
-    (if (and augur-batch-embeddings-enabled
+  (let ((provider arc-embeddings-provider))
+    (if (and arc-batch-embeddings-enabled
 	     (member 'embeddings-batch (llm-capabilities provider)))
-	(let ((batches (seq-partition chunks augur-batch-size)))
+	(let ((batches (seq-partition chunks arc-batch-size)))
 	  (flatten-list (mapcar (lambda (batch) (llm-batch-embeddings provider (vconcat batch)))
 				batches)))
       (mapcar (lambda (chunk) (llm-embedding provider chunk)) chunks))))
 
-(defun augur-parse-info-manual (name collection-name)
+(defun arc-parse-info-manual (name collection-name)
   "Parse info manual with NAME and save index to COLLECTION-NAME."
   (with-temp-buffer
     (ignore-errors
       (info name (current-buffer))
       (let ((collection-id (or (caar (sqlite-select
-				      augur-db
+				      arc-db
 				      (format
 				       "SELECT rowid FROM collections WHERE name = '%s';"
 				       collection-name)))
 			       (progn
 				 (sqlite-execute
-				  augur-db
+				  arc-db
 				  (format
 				   "INSERT INTO collections (name) VALUES ('%s');"
 				   collection-name))
 				 (caar (sqlite-select
-					augur-db
+					arc-db
 					(format
 					 "SELECT rowid FROM collections WHERE name = '%s';"
 					 collection-name))))))
 	    (kind-id (caar (sqlite-select
-			    augur-db "SELECT rowid FROM kinds WHERE name = 'info';")))
+			    arc-db "SELECT rowid FROM kinds WHERE name = 'info';")))
 	    (continue t)
 	    (parsed-nodes nil))
 	(while continue
@@ -399,40 +399,40 @@ Return list of vectors."
 					 (file-name-nondirectory Info-current-file))
 				    ") "
 				    Info-current-node))
-		 (chunks (augur-split-semantically)))
+		 (chunks (arc-split-semantically)))
 	    (if (not (cl-find node-name parsed-nodes :test 'string-equal))
 		(progn
 		  (mapc
 		   (lambda (text)
 		     (let* ((hash (secure-hash 'sha256 text))
-			    (embedding (llm-embedding augur-embeddings-provider text))
+			    (embedding (llm-embedding arc-embeddings-provider text))
 			    (rowid
 			     (if-let ((rowid (caar (sqlite-select
-						    augur-db
+						    arc-db
 						    (format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';"
 							    kind-id collection-id
-							    (augur-sqlite-escape node-name) hash)))))
+							    (arc-sqlite-escape node-name) hash)))))
 				 nil
 			       (sqlite-execute
-				augur-db
+				arc-db
 				(format
 				 "INSERT INTO data(kind_id, collection_id, path, hash, data) VALUES (%s, %s, '%s', '%s', '%s');"
 				 kind-id collection-id
-				 (augur-sqlite-escape node-name) hash (augur-sqlite-escape text)))
+				 (arc-sqlite-escape node-name) hash (arc-sqlite-escape text)))
 			       (caar (sqlite-select
-				      augur-db
+				      arc-db
 				      (format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';"
 					      kind-id collection-id
-					      (augur-sqlite-escape node-name) hash))))))
+					      (arc-sqlite-escape node-name) hash))))))
 		       (when rowid
 			 (sqlite-execute
-			  augur-db
+			  arc-db
 			  (format "INSERT INTO data_embeddings(rowid, embedding) VALUES (%s, %s);"
-				  rowid (augur-vector-to-sqlite embedding)))
+				  rowid (arc-vector-to-sqlite embedding)))
 			 (sqlite-execute
-			  augur-db
+			  arc-db
 			  (format "INSERT INTO data_fts(rowid, data) VALUES (%s, '%s');"
-				  rowid (augur-sqlite-escape text))))))
+				  rowid (arc-sqlite-escape text))))))
 		   chunks)
 		  (push node-name parsed-nodes)
 		  (condition-case nil
@@ -441,17 +441,17 @@ Return list of vectors."
 		     (setq continue nil))))
 	      (setq continue nil))))))))
 
-(defun augur--find-similar (text collections)
+(defun arc--find-similar (text collections)
   "Find similar to TEXT results in COLLECTIONS.
 Return sqlite query.  For asyncronous execution."
   (let* ((rowids (flatten-tree
 		  (sqlite-select
-		   augur-db
+		   arc-db
 		   (format "SELECT rowid FROM data WHERE collection_id IN
  (
 SELECT rowid FROM collections WHERE name IN %s
 );"
-			   (augur-sqlite-format-string-list collections)))))
+			   (arc-sqlite-format-string-list collections)))))
 	 (query (format "WITH
 vector_search AS (
   SELECT rowid, distance
@@ -489,23 +489,23 @@ SELECT
 FROM hybrid_search
 ;
 "
-			(augur-vector-to-sqlite
-			 (llm-embedding augur-embeddings-provider text))
-			(augur-sqlite-format-int-list rowids)
-			(augur-sqlite-format-int-list rowids)
-			(augur-fts-query text)
-			(augur-get-limit))))
+			(arc-vector-to-sqlite
+			 (llm-embedding arc-embeddings-provider text))
+			(arc-sqlite-format-int-list rowids)
+			(arc-sqlite-format-int-list rowids)
+			(arc-fts-query text)
+			(arc-get-limit))))
     query))
 
-(defun augur-find-similar (text collections on-done)
+(defun arc-find-similar (text collections on-done)
   "Find similar to TEXT results in COLLECTIONS.
 Evaluate ON-DONE with result."
   (message "searching in collected data")
-  (augur--async-do
-   (lambda () (augur--find-similar text collections))
+  (arc--async-do
+   (lambda () (arc--find-similar text collections))
    on-done))
 
-(defun augur--split-by (func)
+(defun arc--split-by (func)
   "Split buffer content to list by FUNC."
   (let ((pt (point-min))
 	(result nil))
@@ -517,66 +517,66 @@ Evaluate ON-DONE with result."
 	(setq pt (point)))
       (nreverse (cl-remove-if #'string-empty-p result)))))
 
-(defun augur-split-by-sentence ()
+(defun arc-split-by-sentence ()
   "Split byffer to list of sentences."
-  (augur--split-by #'forward-sentence))
+  (arc--split-by #'forward-sentence))
 
-(defun augur-split-by-paragraph ()
+(defun arc-split-by-paragraph ()
   "Split buffer to list of paragraphs."
-  (augur--split-by #'forward-paragraph))
+  (arc--split-by #'forward-paragraph))
 
-(defun augur-dot-product (v1 v2)
+(defun arc-dot-product (v1 v2)
   "Calculate the dot produce of vectors V1 and V2."
   (let ((result 0))
     (dotimes (i (length v1))
       (setq result (+ result (* (aref v1 i) (aref v2 i)))))
     result))
 
-(defun augur-magnitude (v)
+(defun arc-magnitude (v)
   "Calculate magnitude of vector V."
   (let ((sum 0))
     (dotimes (i (length v))
       (setq sum (+ sum (* (aref v i) (aref v i)))))
     (sqrt sum)))
 
-(defun augur-cosine-similarity (v1 v2)
+(defun arc-cosine-similarity (v1 v2)
   "Calculate the cosine similarity of V1 and V2.
 The return is a floating point number between 0 and 1, where the
 closer it is to 1, the more similar it is."
-  (let ((dot-product (augur-dot-product v1 v2))
-        (v1-magnitude (augur-magnitude v1))
-        (v2-magnitude (augur-magnitude v2)))
+  (let ((dot-product (arc-dot-product v1 v2))
+        (v1-magnitude (arc-magnitude v1))
+        (v2-magnitude (arc-magnitude v2)))
     (if (and v1-magnitude v2-magnitude)
         (/ dot-product (* v1-magnitude v2-magnitude))
       0)))
 
-(defun augur-cosine-distance (v1 v2)
+(defun arc-cosine-distance (v1 v2)
   "Calculate cosine-distance between V1 and V2."
-  (- 1 (augur-cosine-similarity v1 v2)))
+  (- 1 (arc-cosine-similarity v1 v2)))
 
-(defun augur--similarities (list)
+(defun arc--similarities (list)
   "Calculate cosine similarities between neighbour elements in LIST."
   (let ((head (car list))
 	(tail (cdr list))
 	(result nil))
     (while tail
-      (push (augur-cosine-similarity head (car tail)) result)
+      (push (arc-cosine-similarity head (car tail)) result)
       (setq head (car tail))
       (setq tail (cdr tail)))
     (nreverse result)))
 
-(defun augur--distances (list)
+(defun arc--distances (list)
   "Calculate cosine distances between neighbour elements in LIST."
   (let ((head (car list))
 	(tail (cdr list))
 	(result nil))
     (while tail
-      (push (augur-cosine-distance head (car tail)) result)
+      (push (arc-cosine-distance head (car tail)) result)
       (setq head (car tail))
       (setq tail (cdr tail)))
     (nreverse result)))
 
-(defun augur-split-semantically (&rest args)
+(defun arc-split-semantically (&rest args)
   "Split buffer data semantically.
 ARGS contains keys for fine control.
 
@@ -585,12 +585,12 @@ ARGS contains keys for fine control.
 :threshold-amount K -- K is a breakpoint threshold amount.
 
 than T, it will be packed into single semantic chunk."
-  (if-let* ((func (or (plist-get args :function) augur-semantic-split-function))
-	    (k (or (plist-get args :threshold-amount) augur-breakpoint-threshold-amount))
-	    (chunks (augur-filter-strings (funcall func)))
-	    (embeddings (augur-embeddings chunks))
-	    (distances (augur--distances embeddings))
-	    (threshold (augur-calculate-threshold k distances))
+  (if-let* ((func (or (plist-get args :function) arc-semantic-split-function))
+	    (k (or (plist-get args :threshold-amount) arc-breakpoint-threshold-amount))
+	    (chunks (arc-filter-strings (funcall func)))
+	    (embeddings (arc-embeddings chunks))
+	    (distances (arc--distances embeddings))
+	    (threshold (arc-calculate-threshold k distances))
 	    (current (car chunks))
 	    (tail (cdr chunks)))
       (let* ((result nil))
@@ -610,8 +610,8 @@ than T, it will be packed into single semantic chunk."
 		 (nreverse result))))
     (list (buffer-substring-no-properties (point-min) (point-max)))))
 
-(defun augur--read-ignore-file-regexps (directory)
-  "Read ignore patterns from `augur-ignore-patterns-files' in DIRECTORY."
+(defun arc--read-ignore-file-regexps (directory)
+  "Read ignore patterns from `arc-ignore-patterns-files' in DIRECTORY."
   (mapcar #'wildcard-to-regexp
 	  (flatten-tree
 	   (mapcar (lambda (file)
@@ -620,9 +620,9 @@ than T, it will be packed into single semantic chunk."
 			 (with-temp-buffer
 			   (insert-file-contents filepath)
 			   (split-string (buffer-string) "\n" t)))))
-		   augur-ignore-patterns-files))))
+		   arc-ignore-patterns-files))))
 
-(defun augur--text-file-p (filename)
+(defun arc--text-file-p (filename)
   "Check if FILENAME contain text."
   (or (and (get-file-buffer filename) t) ;; if file opened assume it text
       (with-current-buffer (find-file-noselect filename t t)
@@ -631,10 +631,10 @@ than T, it will be packed into single semantic chunk."
 	    (not (search-forward "\0" nil t 1))
 	  (kill-buffer)))))
 
-(defun augur--file-list (directory)
+(defun arc--file-list (directory)
   "List of files to parse in DIRECTORY."
-  (let ((ignore-regexps (augur--read-ignore-file-regexps directory)))
-    (when augur-ignore-invisible-files
+  (let ((ignore-regexps (arc--read-ignore-file-regexps directory)))
+    (when arc-ignore-invisible-files
       (push "$\\.[^/]*" ignore-regexps)
       (push "/\\.[^/]*" ignore-regexps))
     (seq-filter (lambda (file)
@@ -642,22 +642,22 @@ than T, it will be packed into single semantic chunk."
 					(string-match-p regexp file))
 				      ignore-regexps))
 		       (or
-			(augur-supported-complex-document-p file)
-			(augur--text-file-p file))))
+			(arc-supported-complex-document-p file)
+			(arc--text-file-p file))))
 		(directory-files-recursively directory ".*"))))
 
-(defun augur-parse-file (collection-id path &optional force)
+(defun arc-parse-file (collection-id path &optional force)
   "Parse file PATH for COLLECTION-ID.
 When FORCE parse even if already parsed."
   (let* ((opened (get-file-buffer path))
-	 (buf (if (augur-supported-complex-document-p path)
-		  (funcall augur-complex-file-extraction-function path)
+	 (buf (if (arc-supported-complex-document-p path)
+		  (funcall arc-complex-file-extraction-function path)
 		(or opened (find-file-noselect path t t))))
 	 (hash (secure-hash 'sha256 buf))
 	 (prev-hash (caar (sqlite-select
-			   augur-db
+			   arc-db
 			   (format "SELECT hash FROM files WHERE path = '%s';"
-				   (augur-sqlite-escape path))))))
+				   (arc-sqlite-escape path))))))
     (when (or force
 	      (not prev-hash)
 	      (not (string-equal hash prev-hash)))
@@ -668,123 +668,123 @@ When FORCE parse even if already parsed."
 	(unless enable-multibyte-characters
 	  (decode-coding-region (point-min) (point-max) 'utf-8)
 	  (set-buffer-multibyte t))
-	(let ((chunks (augur-split-semantically))
+	(let ((chunks (arc-split-semantically))
 	      (old-row-ids
 	       (flatten-tree (sqlite-select
-			      augur-db
+			      arc-db
 			      (format "SELECT rowid FROM data WHERE path = '%s';"
-				      (augur-sqlite-escape path)))))
+				      (arc-sqlite-escape path)))))
 	      (row-ids nil)
 	      (kind-id (caar (sqlite-select
-			      augur-db
+			      arc-db
 			      "SELECT rowid FROM kinds WHERE name = 'file';"))))
 	  ;; remove old data
 	  (when prev-hash
 	    (sqlite-execute
-	     augur-db
+	     arc-db
 	     (format "DELETE FROM files WHERE path = '%s';"
-		     (augur-sqlite-escape path))))
+		     (arc-sqlite-escape path))))
 	  ;; add new data
           (dolist (text chunks)
             (let* ((hash (secure-hash 'sha256 text))
 		   (rowid
 		    (if-let ((rowid (caar (sqlite-select
-					   augur-db
+					   arc-db
 					   (format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';"
 						   kind-id collection-id
-						   (augur-sqlite-escape path) hash)))))
+						   (arc-sqlite-escape path) hash)))))
 			(progn
 			  (push rowid row-ids)
 			  nil)
 		      (sqlite-execute
-		       augur-db
+		       arc-db
 		       (format
 			"INSERT INTO data(kind_id, collection_id, path, hash, data) VALUES (%s, %s, '%s', '%s', '%s');"
 			kind-id collection-id
-			(augur-sqlite-escape path) hash (augur-sqlite-escape text)))
+			(arc-sqlite-escape path) hash (arc-sqlite-escape text)))
 		      (caar (sqlite-select
-			     augur-db
+			     arc-db
 			     (format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';"
 				     kind-id collection-id
-				     (augur-sqlite-escape path) hash))))))
+				     (arc-sqlite-escape path) hash))))))
 	      (when rowid
 		(sqlite-execute
-		 augur-db
+		 arc-db
 		 (format "INSERT INTO data_embeddings(rowid, embedding) VALUES (%s, %s);"
-			 rowid (augur-vector-to-sqlite
-				(llm-embedding augur-embeddings-provider text))))
+			 rowid (arc-vector-to-sqlite
+				(llm-embedding arc-embeddings-provider text))))
 		(sqlite-execute
-		 augur-db
+		 arc-db
 		 (format "INSERT INTO data_fts(rowid, data) VALUES (%s, '%s');"
-			 rowid (augur-sqlite-escape text)))
+			 rowid (arc-sqlite-escape text)))
 		(push rowid row-ids))))
 	  ;; remove old data
 	  (when row-ids
 	    (let ((delete-rows (cl-remove-if (lambda (id)
 					       (cl-find id row-ids))
 					     old-row-ids)))
-	      (augur--delete-data delete-rows)))
+	      (arc--delete-data delete-rows)))
 	  ;; save hash to files table
 	  (sqlite-execute
-	   augur-db
+	   arc-db
 	   (format "INSERT INTO files (path, hash) VALUES ('%s', '%s');"
-		   (augur-sqlite-escape path) hash)))))
+		   (arc-sqlite-escape path) hash)))))
     ;; kill buffer if it was not open before parsing
     (when (not opened)
       (kill-buffer buf))))
 
-(defun augur--delete-from-table (table ids)
+(defun arc--delete-from-table (table ids)
   "Delete IDS from TABLE."
   (sqlite-execute
-   augur-db
+   arc-db
    (format "DELETE FROM %s WHERE rowid IN %s;"
 	   table
-	   (augur-sqlite-format-int-list ids))))
+	   (arc-sqlite-format-int-list ids))))
 
-(defun augur--delete-data (ids)
+(defun arc--delete-data (ids)
   "Delete data with IDS."
-  (augur--delete-from-table "data_fts" ids)
-  (augur--delete-from-table "data_embeddings" ids)
-  (augur--delete-from-table "data" ids))
+  (arc--delete-from-table "data_fts" ids)
+  (arc--delete-from-table "data_embeddings" ids)
+  (arc--delete-from-table "data" ids))
 
-(defun augur-parse-directory (dir)
+(defun arc-parse-directory (dir)
   "Parse DIR as new collection syncronously."
   (setq dir (expand-file-name dir))
   (let* ((collection-id (progn
 			  (sqlite-execute
-			   augur-db
+			   arc-db
 			   (format
 			    "INSERT INTO collections (name) VALUES ('%s') ON CONFLICT DO NOTHING;"
-			    (augur-sqlite-escape dir)))
+			    (arc-sqlite-escape dir)))
 			  (caar (sqlite-select
-				 augur-db
+				 arc-db
 				 (format
 				  "SELECT rowid FROM collections WHERE name = '%s';"
-				  (augur-sqlite-escape dir))))))
-	 (files (augur--file-list dir))
+				  (arc-sqlite-escape dir))))))
+	 (files (arc--file-list dir))
 	 (delete-ids (flatten-tree
 		      (sqlite-select
-		       augur-db
+		       arc-db
 		       (format
 			"SELECT rowid FROM data WHERE collection_id = %d AND path NOT IN %s;"
 			collection-id
-			(augur-sqlite-format-string-list files))))))
-    (augur--delete-data delete-ids)
+			(arc-sqlite-format-string-list files))))))
+    (arc--delete-data delete-ids)
     (dolist (file files)
       (message "parsing %s" file)
-      (augur-parse-file collection-id file))))
+      (arc-parse-file collection-id file))))
 
 ;;;###autoload
-(defun augur-async-parse-directory (dir)
+(defun arc-async-parse-directory (dir)
   "Parse DIR as new collection asyncronously."
   (interactive "DSelect directory: ")
-  (augur--async-do (lambda ()
-		     (augur-parse-directory
+  (arc--async-do (lambda ()
+		     (arc-parse-directory
 		      (expand-file-name dir)))))
 
 (defvar eww-accept-content-types)
 
-(defun augur-search-duckduckgo (prompt)
+(defun arc-search-duckduckgo (prompt)
   "Search duckduckgo for PROMPT and return list of urls."
   (require 'eww)
   (let* ((url (format "https://duckduckgo.com/html/?q=%s" (url-hexify-string prompt)))
@@ -812,13 +812,13 @@ When FORCE parse even if already parsed."
 	  'a))
 	:test #'string-equal)))))
 
-(defun augur-starts-with-lowercase-p (string)
+(defun arc-starts-with-lowercase-p (string)
   "Check if STRING start with lowercase character."
   (let ((category (get-char-code-property (seq-first string) 'general-category)))
     (or (eq 'Ll category)
 	(eq 'Ps category))))
 
-(defun augur-dehyphen (text)
+(defun arc-dehyphen (text)
   "Dehyphen TEXT."
   (ignore-errors (with-temp-buffer
 		   (insert (string-join
@@ -834,9 +834,9 @@ When FORCE parse even if already parsed."
 		       (forward-line)))
 		   (buffer-substring-no-properties (point-min) (point-max)))))
 
-(defun augur-parse-with-tika-buffer (file)
+(defun arc-parse-with-tika-buffer (file)
   "Parse FILE with tika."
-  (let* ((url (format "%s/tika" (string-trim-right augur-tika-url "/")))
+  (let* ((url (format "%s/tika" (string-trim-right arc-tika-url "/")))
 	 (buf (plz 'put url :body (list 'file file) :as 'buffer))
 	 (shr-use-fonts nil)
 	 (shr-width (- ellama-long-lines-length 5))
@@ -851,14 +851,14 @@ When FORCE parse even if already parsed."
 				     (string= "" trimmed-text))
 				 (progn (dom-remove-node data elt)
 					nil)
-			       (if (augur-starts-with-lowercase-p trimmed-text)
+			       (if (arc-starts-with-lowercase-p trimmed-text)
 				   (progn
 				     (dom-remove-node data prev-elt)
-				     (dom-node 'p nil (augur-dehyphen
+				     (dom-node 'p nil (arc-dehyphen
 						       (concat
 							(car (dom-children prev-elt))
 							"\n" trimmed-text))))
-				 (dom-node 'p nil (augur-dehyphen trimmed-text))))))
+				 (dom-node 'p nil (arc-dehyphen trimmed-text))))))
 	  (setq prev-elt new-elt)
 	  (setq data (cl-nsubst new-elt elt data :test #'equal))))
       (when (eq (length (dom-children elt)) 0)
@@ -869,16 +869,16 @@ When FORCE parse even if already parsed."
 	(shr-insert-document data))
       buf)))
 
-(defun augur-search-searxng (prompt)
+(defun arc-search-searxng (prompt)
   "Search searxng for PROMPT and return list of urls.
-You can customize `augur-searxng-url' to use non local instance."
-  (let ((url (format "%s/search?format=json&q=%s" augur-searxng-url (url-hexify-string prompt))))
+You can customize `arc-searxng-url' to use non local instance."
+  (let ((url (format "%s/search?format=json&q=%s" arc-searxng-url (url-hexify-string prompt))))
     (thread-last
       (plz 'get url :as #'json-read)
       (alist-get 'results)
       (mapcar (lambda (el) (alist-get 'url el))))))
 
-(defun augur-get-webpage-buffer (url)
+(defun arc-get-webpage-buffer (url)
   "Get buffer with URL content."
   (require 'eww)
   (let ((buffer-name (ignore-errors
@@ -905,17 +905,17 @@ You can customize `augur-searxng-url' to use non local instance."
 	(kill-region (point) (point-max))
 	buffer-name))))
 
-(defun augur-get-webpage-buffer-pandoc (url)
+(defun arc-get-webpage-buffer-pandoc (url)
   "Get buffer with URL content translated to markdown with pandoc."
   (let ((buffer-name (plz 'get url :as 'buffer)))
     (with-current-buffer buffer-name
       (shell-command-on-region
        (point-min) (point-max)
-       (format "%s --from html --to plain" augur-pandoc-executable)
+       (format "%s --from html --to plain" arc-pandoc-executable)
        buffer-name t)
       buffer-name)))
 
-(defun augur-fts-query (prompt)
+(defun arc-fts-query (prompt)
   "Return fts match query for PROMPT."
   (thread-last
     prompt
@@ -926,7 +926,7 @@ You can customize `augur-searxng-url' to use non local instance."
     (string-trim)
     (replace-regexp-in-string "[[:space:]]+" " OR ")))
 
-(defun augur--rerank-request (prompt ids)
+(defun arc--rerank-request (prompt ids)
   "Generate rerank request body for PROMPT and IDS."
   (let ((docs
 	 (mapcar
@@ -935,147 +935,147 @@ You can customize `augur-searxng-url' to use non local instance."
 		  (text (cl-second row)))
 	      `(("id" . ,id) ("text" . ,text))))
 	  (sqlite-select
-	   augur-db
+	   arc-db
 	   (format
 	    "SELECT rowid, data FROM data WHERE rowid IN %s;"
-	    (augur-sqlite-format-int-list ids))))))
+	    (arc-sqlite-format-int-list ids))))))
     (json-encode `(("query" . ,prompt)
 		   ("documents" . ,docs)))))
 
-(defun augur--do-rerank-request (prompt ids)
+(defun arc--do-rerank-request (prompt ids)
   "Call rerank service for PROMPT and IDS."
   (when ids
     (seq--into-list
      (alist-get 'data
 		(plz 'post (format "%s/api/v1/rerank"
-				   (string-remove-suffix "/" augur-reranker-url))
+				   (string-remove-suffix "/" arc-reranker-url))
 		  :headers `(("Content-Type" . "application/json"))
 		  :body-type 'text
-		  :body (augur--rerank-request prompt ids)
+		  :body (arc--rerank-request prompt ids)
 		  :as #'json-read)))))
 
-(defun augur-rerank (prompt ids)
-  "Rerank IDS according to PROMPT and return top `augur-limit' IDS."
-  (let ((data (augur--do-rerank-request prompt ids)))
+(defun arc-rerank (prompt ids)
+  "Rerank IDS according to PROMPT and return top `arc-limit' IDS."
+  (let ((data (arc--do-rerank-request prompt ids)))
     (mapcar (lambda (elt)
 	      (alist-get 'id elt))
-	    (take augur-limit
-		  (if augur-reranker-similarity-threshold
+	    (take arc-limit
+		  (if arc-reranker-similarity-threshold
 		      (cl-remove-if (lambda (obj)
 				      (< (alist-get 'similarity obj)
-					 augur-reranker-similarity-threshold))
+					 arc-reranker-similarity-threshold))
 				    data)
 		    data)))))
 
-(defun augur-get-limit ()
-  "Limit for augur hybrid search."
-  (if augur-reranker-enabled
-      augur-reranker-limit
-    augur-limit))
+(defun arc-get-limit ()
+  "Limit for arc hybrid search."
+  (if arc-reranker-enabled
+      arc-reranker-limit
+    arc-limit))
 
-(defun augur--parse-web-page (collection-id url)
+(defun arc--parse-web-page (collection-id url)
   "Parse URL into collection with COLLECTION-ID."
   (let ((kind-id (caar (sqlite-select
-			augur-db "SELECT rowid FROM kinds WHERE name = 'web';"))))
+			arc-db "SELECT rowid FROM kinds WHERE name = 'web';"))))
     (message "collecting data from %S..." url)
-    (dolist (chunk (augur-extact-webpage-chunks url))
+    (dolist (chunk (arc-extact-webpage-chunks url))
       (let* ((hash (secure-hash 'sha256 chunk))
-	      (embedding (llm-embedding augur-embeddings-provider chunk))
+	      (embedding (llm-embedding arc-embeddings-provider chunk))
 	      (rowid
 	       (if-let ((rowid (caar (sqlite-select
-				      augur-db
+				      arc-db
 				      (format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';" kind-id collection-id url hash)))))
 		   nil
 		 (sqlite-execute
-		  augur-db
+		  arc-db
 		  (format
 		   "INSERT INTO data(kind_id, collection_id, path, hash, data) VALUES (%s, %s, '%s', '%s', '%s');"
-		   kind-id collection-id url hash (augur-sqlite-escape chunk)))
+		   kind-id collection-id url hash (arc-sqlite-escape chunk)))
 		 (caar (sqlite-select
-			augur-db
+			arc-db
 			(format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';" kind-id collection-id url hash))))))
 	 (when rowid
 	   (sqlite-execute
-	    augur-db
+	    arc-db
 	    (format "INSERT INTO data_embeddings(rowid, embedding) VALUES (%s, %s);"
-		    rowid (augur-vector-to-sqlite embedding)))
+		    rowid (arc-vector-to-sqlite embedding)))
 	   (sqlite-execute
-	    augur-db
+	    arc-db
 	    (format "INSERT INTO data_fts(rowid, data) VALUES (%s, '%s');"
-		    rowid (augur-sqlite-escape chunk))))))))
+		    rowid (arc-sqlite-escape chunk))))))))
 
-(defun augur--web-search (prompt)
+(defun arc--web-search (prompt)
   "Search the web for PROMPT.
 Return sqlite query that extract data for adding to context."
   (sqlite-execute
-   augur-db
+   arc-db
    (format
     "INSERT INTO collections (name) VALUES ('%s') ON CONFLICT DO NOTHING;"
-    (augur-sqlite-escape prompt)))
+    (arc-sqlite-escape prompt)))
   (let* ((collection-id (caar (sqlite-select
-			       augur-db
+			       arc-db
 			       (format
 				"SELECT rowid FROM collections WHERE name = '%s';"
-				(augur-sqlite-escape prompt)))))
-	 (urls (funcall augur-web-search-function prompt))
+				(arc-sqlite-escape prompt)))))
+	 (urls (funcall arc-web-search-function prompt))
 	 (collected-pages 0))
     (dolist (url urls)
-      (when (<= collected-pages augur-web-pages-limit)
-	(augur--parse-web-page collection-id url)
+      (when (<= collected-pages arc-web-pages-limit)
+	(arc--parse-web-page collection-id url)
 	(cl-incf collected-pages)))))
 
-(defun augur--rewrite-prompt (prompt action)
-  "Rewrite PROMPT if `augur-prompt-rewriting-enabled'.
+(defun arc--rewrite-prompt (prompt action)
+  "Rewrite PROMPT if `arc-prompt-rewriting-enabled'.
 Call ACTION with new prompt."
   (let ((session (and ellama--current-session-id
 		      (with-current-buffer (ellama-get-session-buffer
 					    ellama--current-session-id)
 			ellama--current-session))))
-    (if (and augur-prompt-rewriting-enabled
+    (if (and arc-prompt-rewriting-enabled
 	     ellama--current-session-id
 	     (string= (llm-name (ellama-session-provider session))
-		      (llm-name augur-chat-provider)))
-	(with-current-buffer (get-buffer-create (make-temp-name "augur"))
+		      (llm-name arc-chat-provider)))
+	(with-current-buffer (get-buffer-create (make-temp-name "arc"))
 	  (ellama-stream
-	   (format augur-rewrite-prompt-template prompt)
+	   (format arc-rewrite-prompt-template prompt)
 	   :session session
 	   :buffer (current-buffer)
-	   :provider augur-chat-provider
+	   :provider arc-chat-provider
 	   :on-done action))
       (funcall action prompt))))
 
 ;;;###autoload
-(defun augur-web-search (prompt)
+(defun arc-web-search (prompt)
   "Search the web for PROMPT."
-  (interactive "sAsk augur with web search: ")
-  (augur--rewrite-prompt prompt #'augur--web-search-internal))
+  (interactive "sAsk arc with web search: ")
+  (arc--rewrite-prompt prompt #'arc--web-search-internal))
 
-(defun augur--web-search-internal (prompt)
+(defun arc--web-search-internal (prompt)
   "Search the web for PROMPT."
   (message "searching the web")
-  (augur--async-do
-   (lambda () (augur--web-search prompt))
+  (arc--async-do
+   (lambda () (arc--web-search prompt))
    (lambda (_)
-     (augur-find-similar
+     (arc-find-similar
       prompt (list prompt)
-      (lambda (query) (augur-retrieve-ask query prompt))))))
+      (lambda (query) (arc-retrieve-ask query prompt))))))
 
-(defun augur-retrieve-ask (query prompt)
-  "Retrieve data with QUERY and ask augur for PROMPT."
-  (augur--async-do
-   (lambda () (let* ((raw-ids (flatten-tree (sqlite-select augur-db query)))
-		     (ids (if augur-reranker-enabled
-			      (augur-rerank prompt raw-ids)
-			    (take augur-limit raw-ids))))
+(defun arc-retrieve-ask (query prompt)
+  "Retrieve data with QUERY and ask arc for PROMPT."
+  (arc--async-do
+   (lambda () (let* ((raw-ids (flatten-tree (sqlite-select arc-db query)))
+		     (ids (if arc-reranker-enabled
+			      (arc-rerank prompt raw-ids)
+			    (take arc-limit raw-ids))))
 		(when ids
 		  (sqlite-select
-		   augur-db
+		   arc-db
 		   (format
 		    "SELECT k.name, d.path, d.data
 FROM data AS d
 LEFT JOIN kinds k ON k.rowid = d.kind_id
 WHERE d.rowid in %s;"
-		    (augur-sqlite-format-int-list ids))))))
+		    (arc-sqlite-format-int-list ids))))))
    (lambda (result)
      (if result (mapc
 		 (lambda (row)
@@ -1092,17 +1092,17 @@ WHERE d.rowid in %s;"
 		 result)
        (ellama-context-add-text "No related documents found."))
      (ellama-chat
-      (format augur-chat-prompt-template prompt)
-      nil :provider augur-chat-provider))))
+      (format arc-chat-prompt-template prompt)
+      nil :provider arc-chat-provider))))
 
-(defun augur--info-valid-p (name)
+(defun arc--info-valid-p (name)
   "Return NAME if info is valid."
   (with-temp-buffer
     (ignore-errors
       (info name (current-buffer))
       name)))
 
-(defun augur-get-builtin-manuals ()
+(defun arc-get-builtin-manuals ()
   "Get builtin manual names list."
   (mapcar
    #'file-name-base
@@ -1114,145 +1114,145 @@ WHERE d.rowid in %s;"
 		       (info "emacs" (current-buffer))
 		       (file-name-directory Info-current-file))))))
 
-(defun augur-get-external-manuals ()
+(defun arc-get-external-manuals ()
   "Get external manual names list."
   (thread-last
     (process-lines
-     augur-find-executable
+     arc-find-executable
      (file-truename (file-name-concat user-emacs-directory "elpa"))
      "-name" "*.info")
     (mapcar #'file-name-base)
     (seq-uniq)
-    (mapcar #'augur--info-valid-p)
+    (mapcar #'arc--info-valid-p)
     (cl-remove-if #'not)))
 
-(defun augur-parse-builtin-manuals ()
+(defun arc-parse-builtin-manuals ()
   "Parse builtin manuals."
   (mapc (lambda (s)
-	  (augur-parse-info-manual s "builtin manuals"))
-	(augur-get-builtin-manuals)))
+	  (arc-parse-info-manual s "builtin manuals"))
+	(arc-get-builtin-manuals)))
 
-(defun augur-parse-external-manuals ()
+(defun arc-parse-external-manuals ()
   "Parse external manuals."
   (mapc (lambda (s)
-	  (augur-parse-info-manual s "external manuals"))
-	(augur-get-external-manuals)))
+	  (arc-parse-info-manual s "external manuals"))
+	(arc-get-external-manuals)))
 
-(defun augur-parse-all-manuals ()
+(defun arc-parse-all-manuals ()
   "Parse all manuals."
-  (augur-parse-builtin-manuals)
-  (augur-parse-external-manuals))
+  (arc-parse-builtin-manuals)
+  (arc-parse-external-manuals))
 
-(defun augur--reopen-db ()
+(defun arc--reopen-db ()
   "Reopen database."
-  (let ((db (sqlite-open (file-name-concat augur-db-directory "augur.sqlite"))))
-    (augur--init-db db)
-    (setq augur-db db)))
+  (let ((db (sqlite-open (file-name-concat arc-db-directory "arc.sqlite"))))
+    (arc--init-db db)
+    (setq arc-db db)))
 
-(defun augur--async-do (func &optional on-done)
+(defun arc--async-do (func &optional on-done)
   "Do FUNC asyncronously.
 Call ON-DONE callback with result as an argument after FUNC evaluation done."
   (let* ((command real-this-command)
 	 (reporter (make-progress-reporter (if command
 					       (prin1-to-string command)
-					     "augur async processing")))
+					     "arc async processing")))
 	 (timer (run-at-time t 0.2 (lambda () (progress-reporter-update reporter)))))
     (async-start `(lambda ()
-		    ,(async-inject-variables "augur-embeddings-provider")
-		    ,(async-inject-variables "augur-db-directory")
-		    ,(async-inject-variables "augur-find-executable")
-		    ,(async-inject-variables "augur-tar-executable")
-		    ,(async-inject-variables "augur-prompt-rewriting-enabled")
-		    ,(async-inject-variables "augur-batch-embeddings-enabled")
-		    ,(async-inject-variables "augur-batch-size")
-		    ,(async-inject-variables "augur-rewrite-prompt-template")
-		    ,(async-inject-variables "augur-semantic-split-function")
-		    ,(async-inject-variables "augur-webpage-extraction-function")
-		    ,(async-inject-variables "augur-supported-complex-document-extensions")
-		    ,(async-inject-variables "augur-complex-file-extraction-function")
-		    ,(async-inject-variables "augur-web-search-function")
-		    ,(async-inject-variables "augur-tika-url")
-		    ,(async-inject-variables "augur-searxng-url")
-		    ,(async-inject-variables "augur-web-pages-limit")
-		    ,(async-inject-variables "augur-breakpoint-threshold-amount")
-		    ,(async-inject-variables "augur-pandoc-executable")
+		    ,(async-inject-variables "arc-embeddings-provider")
+		    ,(async-inject-variables "arc-db-directory")
+		    ,(async-inject-variables "arc-find-executable")
+		    ,(async-inject-variables "arc-tar-executable")
+		    ,(async-inject-variables "arc-prompt-rewriting-enabled")
+		    ,(async-inject-variables "arc-batch-embeddings-enabled")
+		    ,(async-inject-variables "arc-batch-size")
+		    ,(async-inject-variables "arc-rewrite-prompt-template")
+		    ,(async-inject-variables "arc-semantic-split-function")
+		    ,(async-inject-variables "arc-webpage-extraction-function")
+		    ,(async-inject-variables "arc-supported-complex-document-extensions")
+		    ,(async-inject-variables "arc-complex-file-extraction-function")
+		    ,(async-inject-variables "arc-web-search-function")
+		    ,(async-inject-variables "arc-tika-url")
+		    ,(async-inject-variables "arc-searxng-url")
+		    ,(async-inject-variables "arc-web-pages-limit")
+		    ,(async-inject-variables "arc-breakpoint-threshold-amount")
+		    ,(async-inject-variables "arc-pandoc-executable")
 		    ,(async-inject-variables "ellama-long-lines-length")
-		    ,(async-inject-variables "augur-reranker-enabled")
-		    ,(async-inject-variables "augur-sqlite-vec-path")
+		    ,(async-inject-variables "arc-reranker-enabled")
+		    ,(async-inject-variables "arc-sqlite-vec-path")
 		    ,(async-inject-variables "load-path")
 		    ,(async-inject-variables "Info-directory-list")
-		    (require 'augur)
+		    (require 'arc)
 		    (,func))
 		 (lambda (res)
 		   (cancel-timer timer)
 		   (progress-reporter-done reporter)
-		   (sqlite-close augur-db)
-		   (augur--reopen-db)
+		   (sqlite-close arc-db)
+		   (arc--reopen-db)
 		   (when on-done
 		     (funcall on-done res))))))
 
-(defun augur-extact-webpage-chunks (url)
+(defun arc-extact-webpage-chunks (url)
   "Extract semantic chunks for webpage fetched from URL."
-  (when-let ((buf (funcall augur-webpage-extraction-function url)))
+  (when-let ((buf (funcall arc-webpage-extraction-function url)))
     (with-current-buffer buf
-      (augur-split-semantically))))
+      (arc-split-semantically))))
 
 ;;;###autoload
-(defun augur-async-parse-builtin-manuals ()
+(defun arc-async-parse-builtin-manuals ()
   "Parse builtin manuals asyncronously."
   (interactive)
   (message "Begin parsing builtin manuals.")
-  (augur--async-do 'augur-parse-builtin-manuals))
+  (arc--async-do 'arc-parse-builtin-manuals))
 
 ;;;###autoload
-(defun augur-async-parse-external-manuals ()
+(defun arc-async-parse-external-manuals ()
   "Parse external manuals asyncronously."
   (interactive)
   (message "Begin parsing external manuals.")
-  (augur--async-do 'augur-parse-external-manuals))
+  (arc--async-do 'arc-parse-external-manuals))
 
 ;;;###autoload
-(defun augur-async-parse-all-manuals ()
+(defun arc-async-parse-all-manuals ()
   "Parse all manuals asyncronously."
   (interactive)
   (message "Begin parsing manuals.")
-  (augur--async-do 'augur-parse-all-manuals))
+  (arc--async-do 'arc-parse-all-manuals))
 
 ;;;###autoload
-(defun augur-reparse-current-collection ()
+(defun arc-reparse-current-collection ()
   "Incrementally reparse current directory collection.
 It does nothing if buffer file not inside one of existing collections."
   (interactive)
   (when-let* ((collections (flatten-tree
 			    (sqlite-select
-			     augur-db
+			     arc-db
 			     "SELECT name FROM collections;")))
 	      (dirs (cl-remove-if-not #'file-directory-p collections))
 	      (file (buffer-file-name))
 	      (collection (cl-find-if (lambda (dir)
 					(file-in-directory-p file dir))
 				      dirs)))
-    (augur-async-parse-directory collection)))
+    (arc-async-parse-directory collection)))
 
 ;;;###autoload
-(defun augur-disable-collection (&optional collection)
+(defun arc-disable-collection (&optional collection)
   "Disable COLLECTION."
   (interactive)
   (let ((col (or collection
 		 (completing-read
 		  "Disable collection: "
-		  augur-enabled-collections))))
-    (setq augur-enabled-collections
-	  (cl-remove col augur-enabled-collections :test #'string=))))
+		  arc-enabled-collections))))
+    (setq arc-enabled-collections
+	  (cl-remove col arc-enabled-collections :test #'string=))))
 
 ;;;###autoload
-(defun augur-disable-all-collections ()
+(defun arc-disable-all-collections ()
   "Disable all collections."
   (interactive)
-  (mapc #'augur-disable-collection augur-enabled-collections))
+  (mapc #'arc-disable-collection arc-enabled-collections))
 
 ;;;###autoload
-(defun augur-enable-collection (&optional collection)
+(defun arc-enable-collection (&optional collection)
   "Enable COLLECTION."
   (interactive)
   (let ((col (or collection
@@ -1260,39 +1260,39 @@ It does nothing if buffer file not inside one of existing collections."
 		  "Enable collection: "
 		  (cl-remove-if
 		   (lambda (c)
-		     (cl-find c augur-enabled-collections :test #'string=))
+		     (cl-find c arc-enabled-collections :test #'string=))
 		   (flatten-tree
 		    (sqlite-select
-		     augur-db
+		     arc-db
 		     "SELECT name FROM collections;")))))))
-    (push col augur-enabled-collections)))
+    (push col arc-enabled-collections)))
 
 ;;;###autoload
-(defun augur-enable-all-collections ()
+(defun arc-enable-all-collections ()
   "Enable all collections."
   (interactive)
   (let ((all-collections
 	 (flatten-tree
 	  (sqlite-select
-	   augur-db
+	   arc-db
 	   "SELECT DISTINCT name FROM collections;"))))
-    (setq augur-enabled-collections
-	  (cl-set-difference all-collections augur-enabled-collections :test #'string=))
-    (mapc #'augur-enable-collection all-collections)))
+    (setq arc-enabled-collections
+	  (cl-set-difference all-collections arc-enabled-collections :test #'string=))
+    (mapc #'arc-enable-collection all-collections)))
 
 ;;;###autoload
-(defun augur-create-empty-collection (&optional collection)
+(defun arc-create-empty-collection (&optional collection)
   "Create new empty COLLECTION."
   (interactive "sNew collection name: ")
   (save-window-excursion
     (sqlite-execute
-     augur-db
+     arc-db
      (format
       "INSERT INTO collections (name) VALUES ('%s') ON CONFLICT DO NOTHING;"
-      (augur-sqlite-escape collection)))))
+      (arc-sqlite-escape collection)))))
 
 ;;;###autoload
-(defun augur-add-file-to-collection (file collection)
+(defun arc-add-file-to-collection (file collection)
   "Add FILE to COLLECTION."
   (interactive
    (list
@@ -1301,17 +1301,17 @@ It does nothing if buffer file not inside one of existing collections."
      "Enable collection: "
      (flatten-tree
       (sqlite-select
-       augur-db
+       arc-db
        "SELECT name FROM collections;")))))
   (let ((collection-id (caar (sqlite-select
-			      augur-db
+			      arc-db
 			      (format
 			       "SELECT rowid FROM collections WHERE name = '%s';"
-			       (augur-sqlite-escape collection))))))
-    (augur--async-do (lambda () (augur-parse-file collection-id file)))))
+			       (arc-sqlite-escape collection))))))
+    (arc--async-do (lambda () (arc-parse-file collection-id file)))))
 
 ;;;###autoload
-(defun augur-add-webpage-to-collection (url collection)
+(defun arc-add-webpage-to-collection (url collection)
   "Add webpage by URL to COLLECTION."
   (interactive
    (list
@@ -1323,17 +1323,17 @@ It does nothing if buffer file not inside one of existing collections."
      "Enable collection: "
      (flatten-tree
       (sqlite-select
-       augur-db
+       arc-db
        "SELECT name FROM collections;")))))
   (let ((collection-id (caar (sqlite-select
-			      augur-db
+			      arc-db
 			      (format
 			       "SELECT rowid FROM collections WHERE name = '%s';"
-			       (augur-sqlite-escape collection))))))
-    (augur--async-do (lambda () (augur--parse-web-page collection-id url)))))
+			       (arc-sqlite-escape collection))))))
+    (arc--async-do (lambda () (arc--parse-web-page collection-id url)))))
 
 ;;;###autoload
-(defun augur-remove-collection (&optional collection)
+(defun arc-remove-collection (&optional collection)
   "Remove COLLECTION."
   (interactive)
   (let* ((col (or collection
@@ -1341,84 +1341,84 @@ It does nothing if buffer file not inside one of existing collections."
 		   "Enable collection: "
 		   (flatten-tree
 		    (sqlite-select
-		     augur-db
+		     arc-db
 		     "SELECT name FROM collections;")))))
 	 (collection-id (caar (sqlite-select
-			       augur-db
+			       arc-db
 			       (format
 				"SELECT rowid FROM collections WHERE name = '%s';"
-				(augur-sqlite-escape col)))))
+				(arc-sqlite-escape col)))))
 	 (delete-ids (flatten-tree
 		      (sqlite-select
-		       augur-db
+		       arc-db
 		       (format
 			"SELECT rowid FROM data WHERE collection_id = %d;"
 			collection-id)))))
-    (augur-disable-collection col)
+    (arc-disable-collection col)
     (when (file-directory-p col)
       (let ((files
 	     (flatten-tree
 	      (sqlite-select
-	       augur-db
+	       arc-db
 	       (format
 		"SELECT DISTINCT path FROM data WHERE collection_id = %d;"
 		collection-id)))))
 	(sqlite-execute
-	 augur-db
+	 arc-db
 	 (format
 	  "DELETE FROM files WHERE path IN %s;"
-	  (augur-sqlite-format-string-list files)))))
-    (augur--delete-data delete-ids)
+	  (arc-sqlite-format-string-list files)))))
+    (arc--delete-data delete-ids)
     (sqlite-execute
-     augur-db
+     arc-db
      (format
       "DELETE FROM collections WHERE rowid = %d;"
       collection-id))))
 
-(defun augur--gen-chat (&optional collections)
-  "Generate function for chat with augur based on COLLECTIONS."
-  (let ((cols (or collections augur-enabled-collections)))
+(defun arc--gen-chat (&optional collections)
+  "Generate function for chat with arc based on COLLECTIONS."
+  (let ((cols (or collections arc-enabled-collections)))
     (lambda (prompt)
-      (augur-find-similar
+      (arc-find-similar
        prompt cols
-       (lambda (query) (augur-retrieve-ask query prompt))))))
+       (lambda (query) (arc-retrieve-ask query prompt))))))
 
 ;;;###autoload
-(defun augur-chat (prompt &optional collections)
-  "Send PROMPT to augur.
+(defun arc-chat (prompt &optional collections)
+  "Send PROMPT to arc.
 Find similar quotes in COLLECTIONS and add it to context."
-  (interactive "sAsk augur: ")
-  (let ((cols (or collections augur-enabled-collections)))
-    (augur--rewrite-prompt prompt (augur--gen-chat cols))))
+  (interactive "sAsk arc: ")
+  (let ((cols (or collections arc-enabled-collections)))
+    (arc--rewrite-prompt prompt (arc--gen-chat cols))))
 
-(defun augur-recalculate-embeddings ()
+(defun arc-recalculate-embeddings ()
   "Recalculate and save new embeddings after embedding provider change."
-  (sqlite-execute augur-db "DELETE FROM data WHERE data = '';") ;; remove rows without data
-  (let* ((data-rows (sqlite-select augur-db "SELECT rowid, data FROM data;"))
+  (sqlite-execute arc-db "DELETE FROM data WHERE data = '';") ;; remove rows without data
+  (let* ((data-rows (sqlite-select arc-db "SELECT rowid, data FROM data;"))
 	 (texts (mapcar #'cadr data-rows))
 	 (rowids (mapcar #'car data-rows))
-	 (embeddings (augur-embeddings texts))
+	 (embeddings (arc-embeddings texts))
 	 (len (length rowids))
 	 (i 0))
     ;; Recreate embeddings table
-    (sqlite-execute augur-db (augur-data-embeddings-drop-table-sql))
-    (sqlite-execute augur-db (augur-data-embeddings-create-table-sql))
+    (sqlite-execute arc-db (arc-data-embeddings-drop-table-sql))
+    (sqlite-execute arc-db (arc-data-embeddings-create-table-sql))
     ;; Recalculate embeddings
-    (with-sqlite-transaction augur-db
+    (with-sqlite-transaction arc-db
       (while (< i len)
 	(let ((rowid (nth i rowids))
 	      (embedding (nth i embeddings)))
 	  (sqlite-execute
-	   augur-db
+	   arc-db
 	   (format "INSERT INTO data_embeddings(rowid, embedding) VALUES (%s, %s);"
-		   rowid (augur-vector-to-sqlite embedding)))
+		   rowid (arc-vector-to-sqlite embedding)))
 	  (setq i (1+ i)))))))
 
 ;;;###autoload
-(defun augur-async-recalculate-embeddings ()
+(defun arc-async-recalculate-embeddings ()
   "Recalculate embeddings asynchronously."
   (interactive)
-  (augur--async-do 'augur-recalculate-embeddings))
+  (arc--async-do 'arc-recalculate-embeddings))
 
-(provide 'augur)
-;;; augur.el ends here.
+(provide 'arc)
+;;; arc.el ends here.
