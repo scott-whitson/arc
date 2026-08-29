@@ -54,6 +54,24 @@
   "RAG implementation for `ellama'."
   :group 'tools)
 
+(defconst arc--unmigrated-functions
+  '(arc-parse-file
+    arc-parse-directory
+    arc-parse-info-manual
+    arc-remove-collection
+    arc-add-file-to-collection
+    arc-retrieve-ask
+    arc-recalculate-embeddings)
+  "Functions still written against the pre-`sources' schema.
+Task 4 replaced `data(path, hash, data)' and dropped the `files' table;
+these have not been rewritten yet.  Tasks 10 and 11 own that work and
+delete each guard as they go.  This list may only shrink.")
+
+(defun arc--not-yet-migrated (fn)
+  "Signal that FN has not been ported to the `sources' schema."
+  (user-error "arc: `%s' has not been migrated to the sources schema yet \
+(Task 10/11 owns this); it would fail against the current tables" fn))
+
 (defcustom arc-limit 5
   "Count quotes to pass into llm context for answer."
   :type 'natnum)
@@ -207,6 +225,7 @@ Return list of vectors."
 
 (defun arc-parse-info-manual (name collection-name)
   "Parse info manual with NAME and save index to COLLECTION-NAME."
+  (arc--not-yet-migrated 'arc-parse-info-manual)
   (with-temp-buffer
     (ignore-errors
       (info name (current-buffer))
@@ -483,6 +502,7 @@ than T, it will be packed into single semantic chunk."
 (defun arc-parse-file (collection-id path &optional force)
   "Parse file PATH for COLLECTION-ID.
 When FORCE parse even if already parsed."
+  (arc--not-yet-migrated 'arc-parse-file)
   (let* ((opened (get-file-buffer path))
 	 (buf (or opened (find-file-noselect path t t)))
 	 (hash (secure-hash 'sha256 buf))
@@ -581,6 +601,7 @@ When FORCE parse even if already parsed."
 
 (defun arc-parse-directory (dir)
   "Parse DIR as new collection syncronously."
+  (arc--not-yet-migrated 'arc-parse-directory)
   (setq dir (expand-file-name dir))
   (let* ((collection-id (progn
 			  (sqlite-execute
@@ -694,6 +715,7 @@ Call ACTION with new prompt."
 
 (defun arc-retrieve-ask (query prompt)
   "Retrieve data with QUERY and ask arc for PROMPT."
+  (arc--not-yet-migrated 'arc-retrieve-ask)
   (arc--async-do
    (lambda () (let* ((raw-ids (flatten-tree (sqlite-select (arc-db) query)))
 		     (ids (if arc-reranker-enabled
@@ -918,6 +940,7 @@ It does nothing if buffer file not inside one of existing collections."
       (sqlite-select
        (arc-db)
        "SELECT name FROM collections;")))))
+  (arc--not-yet-migrated 'arc-add-file-to-collection)
   (let ((collection-id (caar (sqlite-select
 			      (arc-db)
 			      (format
@@ -929,6 +952,7 @@ It does nothing if buffer file not inside one of existing collections."
 (defun arc-remove-collection (&optional collection)
   "Remove COLLECTION."
   (interactive)
+  (arc--not-yet-migrated 'arc-remove-collection)
   (let* ((col (or collection
 		  (completing-read
 		   "Enable collection: "
@@ -986,6 +1010,7 @@ Find similar quotes in COLLECTIONS and add it to context."
 
 (defun arc-recalculate-embeddings ()
   "Recalculate and save new embeddings after embedding provider change."
+  (arc--not-yet-migrated 'arc-recalculate-embeddings)
   (sqlite-execute (arc-db) "DELETE FROM data WHERE data = '';") ;; remove rows without data
   (let* ((data-rows (sqlite-select (arc-db) "SELECT rowid, data FROM data;"))
 	 (texts (mapcar #'cadr data-rows))
