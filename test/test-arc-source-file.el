@@ -146,3 +146,33 @@ this fix -- it still matches the whole relative path exactly."
             (should-not (member "keys/rafik_host_ed25519" paths))
             (should (member "keys/rafik_host_ed25519.pub" paths))))
       (delete-directory dir t))))
+
+;;; --- Fix round 2: undecodable content excludes a file, even with no
+;;; null byte -- discovered indexing a real agenix `.age' secret. ------
+
+(ert-deftest asf-undecodable-content-is-excluded-even-without-a-null-byte ()
+  "An agenix `.age' secret's ciphertext payload has no null byte, but is
+never valid UTF-8; it must be excluded exactly like a null-byte binary
+file, not chunked and handed to the embeddings API where it crashed
+the whole indexing run when this was still a bug."
+  (let ((dir (make-temp-file "arc-binary-tree" t)))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "a.nix" dir) (insert "{ x = 1; }\n"))
+          (let ((coding-system-for-write 'no-conversion))
+            (write-region (unibyte-string ?\x81 ?\x82 ?\xfe ?\xff)
+                          nil (expand-file-name "secret.age" dir)))
+          (let ((paths (mapcar (lambda (s) (file-name-nondirectory (plist-get s :path)))
+                                (arc-file-sources dir))))
+            (should (member "a.nix" paths))
+            (should-not (member "secret.age" paths))))
+      (delete-directory dir t))))
+
+(ert-deftest asf-text-file-p-rejects-undecodable-bytes-directly ()
+  (let ((f (make-temp-file "arc-binary")))
+    (unwind-protect
+        (progn
+          (let ((coding-system-for-write 'no-conversion))
+            (write-region (unibyte-string ?\x81 ?\x82 ?\xfe ?\xff) nil f))
+          (should-not (arc--text-file-p f)))
+      (delete-file f))))

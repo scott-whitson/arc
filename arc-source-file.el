@@ -86,12 +86,26 @@ see `arc--ignore-pattern-to-regexp'."
                          arc-ignore-patterns-files)))))
 
 (defun arc--text-file-p (filename)
-  "Check if FILENAME contain text."
+  "Check if FILENAME contains text.
+Reads FILENAME the same way `arc-chunk-file' actually will -- decoded,
+not literal -- because that mismatch is precisely the bug this fix
+closes.  The previous version opened FILENAME with RAWFILE (unibyte,
+no decoding attempted) and only checked for a null byte; an agenix
+`.age' secret's ciphertext payload contains no null byte but is
+never valid UTF-8, so it passed as \"text\" here, then failed to
+decode when `arc-chunk-file' read it normally for real, producing
+Emacs's internal `eight-bit' raw-byte characters in the chunked text.
+Those cannot be JSON-encoded for the embeddings API, so indexing
+crashed on the first such file it met -- far from FILENAME, and far
+from this function.  A null byte OR any undecodable byte (surfacing
+as a raw-byte character once decoded) now both mark FILENAME binary."
   (or (and (get-file-buffer filename) t) ;; if file opened assume it text
-      (with-current-buffer (find-file-noselect filename t t)
+      (with-current-buffer (find-file-noselect filename t)
 	(prog1
-	    ;; if there is null byte in file, file is binary
-	    (not (search-forward "\0" nil t 1))
+	    (not (save-excursion
+                   (goto-char (point-min))
+                   (or (search-forward "\0" nil t 1)
+                       (re-search-forward "[\x3FFF80-\x3FFFFF]" nil t))))
 	  (kill-buffer)))))
 
 (defun arc--file-list (directory)

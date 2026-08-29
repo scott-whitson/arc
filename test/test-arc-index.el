@@ -57,3 +57,29 @@
    (let ((stats (arc-index-stats)))
      (should (= (alist-get "file" stats 0 nil #'equal) 1))
      (should (= (alist-get "nix-option" stats 0 nil #'equal) 1)))))
+
+(ert-deftest ai-sanitize-text-replaces-undecodable-bytes ()
+  "A raw-byte pseudo-character must be built via `unibyte-char-to-multibyte',
+not the char literal `?\\x3FFF80' -- the Lisp reader normalizes that literal
+straight back down to plain byte 128 (a real `?\\x80' Unicode char), which
+never matches the sanitizer's raw-byte-only regexp, so a test built that
+way silently tests nothing."
+  (let ((bad (concat "hello " (string (unibyte-char-to-multibyte ?\x80)) " world")))
+    (should (equal (arc--sanitize-text bad) (concat "hello " (string ?\uFFFD) " world")))
+    (should (equal (arc--sanitize-text "plain ascii") "plain ascii"))))
+
+(ert-deftest ai-indexing-a-chunk-with-undecodable-bytes-does-not-crash ()
+  "A real org-roam node hit this: a byte sequence its buffer's coding
+system could not decode reached `llm-embedding' as an Emacs internal
+raw-byte character and could not be JSON-encoded, crashing the whole
+run far from the node responsible. Indexing must sanitize instead of
+crashing, and still write the (now-clean) chunk."
+  (ai-with-temp-db
+   (let ((n (arc-index-source
+             (list :kind "org-node" :org-id "x"
+                   :chunks (list (list :text (concat "alpha " (string (unibyte-char-to-multibyte ?\x80)) " beta")
+                                       :line-start 1 :line-end 1)))
+             "test")))
+     (should (= n 1))
+     (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
+     (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_embeddings;")))))))

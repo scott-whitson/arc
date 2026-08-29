@@ -35,6 +35,26 @@
                        (format "SELECT id FROM collections WHERE name = %s;"
                                (arc--sql-quote name)))))
 
+(defun arc--sanitize-text (text)
+  "Return TEXT with any undecodable byte replaced by U+FFFD.
+Some source content -- a copy-pasted org-roam node, a file in a
+legacy encoding -- can contain a byte sequence its buffer's coding
+system could not decode, surfacing internally as Emacs's `eight-bit'
+raw-byte characters.  `arc--text-file-p' already keeps a wholly
+binary file (an agenix `.age' secret, say) out of the `file' kind
+entirely, but a node or chunk that is otherwise good text with only a
+handful of bad bytes deep inside it -- as happened with a real
+org-roam node pasted from elsewhere -- reaches every kind through
+this one function, not just `file'.  Those raw bytes cannot be
+JSON-encoded for the embeddings API and crash indexing outright, far
+from whatever chunk was responsible.  Replacing them here keeps the
+rest of an otherwise-good chunk searchable instead of losing it
+outright, and does so audibly via `message', not silently."
+  (let ((cleaned (replace-regexp-in-string "[\x3FFF80-\x3FFFFF]" "\uFFFD" text)))
+    (unless (equal cleaned text)
+      (message "arc: replaced undecodable byte(s) in a chunk (%d chars)" (length text)))
+    cleaned))
+
 (defun arc-index-source (source collection)
   "Index SOURCE into COLLECTION.  Return the number of chunks written.
 Existing chunks for the source are deleted first, so reindexing
@@ -56,7 +76,7 @@ replaces rather than duplicates."
           (sqlite-execute (arc-db) (format "DELETE FROM data_fts WHERE rowid IN %s;" idlist)))))
     (sqlite-execute (arc-db) (format "DELETE FROM data WHERE source_id = %d;" sid))
     (dolist (c chunks)
-      (let* ((text (plist-get c :text))
+      (let* ((text (arc--sanitize-text (plist-get c :text)))
              (vec (llm-embedding arc-embeddings-provider text)))
         (sqlite-execute
          (arc-db)
