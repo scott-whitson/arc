@@ -108,6 +108,29 @@ as a raw-byte character once decoded) now both mark FILENAME binary."
                        (re-search-forward "[\x3FFF80-\x3FFFFF]" nil t))))
 	  (kill-buffer)))))
 
+(defcustom arc-secret-denylist
+  '("*.age" "*.gpg" "*.pem" "*.key" "*_ed25519" "id_rsa" "id_ed25519" ".env")
+  "Path/extension patterns always excluded from `arc--file-list',
+regardless of what any ignore file says or does not say.
+`arc--text-file-p' already keeps a WHOLLY BINARY secret (an agenix
+`.age' file's usual ciphertext payload, say) out of the corpus as a
+side effect of its undecodable-byte check, but that is a content
+heuristic, not policy -- an ASCII-armored `.age' or `.gpg' file, or a
+PEM/private-key file that happens to decode as plain text, would sail
+through it untouched.  These patterns remove that whole class up
+front instead of depending on one file's contents ever tripping the
+heuristic.  Uses the same pattern language as
+`arc-ignore-patterns-files' (see `arc--ignore-pattern-to-regexp'): a
+bare name (no slash, e.g. `id_rsa') matches as a path component at any
+depth; a glob (e.g. `*.age') matches a whole path component ending
+that way, likewise at any depth."
+  :type '(repeat string) :group 'arc)
+
+(defun arc--denylisted-p (file)
+  "Return non-nil if FILE matches one of `arc-secret-denylist''s patterns."
+  (seq-some (lambda (regexp) (string-match-p regexp file))
+            (delq nil (mapcar #'arc--ignore-pattern-to-regexp arc-secret-denylist))))
+
 (defun arc--file-list (directory)
   "List of files to parse in DIRECTORY.
 Patterns from an ignore file are matched against each file's path
@@ -119,7 +142,9 @@ prefix to be absent for it to ever match, and would silently never
 exclude anything.  The invisible-file patterns are unanchored
 substring regexps written to look for a `/.' inside a path, so they
 keep matching the absolute path instead, where that substring is
-always present for a dotfile."
+always present for a dotfile.  `arc-secret-denylist' is checked
+unconditionally, independent of any ignore file, invisibility, or
+`arc--text-file-p''s content-based verdict."
   (let ((ignore-regexps (arc--read-ignore-file-regexps directory))
         (invisible-regexps (when arc-ignore-invisible-files
                               (list "$\\.[^/]*" "/\\.[^/]*"))))
@@ -130,6 +155,7 @@ always present for a dotfile."
 				       ignore-regexps))
                        (not (seq-some (lambda (regexp) (string-match-p regexp file))
                                       invisible-regexps))
+                       (not (arc--denylisted-p file))
 		       (arc--text-file-p file)))
 		(directory-files-recursively directory ".*"))))
 

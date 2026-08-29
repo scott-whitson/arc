@@ -176,3 +176,44 @@ the whole indexing run when this was still a bug."
             (write-region (unibyte-string ?\x81 ?\x82 ?\xfe ?\xff) nil f))
           (should-not (arc--text-file-p f)))
       (delete-file f))))
+
+;;; --- Fix round 3 (I9): an explicit secret denylist, not just a content
+;;; heuristic -- an ASCII-armored `.age'/`.gpg' file decodes fine as
+;;; text, so only a denylist keeps it out. ------------------------------
+
+(ert-deftest asf-ascii-armored-age-file-is-denylisted-even-though-it-decodes-as-text ()
+  "An ASCII-armored `.age' file is valid UTF-8 text -- the undecodable-
+byte heuristic in `arc--text-file-p' would never catch it -- so only
+`arc-secret-denylist' can keep it out of the corpus."
+  (let ((dir (make-temp-file "arc-denylist-tree" t)))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "a.nix" dir) (insert "{ x = 1; }\n"))
+          (with-temp-file (expand-file-name "secret.age" dir)
+            (insert "age-encryption.org/v1\n"
+                    "-> X25519 AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ABCDEFG\n"
+                    "SomeBase64LookingLineOfCiphertextGoesRightHere\n"
+                    "--- fake-mac-line-not-real-armor-but-plain-ascii-text\n"
+                    "morefakebytesheretoo\n"))
+          ;; the content-based heuristic alone would let this through
+          (should (arc--text-file-p (expand-file-name "secret.age" dir)))
+          (let ((paths (mapcar (lambda (s) (file-name-nondirectory (plist-get s :path)))
+                                (arc-file-sources dir))))
+            (should (member "a.nix" paths))
+            (should-not (member "secret.age" paths))))
+      (delete-directory dir t))))
+
+(ert-deftest asf-bare-name-denylist-pattern-matches-at-any-depth ()
+  "`id_rsa' (no glob, no slash) must match as a path component at any
+depth, the same as an ordinary gitignore bare name."
+  (let ((dir (make-temp-file "arc-denylist-bare-tree" t)))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "a.nix" dir) (insert "{ x = 1; }\n"))
+          (make-directory (expand-file-name "keys" dir))
+          (with-temp-file (expand-file-name "keys/id_rsa" dir) (insert "-----BEGIN OPENSSH PRIVATE KEY-----\nplain text\n"))
+          (let ((paths (mapcar (lambda (s) (file-relative-name (plist-get s :path) dir))
+                                (arc-file-sources dir))))
+            (should (member "a.nix" paths))
+            (should-not (member "keys/id_rsa" paths))))
+      (delete-directory dir t))))
