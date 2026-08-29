@@ -37,6 +37,60 @@ cache."
       (let ((f (expand-file-name "share/doc/nixos/options.json" out)))
         (and (file-exists-p f) f)))))
 
+(defcustom arc-hm-flake arc-nixopt-flake
+  "Flake whose home-manager input provides Home-Manager's options.json."
+  :type 'directory :group 'arc)
+
+(defcustom arc-hm-options-attr "docs-json"
+  "Attribute (within the Home-Manager flake) that builds options.json.
+The attribute name moves between Home-Manager releases; confirm it
+with `nix flake show home-manager' if the build fails."
+  :type 'string :group 'arc)
+
+(defun arc-hm--locked-flake-ref (flake)
+  "Return a pinned flake reference for FLAKE's home-manager input, or nil.
+Reads FLAKE's flake.lock directly, so the reference matches the exact
+Home-Manager revision this machine actually deploys rather than
+whatever the (mutable, unpinned) nix flake registry entry named
+\"home-manager\" currently resolves to -- those two can and do
+disagree.  Returns nil on any missing file, unexpected shape, or
+non-github input type rather than signalling."
+  (condition-case nil
+      (let* ((lock (with-temp-buffer
+                     (insert-file-contents (expand-file-name "flake.lock" flake))
+                     (goto-char (point-min))
+                     (json-parse-buffer :object-type 'hash-table
+                                        :array-type 'array
+                                        :null-object nil
+                                        :false-object nil)))
+             (nodes (gethash "nodes" lock))
+             (root (gethash (or (gethash "root" lock) "root") nodes))
+             (hm-name (gethash "home-manager" (gethash "inputs" root)))
+             (hm-node (and (stringp hm-name) (gethash hm-name nodes)))
+             (locked (and hm-node (gethash "locked" hm-node))))
+        (when (and locked (equal (gethash "type" locked) "github"))
+          (format "github:%s/%s/%s"
+                  (gethash "owner" locked) (gethash "repo" locked) (gethash "rev" locked))))
+    (error nil)))
+
+(defun arc-hm-options-json-path (&optional flake)
+  "Build and return the path to Home-Manager's options.json, or nil.
+FLAKE defaults to `arc-hm-flake'.  Resolves Home-Manager's exact
+pinned revision from FLAKE's flake.lock and builds `arc-hm-options-attr'
+in that revision -- see `arc-hm--locked-flake-ref'.  Reads stdout only,
+so a build failure on stderr never becomes a spurious path."
+  (let* ((flake (expand-file-name (or flake arc-hm-flake)))
+         (ref (arc-hm--locked-flake-ref flake))
+         (out (and ref
+                   (with-temp-buffer
+                     (if (zerop (call-process "nix" nil (list t nil) nil "build" "--no-link"
+                                              "--print-out-paths"
+                                              (format "%s#%s" ref arc-hm-options-attr)))
+                         (string-trim (buffer-string))
+                       nil)))))
+    (when out
+      (car (directory-files-recursively out "\\`options\\.json\\'")))))
+
 (defun arc--nixopt-text (name spec)
   "Render option NAME with SPEC (a hash-table) as chunk text."
   (let ((type (gethash "type" spec))

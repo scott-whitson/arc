@@ -119,10 +119,8 @@ Derived from $HOME -- never hardcode an absolute home path here."
 
 (defcustom arc-index-plan
   '(("dotfiles" . file) ("eminix" . file) ("vault" . org)
-    ("nix options" . nixopt) ("builtin manuals" . info))
-  "Collections to build and the chunker each uses.
-The hm-option entry is added by Task 12, which defines the path lookup it
-needs; listing it here first would call an undefined function."
+    ("nix options" . nixopt) ("hm options" . hmopt) ("builtin manuals" . info))
+  "Collections to build and the chunker each uses."
   :type '(alist :key-type string :value-type symbol) :group 'arc)
 
 (defcustom arc-index-nixopt-cap nil
@@ -131,6 +129,15 @@ options.json holds 24,661 options; embedding all of them is 20-40
 minutes of sustained CPU/GPU.  Set this to a small number (e.g. 300)
 to prove the ingestion path end-to-end without paying that cost, and
 back to nil for a real full ingest."
+  :type '(choice (const nil) natnum) :group 'arc)
+
+(defcustom arc-index-hmopt-cap nil
+  "Maximum number of Home-Manager options to index, or nil for all of them.
+Home-Manager's options.json is the same shape and a similar order of
+magnitude as NixOS's; see `arc-index-nixopt-cap' for the same
+rationale.  Set this to a small number to prove the ingestion path
+end-to-end without paying the full embedding cost, and back to nil for
+a real full ingest."
   :type '(choice (const nil) natnum) :group 'arc)
 
 (defcustom arc-index-info-cap 150
@@ -170,7 +177,8 @@ rebuilds every entry in the plan."
                                                   (list (list :text (plist-get s :text)
                                                               :line-start 1 :line-end 1)))
                                        name)))
-        ('hmopt  (dolist (s (arc-nixopt-parse-json (arc-hm-options-json-path) "hm-option"))
+        ('hmopt  (dolist (s (let ((all (arc-nixopt-parse-json (arc-hm-options-json-path) "hm-option")))
+                              (if arc-index-hmopt-cap (take arc-index-hmopt-cap all) all)))
                    (arc-index-source (plist-put s :chunks
                                                   (list (list :text (plist-get s :text)
                                                               :line-start 1 :line-end 1)))

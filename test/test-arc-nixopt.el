@@ -38,3 +38,21 @@
 (ert-deftest an-kind-is-passed-through ()
   (should (equal (plist-get (car (arc-nixopt-parse-json an-fixture "hm-option")) :kind)
                  "hm-option")))
+
+(ert-deftest an-hm-path-is-a-function ()
+  (should (fboundp (quote arc-hm-options-json-path))))
+
+(ert-deftest an-hm-path-returns-nil-on-bogus-attr ()
+  ;; a bogus flake attribute must fail the nix build without signalling
+  (let ((arc-hm-options-attr "definitely-not-a-real-attribute"))
+    (should (null (arc-hm-options-json-path)))))
+
+(ert-deftest an-hm-parses-the-shared-fixture ()
+  ;; the HM schema matches the NixOS one, so the same fixture exercises it
+  (let ((opts (arc-nixopt-parse-json an-fixture "hm-option")))
+    (should (cl-every (lambda (o) (equal (plist-get o :kind) "hm-option")) opts))
+    (should (string-match-p "Type: boolean"
+                            (plist-get (cl-find "services.syncthing.enable" opts
+                                                :key (lambda (x) (plist-get x :option-name))
+                                                :test (quote equal))
+                                       :text)))))
