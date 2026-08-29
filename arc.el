@@ -49,6 +49,8 @@
 (require 'json)
 (require 'sqlite)
 (require 'arc-db)
+(require 'arc-source-file) ; arc--file-list, for arc-parse-directory below
+(require 'arc-source-info) ; arc-find-executable, injected into async workers
 
 (defgroup arc nil
   "RAG implementation for `ellama'."
@@ -57,15 +59,16 @@
 (defconst arc--unmigrated-functions
   '(arc-parse-file
     arc-parse-directory
-    arc-parse-info-manual
     arc-remove-collection
     arc-add-file-to-collection
     arc-retrieve-ask
     arc-recalculate-embeddings)
   "Functions still written against the pre-`sources' schema.
 Task 4 replaced `data(path, hash, data)' and dropped the `files' table;
-these have not been rewritten yet.  Tasks 10 and 11 own that work and
-delete each guard as they go.  This list may only shrink.")
+these have not been rewritten yet.  Task 11 owns that work and deletes
+each guard as it goes.  `arc-parse-info-manual' was here too, until
+Task 10 rewrote it as a pure function (see `arc-source-info.el') and
+removed its guard.  This list may only shrink.")
 
 (defun arc--not-yet-migrated (fn)
   "Signal that FN has not been ported to the `sources' schema."
@@ -75,10 +78,6 @@ delete each guard as they go.  This list may only shrink.")
 (defcustom arc-limit 5
   "Count quotes to pass into llm context for answer."
   :type 'natnum)
-
-(defcustom arc-find-executable find-program
-  "Path to find executable."
-  :type 'string)
 
 (defcustom arc-tar-executable "tar"
   "Path to tar executable."
@@ -159,14 +158,6 @@ If set, all quotes with similarity less than threshold will be filtered out."
   "Number of quotes for send to reranker."
   :type 'integer)
 
-(defcustom arc-ignore-patterns-files '(".gitignore" ".ignore" ".rgignore")
-  "Files with patterns to ignore during file parsing."
-  :type '(repeat string))
-
-(defcustom arc-ignore-invisible-files t
-  "Ignore invisible files and directories during file parsing."
-  :type 'boolean)
-
 (defcustom arc-enabled-collections '("builtin manuals" "external manuals")
   "Enabled collections for arc chat."
   :type '(repeat string))
@@ -222,79 +213,6 @@ Return list of vectors."
 	  (flatten-list (mapcar (lambda (batch) (llm-batch-embeddings provider (vconcat batch)))
 				batches)))
       (mapcar (lambda (chunk) (llm-embedding provider chunk)) chunks))))
-
-(defun arc-parse-info-manual (name collection-name)
-  "Parse info manual with NAME and save index to COLLECTION-NAME."
-  (arc--not-yet-migrated 'arc-parse-info-manual)
-  (with-temp-buffer
-    (ignore-errors
-      (info name (current-buffer))
-      (let ((collection-id (or (caar (sqlite-select
-				      (arc-db)
-				      (format
-				       "SELECT rowid FROM collections WHERE name = '%s';"
-				       collection-name)))
-			       (progn
-				 (sqlite-execute
-				  (arc-db)
-				  (format
-				   "INSERT INTO collections (name) VALUES ('%s');"
-				   collection-name))
-				 (caar (sqlite-select
-					(arc-db)
-					(format
-					 "SELECT rowid FROM collections WHERE name = '%s';"
-					 collection-name))))))
-	    (kind-id (caar (sqlite-select
-			    (arc-db) "SELECT rowid FROM kinds WHERE name = 'info';")))
-	    (continue t)
-	    (parsed-nodes nil))
-	(while continue
-	  (let* ((node-name (concat "(" (file-name-sans-extension
-					 (file-name-nondirectory Info-current-file))
-				    ") "
-				    Info-current-node))
-		 (chunks (arc-split-semantically)))
-	    (if (not (cl-find node-name parsed-nodes :test 'string-equal))
-		(progn
-		  (mapc
-		   (lambda (text)
-		     (let* ((hash (secure-hash 'sha256 text))
-			    (embedding (llm-embedding arc-embeddings-provider text))
-			    (rowid
-			     (if-let ((rowid (caar (sqlite-select
-						    (arc-db)
-						    (format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';"
-							    kind-id collection-id
-							    (arc-sqlite-escape node-name) hash)))))
-				 nil
-			       (sqlite-execute
-				(arc-db)
-				(format
-				 "INSERT INTO data(kind_id, collection_id, path, hash, data) VALUES (%s, %s, '%s', '%s', '%s');"
-				 kind-id collection-id
-				 (arc-sqlite-escape node-name) hash (arc-sqlite-escape text)))
-			       (caar (sqlite-select
-				      (arc-db)
-				      (format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';"
-					      kind-id collection-id
-					      (arc-sqlite-escape node-name) hash))))))
-		       (when rowid
-			 (sqlite-execute
-			  (arc-db)
-			  (format "INSERT INTO data_embeddings(rowid, embedding) VALUES (%s, %s);"
-				  rowid (arc-vector-to-sqlite embedding)))
-			 (sqlite-execute
-			  (arc-db)
-			  (format "INSERT INTO data_fts(rowid, data) VALUES (%s, '%s');"
-				  rowid (arc-sqlite-escape text))))))
-		   chunks)
-		  (push node-name parsed-nodes)
-		  (condition-case nil
-		      (funcall-interactively #'Info-forward-node)
-		    (error
-		     (setq continue nil))))
-	      (setq continue nil))))))))
 
 (defun arc--find-similar (text collections)
   "Find similar to TEXT results in COLLECTIONS.
@@ -464,40 +382,6 @@ than T, it will be packed into single semantic chunk."
 		     ""))
 		 (nreverse result))))
     (list (buffer-substring-no-properties (point-min) (point-max)))))
-
-(defun arc--read-ignore-file-regexps (directory)
-  "Read ignore patterns from `arc-ignore-patterns-files' in DIRECTORY."
-  (mapcar #'wildcard-to-regexp
-	  (flatten-tree
-	   (mapcar (lambda (file)
-		     (let ((filepath (expand-file-name file directory)))
-		       (when (file-exists-p filepath)
-			 (with-temp-buffer
-			   (insert-file-contents filepath)
-			   (split-string (buffer-string) "\n" t)))))
-		   arc-ignore-patterns-files))))
-
-(defun arc--text-file-p (filename)
-  "Check if FILENAME contain text."
-  (or (and (get-file-buffer filename) t) ;; if file opened assume it text
-      (with-current-buffer (find-file-noselect filename t t)
-	(prog1
-	    ;; if there is null byte in file, file is binary
-	    (not (search-forward "\0" nil t 1))
-	  (kill-buffer)))))
-
-(defun arc--file-list (directory)
-  "List of files to parse in DIRECTORY."
-  (let ((ignore-regexps (arc--read-ignore-file-regexps directory)))
-    (when arc-ignore-invisible-files
-      (push "$\\.[^/]*" ignore-regexps)
-      (push "/\\.[^/]*" ignore-regexps))
-    (seq-filter (lambda (file)
-		  (and (not (seq-some (lambda (regexp)
-					(string-match-p regexp file))
-				      ignore-regexps))
-		       (arc--text-file-p file)))
-		(directory-files-recursively directory ".*"))))
 
 (defun arc-parse-file (collection-id path &optional force)
   "Parse file PATH for COLLECTION-ID.
@@ -747,53 +631,13 @@ WHERE d.rowid in %s;"
       (format arc-chat-prompt-template prompt)
       nil :provider arc-chat-provider))))
 
-(defun arc--info-valid-p (name)
-  "Return NAME if info is valid."
-  (with-temp-buffer
-    (ignore-errors
-      (info name (current-buffer))
-      name)))
-
-(defun arc-get-builtin-manuals ()
-  "Get builtin manual names list."
-  (mapcar
-   #'file-name-base
-   (cl-remove-if-not
-    (lambda (s)
-      (or (string-suffix-p ".info" s)
-	  (string-suffix-p ".info.gz" s)))
-    (directory-files (with-temp-buffer
-		       (info "emacs" (current-buffer))
-		       (file-name-directory Info-current-file))))))
-
-(defun arc-get-external-manuals ()
-  "Get external manual names list."
-  (thread-last
-    (process-lines
-     arc-find-executable
-     (file-truename (file-name-concat user-emacs-directory "elpa"))
-     "-name" "*.info")
-    (mapcar #'file-name-base)
-    (seq-uniq)
-    (mapcar #'arc--info-valid-p)
-    (cl-remove-if #'not)))
-
-(defun arc-parse-builtin-manuals ()
-  "Parse builtin manuals."
-  (mapc (lambda (s)
-	  (arc-parse-info-manual s "builtin manuals"))
-	(arc-get-builtin-manuals)))
-
-(defun arc-parse-external-manuals ()
-  "Parse external manuals."
-  (mapc (lambda (s)
-	  (arc-parse-info-manual s "external manuals"))
-	(arc-get-external-manuals)))
-
-(defun arc-parse-all-manuals ()
-  "Parse all manuals."
-  (arc-parse-builtin-manuals)
-  (arc-parse-external-manuals))
+;; arc--info-valid-p, arc-get-builtin-manuals, arc-get-external-manuals and
+;; arc-parse-info-manual moved to arc-source-info.el (Task 10).
+;; arc-parse-builtin-manuals, arc-parse-external-manuals and
+;; arc-parse-all-manuals are gone with them: their entire job was calling
+;; the old two-argument arc-parse-info-manual to write a collection
+;; directly to the database, which is precisely the SQL Task 11's indexer
+;; now owns.  Task 11 rebuilds the real entry point on `arc-info-sources'.
 
 (defun arc--reopen-db ()
   "Reopen database."
@@ -834,26 +678,9 @@ Call ON-DONE callback with result as an argument after FUNC evaluation done."
 		   (when on-done
 		     (funcall on-done res))))))
 
-;;;###autoload
-(defun arc-async-parse-builtin-manuals ()
-  "Parse builtin manuals asyncronously."
-  (interactive)
-  (message "Begin parsing builtin manuals.")
-  (arc--async-do 'arc-parse-builtin-manuals))
-
-;;;###autoload
-(defun arc-async-parse-external-manuals ()
-  "Parse external manuals asyncronously."
-  (interactive)
-  (message "Begin parsing external manuals.")
-  (arc--async-do 'arc-parse-external-manuals))
-
-;;;###autoload
-(defun arc-async-parse-all-manuals ()
-  "Parse all manuals asyncronously."
-  (interactive)
-  (message "Begin parsing manuals.")
-  (arc--async-do 'arc-parse-all-manuals))
+;; arc-async-parse-builtin-manuals, arc-async-parse-external-manuals and
+;; arc-async-parse-all-manuals are gone along with the sync functions they
+;; wrapped (see the note above arc--reopen-db).
 
 ;;;###autoload
 (defun arc-reparse-current-collection ()
