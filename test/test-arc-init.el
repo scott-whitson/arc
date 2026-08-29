@@ -18,6 +18,6 @@
   (require 'arc)
   ;; data_embeddings must exist and be a vec0 virtual table
   (let ((sql (caar (sqlite-select
-                    arc-db
+                    (arc-db)
                     "SELECT sql FROM sqlite_master WHERE name = 'data_embeddings';"))))
     (should (string-match-p "USING vec0" sql))))

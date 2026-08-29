@@ -72,6 +72,13 @@
   "Directory for arc database."
   :type 'directory)
 
+(defcustom arc-embedding-size 768
+  "Dimension of the embedding vectors arc stores.
+Must match the embedding model.  nomic-embed-text is 768.  Changing
+this requires reindexing, because the vec0 table is created with a
+fixed width."
+  :type 'integer :group 'arc)
+
 (defcustom arc-limit 5
   "Count quotes to pass into llm context for answer."
   :type 'natnum)
@@ -184,18 +191,14 @@ If set, all quotes with similarity less than threshold will be filtered out."
   "Batch size to send to provider during batch embeddings calculation."
   :type 'integer)
 
-(defun arc-get-embedding-size ()
-  "Get embedding size."
-  (length (llm-embedding arc-embeddings-provider "test")))
-
 (defun arc-embeddings-create-table-sql ()
   "Generate sql for create embeddings table."
   "DROP TABLE IF EXISTS arc_embeddings;")
 
 (defun arc-data-embeddings-create-table-sql ()
-  "Generate sql for create data embeddings table."
+  "Generate sql for creating the vec0 embeddings table."
   (format "CREATE VIRTUAL TABLE IF NOT EXISTS data_embeddings USING vec0(embedding float[%d]);"
-	  (arc-get-embedding-size)))
+	  arc-embedding-size))
 
 (defun arc-data-embeddings-drop-table-sql ()
   "Generate sql for drop data embeddings table."
@@ -261,11 +264,23 @@ FOREIGN KEY(collection_id) REFERENCES collections(rowid)
     (sqlite-execute db (arc-data-embeddings-create-table-sql))
     (sqlite-execute db (arc-data-fts-create-table-sql))))
 
-(defvar arc-db
-  (let ((_ (make-directory arc-db-directory t))
-        (db (sqlite-open (file-name-concat arc-db-directory "arc.sqlite"))))
-    (arc--init-db db)
-    db))
+(defvar arc--db nil
+  "Live sqlite connection, or nil before first use.")
+
+(defun arc-db ()
+  "Return the arc database connection, opening and initializing it if needed."
+  (unless (and arc--db (sqlitep arc--db))
+    (make-directory arc-db-directory t)
+    (setq arc--db (sqlite-open (file-name-concat arc-db-directory "arc.sqlite")))
+    (arc--init-db arc--db))
+  arc--db)
+
+(defun arc-close-db ()
+  "Close the arc database connection, if open."
+  (interactive)
+  (when (and arc--db (sqlitep arc--db))
+    (sqlite-close arc--db))
+  (setq arc--db nil))
 
 (defun arc-vector-to-sqlite (data)
   "Convert DATA to sqlite vector representation."
@@ -342,23 +357,23 @@ Return list of vectors."
     (ignore-errors
       (info name (current-buffer))
       (let ((collection-id (or (caar (sqlite-select
-				      arc-db
+				      (arc-db)
 				      (format
 				       "SELECT rowid FROM collections WHERE name = '%s';"
 				       collection-name)))
 			       (progn
 				 (sqlite-execute
-				  arc-db
+				  (arc-db)
 				  (format
 				   "INSERT INTO collections (name) VALUES ('%s');"
 				   collection-name))
 				 (caar (sqlite-select
-					arc-db
+					(arc-db)
 					(format
 					 "SELECT rowid FROM collections WHERE name = '%s';"
 					 collection-name))))))
 	    (kind-id (caar (sqlite-select
-			    arc-db "SELECT rowid FROM kinds WHERE name = 'info';")))
+			    (arc-db) "SELECT rowid FROM kinds WHERE name = 'info';")))
 	    (continue t)
 	    (parsed-nodes nil))
 	(while continue
@@ -375,29 +390,29 @@ Return list of vectors."
 			    (embedding (llm-embedding arc-embeddings-provider text))
 			    (rowid
 			     (if-let ((rowid (caar (sqlite-select
-						    arc-db
+						    (arc-db)
 						    (format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';"
 							    kind-id collection-id
 							    (arc-sqlite-escape node-name) hash)))))
 				 nil
 			       (sqlite-execute
-				arc-db
+				(arc-db)
 				(format
 				 "INSERT INTO data(kind_id, collection_id, path, hash, data) VALUES (%s, %s, '%s', '%s', '%s');"
 				 kind-id collection-id
 				 (arc-sqlite-escape node-name) hash (arc-sqlite-escape text)))
 			       (caar (sqlite-select
-				      arc-db
+				      (arc-db)
 				      (format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';"
 					      kind-id collection-id
 					      (arc-sqlite-escape node-name) hash))))))
 		       (when rowid
 			 (sqlite-execute
-			  arc-db
+			  (arc-db)
 			  (format "INSERT INTO data_embeddings(rowid, embedding) VALUES (%s, %s);"
 				  rowid (arc-vector-to-sqlite embedding)))
 			 (sqlite-execute
-			  arc-db
+			  (arc-db)
 			  (format "INSERT INTO data_fts(rowid, data) VALUES (%s, '%s');"
 				  rowid (arc-sqlite-escape text))))))
 		   chunks)
@@ -413,7 +428,7 @@ Return list of vectors."
 Return sqlite query.  For asyncronous execution."
   (let* ((rowids (flatten-tree
 		  (sqlite-select
-		   arc-db
+		   (arc-db)
 		   (format "SELECT rowid FROM data WHERE collection_id IN
  (
 SELECT rowid FROM collections WHERE name IN %s
@@ -618,7 +633,7 @@ When FORCE parse even if already parsed."
 	 (buf (or opened (find-file-noselect path t t)))
 	 (hash (secure-hash 'sha256 buf))
 	 (prev-hash (caar (sqlite-select
-			   arc-db
+			   (arc-db)
 			   (format "SELECT hash FROM files WHERE path = '%s';"
 				   (arc-sqlite-escape path))))))
     (when (or force
@@ -634,17 +649,17 @@ When FORCE parse even if already parsed."
 	(let ((chunks (arc-split-semantically))
 	      (old-row-ids
 	       (flatten-tree (sqlite-select
-			      arc-db
+			      (arc-db)
 			      (format "SELECT rowid FROM data WHERE path = '%s';"
 				      (arc-sqlite-escape path)))))
 	      (row-ids nil)
 	      (kind-id (caar (sqlite-select
-			      arc-db
+			      (arc-db)
 			      "SELECT rowid FROM kinds WHERE name = 'file';"))))
 	  ;; remove old data
 	  (when prev-hash
 	    (sqlite-execute
-	     arc-db
+	     (arc-db)
 	     (format "DELETE FROM files WHERE path = '%s';"
 		     (arc-sqlite-escape path))))
 	  ;; add new data
@@ -652,7 +667,7 @@ When FORCE parse even if already parsed."
             (let* ((hash (secure-hash 'sha256 text))
 		   (rowid
 		    (if-let ((rowid (caar (sqlite-select
-					   arc-db
+					   (arc-db)
 					   (format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';"
 						   kind-id collection-id
 						   (arc-sqlite-escape path) hash)))))
@@ -660,24 +675,24 @@ When FORCE parse even if already parsed."
 			  (push rowid row-ids)
 			  nil)
 		      (sqlite-execute
-		       arc-db
+		       (arc-db)
 		       (format
 			"INSERT INTO data(kind_id, collection_id, path, hash, data) VALUES (%s, %s, '%s', '%s', '%s');"
 			kind-id collection-id
 			(arc-sqlite-escape path) hash (arc-sqlite-escape text)))
 		      (caar (sqlite-select
-			     arc-db
+			     (arc-db)
 			     (format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';"
 				     kind-id collection-id
 				     (arc-sqlite-escape path) hash))))))
 	      (when rowid
 		(sqlite-execute
-		 arc-db
+		 (arc-db)
 		 (format "INSERT INTO data_embeddings(rowid, embedding) VALUES (%s, %s);"
 			 rowid (arc-vector-to-sqlite
 				(llm-embedding arc-embeddings-provider text))))
 		(sqlite-execute
-		 arc-db
+		 (arc-db)
 		 (format "INSERT INTO data_fts(rowid, data) VALUES (%s, '%s');"
 			 rowid (arc-sqlite-escape text)))
 		(push rowid row-ids))))
@@ -689,7 +704,7 @@ When FORCE parse even if already parsed."
 	      (arc--delete-data delete-rows)))
 	  ;; save hash to files table
 	  (sqlite-execute
-	   arc-db
+	   (arc-db)
 	   (format "INSERT INTO files (path, hash) VALUES ('%s', '%s');"
 		   (arc-sqlite-escape path) hash)))))
     ;; kill buffer if it was not open before parsing
@@ -699,7 +714,7 @@ When FORCE parse even if already parsed."
 (defun arc--delete-from-table (table ids)
   "Delete IDS from TABLE."
   (sqlite-execute
-   arc-db
+   (arc-db)
    (format "DELETE FROM %s WHERE rowid IN %s;"
 	   table
 	   (arc-sqlite-format-int-list ids))))
@@ -715,19 +730,19 @@ When FORCE parse even if already parsed."
   (setq dir (expand-file-name dir))
   (let* ((collection-id (progn
 			  (sqlite-execute
-			   arc-db
+			   (arc-db)
 			   (format
 			    "INSERT INTO collections (name) VALUES ('%s') ON CONFLICT DO NOTHING;"
 			    (arc-sqlite-escape dir)))
 			  (caar (sqlite-select
-				 arc-db
+				 (arc-db)
 				 (format
 				  "SELECT rowid FROM collections WHERE name = '%s';"
 				  (arc-sqlite-escape dir))))))
 	 (files (arc--file-list dir))
 	 (delete-ids (flatten-tree
 		      (sqlite-select
-		       arc-db
+		       (arc-db)
 		       (format
 			"SELECT rowid FROM data WHERE collection_id = %d AND path NOT IN %s;"
 			collection-id
@@ -765,7 +780,7 @@ When FORCE parse even if already parsed."
 		  (text (cl-second row)))
 	      `(("id" . ,id) ("text" . ,text))))
 	  (sqlite-select
-	   arc-db
+	   (arc-db)
 	   (format
 	    "SELECT rowid, data FROM data WHERE rowid IN %s;"
 	    (arc-sqlite-format-int-list ids))))))
@@ -826,13 +841,13 @@ Call ACTION with new prompt."
 (defun arc-retrieve-ask (query prompt)
   "Retrieve data with QUERY and ask arc for PROMPT."
   (arc--async-do
-   (lambda () (let* ((raw-ids (flatten-tree (sqlite-select arc-db query)))
+   (lambda () (let* ((raw-ids (flatten-tree (sqlite-select (arc-db) query)))
 		     (ids (if arc-reranker-enabled
 			      (arc-rerank prompt raw-ids)
 			    (take arc-limit raw-ids))))
 		(when ids
 		  (sqlite-select
-		   arc-db
+		   (arc-db)
 		   (format
 		    "SELECT k.name, d.path, d.data
 FROM data AS d
@@ -908,7 +923,7 @@ WHERE d.rowid in %s;"
   "Reopen database."
   (let ((db (sqlite-open (file-name-concat arc-db-directory "arc.sqlite"))))
     (arc--init-db db)
-    (setq arc-db db)))
+    (setq arc--db db)))
 
 (defun arc--async-do (func &optional on-done)
   "Do FUNC asyncronously.
@@ -938,7 +953,7 @@ Call ON-DONE callback with result as an argument after FUNC evaluation done."
 		 (lambda (res)
 		   (cancel-timer timer)
 		   (progress-reporter-done reporter)
-		   (sqlite-close arc-db)
+		   (arc-close-db)
 		   (arc--reopen-db)
 		   (when on-done
 		     (funcall on-done res))))))
@@ -971,7 +986,7 @@ It does nothing if buffer file not inside one of existing collections."
   (interactive)
   (when-let* ((collections (flatten-tree
 			    (sqlite-select
-			     arc-db
+			     (arc-db)
 			     "SELECT name FROM collections;")))
 	      (dirs (cl-remove-if-not #'file-directory-p collections))
 	      (file (buffer-file-name))
@@ -1009,7 +1024,7 @@ It does nothing if buffer file not inside one of existing collections."
 		     (cl-find c arc-enabled-collections :test #'string=))
 		   (flatten-tree
 		    (sqlite-select
-		     arc-db
+		     (arc-db)
 		     "SELECT name FROM collections;")))))))
     (push col arc-enabled-collections)))
 
@@ -1020,7 +1035,7 @@ It does nothing if buffer file not inside one of existing collections."
   (let ((all-collections
 	 (flatten-tree
 	  (sqlite-select
-	   arc-db
+	   (arc-db)
 	   "SELECT DISTINCT name FROM collections;"))))
     (setq arc-enabled-collections
 	  (cl-set-difference all-collections arc-enabled-collections :test #'string=))
@@ -1032,7 +1047,7 @@ It does nothing if buffer file not inside one of existing collections."
   (interactive "sNew collection name: ")
   (save-window-excursion
     (sqlite-execute
-     arc-db
+     (arc-db)
      (format
       "INSERT INTO collections (name) VALUES ('%s') ON CONFLICT DO NOTHING;"
       (arc-sqlite-escape collection)))))
@@ -1047,10 +1062,10 @@ It does nothing if buffer file not inside one of existing collections."
      "Enable collection: "
      (flatten-tree
       (sqlite-select
-       arc-db
+       (arc-db)
        "SELECT name FROM collections;")))))
   (let ((collection-id (caar (sqlite-select
-			      arc-db
+			      (arc-db)
 			      (format
 			       "SELECT rowid FROM collections WHERE name = '%s';"
 			       (arc-sqlite-escape collection))))))
@@ -1065,16 +1080,16 @@ It does nothing if buffer file not inside one of existing collections."
 		   "Enable collection: "
 		   (flatten-tree
 		    (sqlite-select
-		     arc-db
+		     (arc-db)
 		     "SELECT name FROM collections;")))))
 	 (collection-id (caar (sqlite-select
-			       arc-db
+			       (arc-db)
 			       (format
 				"SELECT rowid FROM collections WHERE name = '%s';"
 				(arc-sqlite-escape col)))))
 	 (delete-ids (flatten-tree
 		      (sqlite-select
-		       arc-db
+		       (arc-db)
 		       (format
 			"SELECT rowid FROM data WHERE collection_id = %d;"
 			collection-id)))))
@@ -1083,18 +1098,18 @@ It does nothing if buffer file not inside one of existing collections."
       (let ((files
 	     (flatten-tree
 	      (sqlite-select
-	       arc-db
+	       (arc-db)
 	       (format
 		"SELECT DISTINCT path FROM data WHERE collection_id = %d;"
 		collection-id)))))
 	(sqlite-execute
-	 arc-db
+	 (arc-db)
 	 (format
 	  "DELETE FROM files WHERE path IN %s;"
 	  (arc-sqlite-format-string-list files)))))
     (arc--delete-data delete-ids)
     (sqlite-execute
-     arc-db
+     (arc-db)
      (format
       "DELETE FROM collections WHERE rowid = %d;"
       collection-id))))
@@ -1117,23 +1132,23 @@ Find similar quotes in COLLECTIONS and add it to context."
 
 (defun arc-recalculate-embeddings ()
   "Recalculate and save new embeddings after embedding provider change."
-  (sqlite-execute arc-db "DELETE FROM data WHERE data = '';") ;; remove rows without data
-  (let* ((data-rows (sqlite-select arc-db "SELECT rowid, data FROM data;"))
+  (sqlite-execute (arc-db) "DELETE FROM data WHERE data = '';") ;; remove rows without data
+  (let* ((data-rows (sqlite-select (arc-db) "SELECT rowid, data FROM data;"))
 	 (texts (mapcar #'cadr data-rows))
 	 (rowids (mapcar #'car data-rows))
 	 (embeddings (arc-embeddings texts))
 	 (len (length rowids))
 	 (i 0))
     ;; Recreate embeddings table
-    (sqlite-execute arc-db (arc-data-embeddings-drop-table-sql))
-    (sqlite-execute arc-db (arc-data-embeddings-create-table-sql))
+    (sqlite-execute (arc-db) (arc-data-embeddings-drop-table-sql))
+    (sqlite-execute (arc-db) (arc-data-embeddings-create-table-sql))
     ;; Recalculate embeddings
-    (with-sqlite-transaction arc-db
+    (with-sqlite-transaction (arc-db)
       (while (< i len)
 	(let ((rowid (nth i rowids))
 	      (embedding (nth i embeddings)))
 	  (sqlite-execute
-	   arc-db
+	   (arc-db)
 	   (format "INSERT INTO data_embeddings(rowid, embedding) VALUES (%s, %s);"
 		   rowid (arc-vector-to-sqlite embedding)))
 	  (setq i (1+ i)))))))
