@@ -56,3 +56,10 @@
                                                 :key (lambda (x) (plist-get x :option-name))
                                                 :test (quote equal))
                                        :text)))))
+
+(ert-deftest an-sources-carry-chunks ()
+  "Every source `arc-nixopt-parse-json' returns must carry :chunks, not
+just :text -- `arc-index-source' reads only :chunks."
+  (dolist (o (arc-nixopt-parse-json an-fixture "nix-option"))
+    (should (= (length (plist-get o :chunks)) 1))
+    (should (equal (plist-get (car (plist-get o :chunks)) :text) (plist-get o :text)))))

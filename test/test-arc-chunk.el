@@ -109,3 +109,44 @@
     (should (equal (list (plist-get (nth 1 chunks) :line-start)
                          (plist-get (nth 1 chunks) :line-end))
                    '(5 7)))))
+
+;;; --- arc-chunk-text: a size ceiling for oversized nodes ---------------
+;; Live org-roam notes as large as 436 KB have been seen as a single node
+;; with no chunking at all; `nomic-embed-text' truncates far below that, so
+;; the note's one chunk embedded a vector describing about 2% of its real
+;; content.  `arc-chunk-text' exists so a producer (arc-source-org.el) can
+;; split an oversized node on paragraph boundaries while leaving an
+;; ordinary small node as exactly one chunk.
+
+(ert-deftest act-small-text-is-one-chunk-even-with-blank-lines ()
+  "A node under the ceiling stays one chunk, even with paragraph breaks
+inside it -- splitting every small note on its blank lines would be a
+regression, not a fix."
+  (let ((arc-chunk-size-ceiling 4000))
+    (let ((chunks (arc-chunk-text "para one\n\npara two\n\npara three\n")))
+      (should (= (length chunks) 1))
+      (should (string-match-p "para one" (plist-get (car chunks) :text)))
+      (should (string-match-p "para three" (plist-get (car chunks) :text))))))
+
+(ert-deftest act-oversized-text-splits-on-paragraph-boundaries ()
+  "Text over the ceiling is split like `arc-chunk-buffer' would, and no
+chunk exceeds the ceiling."
+  (let* ((arc-chunk-size-ceiling 50)
+         (text (mapconcat (lambda (n) (format "paragraph number %d, padded out a bit" n))
+                          (number-sequence 1 10) "\n\n"))
+         (chunks (arc-chunk-text text)))
+    (should (> (length chunks) 1))
+    (should (cl-every (lambda (c) (<= (length (plist-get c :text)) 100)) chunks))
+    ;; every non-blank line of the input shows up somewhere in the chunks
+    (should (string-match-p "paragraph number 1," (plist-get (car chunks) :text)))
+    (should (string-match-p "paragraph number 10," (plist-get (car (last chunks)) :text)))))
+
+(ert-deftest act-oversized-text-line-numbers-are-internally-consistent ()
+  (let* ((arc-chunk-size-ceiling 10)
+         (chunks (arc-chunk-text "alpha\n\nbeta\n\ngamma\n")))
+    (should (> (length chunks) 1))
+    (dolist (c chunks)
+      (should (<= (plist-get c :line-start) (plist-get c :line-end))))))
+
+(ert-deftest act-empty-text-produces-no-chunks ()
+  (should (null (arc-chunk-text "   \n\n  "))))

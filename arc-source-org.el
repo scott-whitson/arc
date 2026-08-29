@@ -27,6 +27,7 @@
 (require 'org)
 (require 'org-element)
 (require 'subr-x)
+(require 'arc-chunk) ; arc-chunk-text, for oversized nodes -- see arc--org-node-chunks
 
 (defun arc--org-file-keyword (key)
   "Return the value of #+KEY in the current buffer, or nil."
@@ -40,17 +41,30 @@
   (let ((raw (arc--org-file-keyword "filetags")))
     (and raw (split-string raw ":" t))))
 
+(defun arc--org-node-chunks (text)
+  "Return TEXT as a list of chunk plists, splitting it if it is oversized.
+`arc-chunk-text' (arc-chunk.el) keeps a small node -- the overwhelming
+majority -- as exactly one chunk, and only splits on paragraph
+boundaries once TEXT exceeds `arc-chunk-size-ceiling'.  This matters
+for org-roam nodes specifically: live notes as large as 436 KB have
+been seen as a single node, and `nomic-embed-text' truncates far below
+that, so the one chunk arc used to emit for an oversized node embedded
+a vector describing only a couple of percent of its actual content."
+  (arc-chunk-text text))
+
 (defun arc--org-file-node (path)
   "Return the file-level node plist for PATH, or nil if it has no ID."
   (save-excursion
     (goto-char (point-min))
     (let ((id (org-entry-get (point-min) "ID")))
       (when id
-        (list :kind "org-node" :org-id id :path path
-              :title (or (arc--org-file-keyword "title")
-                         (file-name-base path))
-              :tags (arc--org-filetags)
-              :text (buffer-substring-no-properties (point-min) (point-max)))))))
+        (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+          (list :kind "org-node" :org-id id :path path
+                :title (or (arc--org-file-keyword "title")
+                           (file-name-base path))
+                :tags (arc--org-filetags)
+                :text text
+                :chunks (arc--org-node-chunks text)))))))
 
 (defun arc--org-heading-nodes (path)
   "Return node plists for every ID-carrying heading in the current buffer."
@@ -59,13 +73,15 @@
      (lambda ()
        (let ((id (org-entry-get (point) "ID")))
          (when id
-           (push (list :kind "org-node" :org-id id :path path
-                       :title (org-get-heading t t t t)
-                       :tags (org-get-tags)
-                       :text (save-restriction
-                               (org-narrow-to-subtree)
-                               (buffer-substring-no-properties (point-min) (point-max))))
-                 nodes))))
+           (let ((text (save-restriction
+                         (org-narrow-to-subtree)
+                         (buffer-substring-no-properties (point-min) (point-max)))))
+             (push (list :kind "org-node" :org-id id :path path
+                         :title (org-get-heading t t t t)
+                         :tags (org-get-tags)
+                         :text text
+                         :chunks (arc--org-node-chunks text))
+                   nodes)))))
      nil nil)
     (nreverse nodes)))
 

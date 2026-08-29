@@ -71,5 +71,32 @@ Without it, split on blank lines.  Return a list of plists with :text,
     (insert-file-contents path)
     (arc-chunk-buffer (arc--boundary-for path))))
 
+(defcustom arc-chunk-size-ceiling 4000
+  "Split text into multiple chunks once it exceeds this many characters.
+Below the ceiling, `arc-chunk-text' returns the whole text as a single
+chunk even when it contains internal paragraph breaks -- an ordinary
+short node still becomes exactly one chunk, same as before this
+existed.  `nomic-embed-text' truncates a chunk far below this: a real
+436 KB org-roam note was seen embedding to a vector describing about
+2% of its actual content, because the whole note was one chunk.  4000
+characters is comfortably inside the embedding model's practical
+window and comfortably above a typical note's size, so splitting only
+kicks in once it would actually matter."
+  :type 'natnum :group 'arc)
+
+(defun arc-chunk-text (text &optional boundary)
+  "Return TEXT (an arbitrary string, not necessarily a file's contents)
+as a list of chunk plists with :text, :line-start and :line-end.
+When TEXT is at or under `arc-chunk-size-ceiling', it comes back as one
+chunk covering the whole thing.  Otherwise it is split exactly as
+`arc-chunk-buffer' would (on BOUNDARY when given, else paragraph
+breaks), so a large node's chunks still carry correct, internally
+consistent line numbers instead of a placeholder."
+  (with-temp-buffer
+    (insert text)
+    (if (<= (length text) arc-chunk-size-ceiling)
+        (arc--chunk-push nil (point-min) (point-max))
+      (arc-chunk-buffer boundary))))
+
 (provide 'arc-chunk)
 ;;; arc-chunk.el ends here

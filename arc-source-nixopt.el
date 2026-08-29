@@ -108,8 +108,10 @@ so a build failure on stderr never becomes a spurious path."
 
 (defun arc-nixopt-parse-json (path kind)
   "Parse the options.json at PATH into source plists of KIND.
-Each plist has :kind, :option-name, :path (the first declaration) and
-:text."
+Each plist has :kind, :option-name, :path (the first declaration),
+:text and :chunks (a single chunk wrapping :text -- an option's
+rendered text is already one self-contained unit, never large enough
+to need splitting the way an org-roam node can be)."
   (let ((json (with-temp-buffer
                 (insert-file-contents path)
                 (goto-char (point-min))
@@ -120,11 +122,13 @@ Each plist has :kind, :option-name, :path (the first declaration) and
         (out nil))
     (maphash
      (lambda (name spec)
-       (let ((decls (gethash "declarations" spec)))
+       (let* ((decls (gethash "declarations" spec))
+              (text (arc--nixopt-text name spec)))
          (push (list :kind kind
                      :option-name name
                      :path (and decls (> (length decls) 0) (aref decls 0))
-                     :text (arc--nixopt-text name spec))
+                     :text text
+                     :chunks (list (list :text text :line-start 1 :line-end 1)))
                out)))
      json)
     (nreverse out)))
