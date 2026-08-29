@@ -52,7 +52,60 @@
   (let ((chunks (arc-chunk-file (ac-fixture "sample-single-line.txt"))))
     (should (= (length chunks) 1))
     (should (= (plist-get (nth 0 chunks) :line-start) 1))
+    (should (= (plist-get (nth 0 chunks) :line-end) 1))
     (should (string-match-p "Only one line here" (plist-get (nth 0 chunks) :text)))))
 
 (ert-deftest ac-all-blank-file-produces-no-chunks ()
   (should (equal (arc-chunk-file (ac-fixture "sample-blank.txt")) nil)))
+
+
+;; Exact :line-end values, counted by hand from the fixtures (not derived
+;; by running the code): a chunk's :line-end must name its own last
+;; non-blank content line, never the next chunk's first line.
+;;
+;; test/fixtures/sample.nix, 12 lines:
+;;   1  { pkgs, ... }:
+;;   2  {
+;;   3    services.syncthing = {
+;;   4      enable = true;
+;;   5      guiAddress = "127.0.0.1:8385";
+;;   6    };
+;;   7  (blank)
+;;   8    services.openssh = {
+;;   9      enable = true;
+;;   10     ports = [ 2222 ];
+;;   11   };
+;;   12 }
+;; -> chunk1 (preamble) lines 1-2, chunk2 (syncthing block) lines 3-6,
+;;    chunk3 (openssh block) lines 8-12.
+(ert-deftest ac-nix-chunk-line-numbers-are-exact ()
+  (let ((chunks (arc-chunk-file (ac-fixture "sample.nix"))))
+    (should (= (length chunks) 3))
+    (should (equal (list (plist-get (nth 0 chunks) :line-start)
+                         (plist-get (nth 0 chunks) :line-end))
+                   '(1 2)))
+    (should (equal (list (plist-get (nth 1 chunks) :line-start)
+                         (plist-get (nth 1 chunks) :line-end))
+                   '(3 6)))
+    (should (equal (list (plist-get (nth 2 chunks) :line-start)
+                         (plist-get (nth 2 chunks) :line-end))
+                   '(8 12)))))
+
+;; test/fixtures/sample.el, 7 lines:
+;;   1  (defun alpha ()
+;;   2    "First."
+;;   3    1)
+;;   4  (blank)
+;;   5  (defun beta ()
+;;   6    "Second."
+;;   7    2)
+;; -> chunk1 (alpha) lines 1-3, chunk2 (beta) lines 5-7.
+(ert-deftest ac-el-chunk-line-numbers-are-exact ()
+  (let ((chunks (arc-chunk-file (ac-fixture "sample.el"))))
+    (should (= (length chunks) 2))
+    (should (equal (list (plist-get (nth 0 chunks) :line-start)
+                         (plist-get (nth 0 chunks) :line-end))
+                   '(1 3)))
+    (should (equal (list (plist-get (nth 1 chunks) :line-start)
+                         (plist-get (nth 1 chunks) :line-end))
+                   '(5 7)))))

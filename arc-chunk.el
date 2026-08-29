@@ -24,13 +24,20 @@ entry are split on blank lines instead."
                    arc-chunk-boundary-alist)))
 
 (defun arc--chunk-push (chunks start end)
-  "Push the region START..END onto CHUNKS unless it is blank.  Return CHUNKS."
+  "Push the region START..END onto CHUNKS unless it is blank.  Return CHUNKS.
+In boundary mode END is the next chunk's first line, not this chunk's
+last one, so :line-end is derived from the last non-blank character
+actually inside START..END rather than from END itself -- otherwise a
+citation's :line-end would name a line belonging to the next chunk."
   (let ((text (string-trim (buffer-substring-no-properties start end))))
     (if (string-empty-p text)
         chunks
       (cons (list :text text
                   :line-start (line-number-at-pos start)
-                  :line-end (line-number-at-pos end))
+                  :line-end (save-excursion
+                              (goto-char end)
+                              (skip-chars-backward " \t\n\r" start)
+                              (line-number-at-pos (point))))
             chunks))))
 
 (defun arc-chunk-buffer (&optional boundary)
