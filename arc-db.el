@@ -191,9 +191,26 @@ PLIST keys: :kind (required), :path, :org-id, :option-name, :info-node,
                   FROM sources WHERE kind = 'file' AND path = %s;"
                  (arc--sql-quote path))))))
 
+(defun arc--delete-data-for-source (sid)
+  "Delete every `data' row for source SID, plus its data_embeddings and
+data_fts rows.  data_embeddings and data_fts are virtual tables: they
+carry no foreign key, so ON DELETE CASCADE never reaches them, and
+their rows must be deleted explicitly by rowid before `data' itself is
+deleted -- otherwise reindexing (or removing a source) accumulates
+orphan vectors and orphan FTS rows forever, silently corrupting
+retrieval."
+  (let ((ids (flatten-tree
+              (sqlite-select (arc-db) (format "SELECT id FROM data WHERE source_id = %d;" sid)))))
+    (when ids
+      (let ((idlist (arc-sqlite-format-int-list ids)))
+        (sqlite-execute (arc-db) (format "DELETE FROM data_embeddings WHERE rowid IN %s;" idlist))
+        (sqlite-execute (arc-db) (format "DELETE FROM data_fts WHERE rowid IN %s;" idlist)))))
+  (sqlite-execute (arc-db) (format "DELETE FROM data WHERE source_id = %d;" sid)))
+
 (defun arc-source-delete (id)
-  "Delete the source with ID and every chunk that belongs to it."
-  (sqlite-execute (arc-db) (format "DELETE FROM data WHERE source_id = %d;" id))
+  "Delete the source with ID and every chunk, embedding and FTS row that
+belongs to it."
+  (arc--delete-data-for-source id)
   (sqlite-execute (arc-db) (format "DELETE FROM sources WHERE id = %d;" id))
   nil)
 
@@ -250,9 +267,16 @@ not a table-less one silently reused from a failed first attempt."
   (format "vec_f32('%s')" (json-encode data)))
 
 (defun arc-sqlite-escape (string)
-  "Escape single quotes in STRING for sqlite."
+  "Escape single quotes in STRING for sqlite.
+SQL string literals have exactly one escape rule: a single quote is
+doubled.  Backslash is an ordinary character to SQLite -- it is NOT an
+escape introducer -- so mapping `\\=\\' to `\\=\\\\' here used to
+corrupt every backslash a stored chunk contained (46 live chunks did,
+quoting shell or elisp) by literally doubling it in the text that
+comes back out.  A literal NUL byte is still mapped to a newline: it
+cannot survive as a C string inside the SQL text this function's
+caller builds by interpolation, backslash or not."
   (let ((reps '(("'" . "''")
-                ("\\" . "\\\\")
                 ("\0" . "\n"))))
     (replace-regexp-in-string
      (regexp-opt (mapcar #'car reps))

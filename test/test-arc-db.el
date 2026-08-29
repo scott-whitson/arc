@@ -56,6 +56,24 @@
      (arc-source-delete id)
      (should (= 0 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;")))))))
 
+(ert-deftest adb-delete-also-removes-orphan-embeddings-and-fts-rows ()
+  "data_embeddings and data_fts are virtual tables with no foreign key,
+so `arc-source-delete' must remove their rows explicitly by rowid --
+relying on `data's ON DELETE CASCADE alone leaves them behind forever."
+  (let ((arc-embedding-size 3))
+    (arc-test-with-temp-db
+     (let ((id (arc-source-upsert '(:kind "file" :path "/tmp/x.nix"))))
+       (sqlite-execute (arc-db)
+        (format "INSERT INTO data (source_id, chunk, line_start, line_end) VALUES (%d, 'hi', 1, 2);" id))
+       (let ((rowid (caar (sqlite-select (arc-db) "SELECT last_insert_rowid();"))))
+         (sqlite-execute (arc-db)
+          (format "INSERT INTO data_embeddings (rowid, embedding) VALUES (%d, vec_f32('[0.1,0.2,0.3]'));" rowid))
+         (sqlite-execute (arc-db)
+          (format "INSERT INTO data_fts (rowid, data) VALUES (%d, 'hi');" rowid))
+         (arc-source-delete id)
+         (should (= 0 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_embeddings;"))))
+         (should (= 0 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_fts;")))))))))
+
 (ert-deftest adb-foreign-keys-pragma-is-on ()
   (arc-test-with-temp-db
    (should (= (caar (sqlite-select (arc-db) "PRAGMA foreign_keys;")) 1))))
@@ -94,3 +112,18 @@ db with no tables, which is exactly how the previous run's confusing
    (should (null arc--db))
    (let ((arc-sqlite-vec-path (getenv "ARC_VEC0_PATH")))
      (should (= (arc-db-schema-version) 1)))))
+
+(ert-deftest adb-sqlite-escape-round-trips-backslash-quote-and-apostrophe ()
+  "SQLite string literals have no backslash-escape rule -- only a
+doubled single quote means anything.  `arc-sqlite-escape' used to map
+`\\=\\' to `\\=\\\\' anyway, so a stored chunk containing a backslash
+came back with it doubled.  Storing this text and reading it back via
+a real round trip through `arc-db' must reproduce it byte-identical."
+  (arc-test-with-temp-db
+   (let* ((text "C:\\Users\\swhitson, a \"quote\", and it's got an apostrophe")
+          (id (arc-source-upsert '(:kind "file" :path "/tmp/rt.nix"))))
+     (sqlite-execute
+      (arc-db)
+      (format "INSERT INTO data (source_id, chunk, line_start, line_end) VALUES (%d, %s, 1, 1);"
+              id (arc--sql-quote text)))
+     (should (equal (caar (sqlite-select (arc-db) "SELECT chunk FROM data;")) text)))))
