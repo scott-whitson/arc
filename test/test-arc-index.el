@@ -100,7 +100,8 @@ still only get `arc-index-info-cap' of them actually indexed."
                  '(:kind "info" :info-node "(m)Three"
                    :chunks ((:text "three" :line-start 1 :line-end 1))))))
      (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
-               ((symbol-function 'arc-info-sources) (lambda (_manuals) fake-sources)))
+               ((symbol-function 'arc-info-sources)
+                (lambda (_manuals &optional cap) (if cap (take cap fake-sources) fake-sources))))
        (arc-reindex-all))
      (should (= 2 (caar (sqlite-select
                          (arc-db)
@@ -120,7 +121,8 @@ returns -- the full-ingest escape hatch has to actually be one edit."
                  '(:kind "info" :info-node "(m)Three"
                    :chunks ((:text "three" :line-start 1 :line-end 1))))))
      (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
-               ((symbol-function 'arc-info-sources) (lambda (_manuals) fake-sources)))
+               ((symbol-function 'arc-info-sources)
+                (lambda (_manuals &optional cap) (if cap (take cap fake-sources) fake-sources))))
        (arc-reindex-all))
      (should (= 3 (caar (sqlite-select
                          (arc-db)
@@ -137,7 +139,7 @@ just its own collections instead of the whole plan."
           (calls 0))
      (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
                ((symbol-function 'arc-info-sources)
-                (lambda (_manuals)
+                (lambda (_manuals &optional _cap)
                   (setq calls (1+ calls))
                   (list (list :kind "info" :info-node "(m)Node"
                               :chunks (list (list :text "x" :line-start 1 :line-end 1)))))))
@@ -152,3 +154,115 @@ just its own collections instead of the whole plan."
                          (arc-db)
                          "SELECT count(*) FROM data WHERE collection_id =
                           (SELECT id FROM collections WHERE name = 'manuals-b');")))))))
+
+;;; --- I4: every producer's output carries :chunks, not just :text ----
+
+(ert-deftest ai-every-producer-emits-chunks ()
+  "`arc-index-source' reads only :chunks; a producer emitting bare :text
+with no :chunks would silently write zero rows if `arc-index-source'
+were ever called on its output directly -- which is exactly what used
+to happen for org-node and nix/hm-option sources outside
+`arc-reindex-all''s own three now-deleted `plist-put' adapters.  All
+five kinds must carry :chunks straight from the producer."
+  (let ((dir (make-temp-file "arc-chunks-file-tree" t)))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "a.txt" dir) (insert "hello\n"))
+          (should (cl-every (lambda (s) (consp (plist-get s :chunks))) (arc-file-sources dir))))
+      (delete-directory dir t)))
+  (should (cl-every (lambda (s) (consp (plist-get s :chunks)))
+                    (arc-org-nodes (expand-file-name "test/fixtures/roam" ai-root))))
+  (let ((fixture (expand-file-name "test/fixtures/options-sample.json" ai-root)))
+    (should (cl-every (lambda (s) (consp (plist-get s :chunks)))
+                      (arc-nixopt-parse-json fixture "nix-option")))
+    (should (cl-every (lambda (s) (consp (plist-get s :chunks)))
+                      (arc-nixopt-parse-json fixture "hm-option"))))
+  (should (cl-every (lambda (s) (consp (plist-get s :chunks))) (arc-info-sources '("info")))))
+
+;;; --- I6: arc-reindex-all prunes sources the corpus no longer yields --
+
+(ert-deftest ai-reindex-all-prunes-sources-removed-from-the-corpus ()
+  "Upstream's directory walk deleted rows for paths the current walk no
+longer yielded; nothing replaced that when `sources' gained its own
+identity, so anything deleted, newly gitignored, or newly excluded
+from the corpus stayed citable forever.  Index two files, remove one
+from the tree, reindex, and confirm its source -- and every row that
+depended on it, including the virtual-table ones -- is gone, while the
+other survives."
+  (ai-with-temp-db
+   (let ((dir (make-temp-file "arc-prune-tree" t)))
+     (unwind-protect
+         (progn
+           (with-temp-file (expand-file-name "a.txt" dir) (insert "keep me\n"))
+           (with-temp-file (expand-file-name "b.txt" dir) (insert "delete me\n"))
+           (let ((arc-index-plan '(("prune-test" . file)))
+                 (arc-collection-directory-alist `(("prune-test" . ,dir))))
+             (arc-reindex-all)
+             (should (= 2 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+             (delete-file (expand-file-name "b.txt" dir))
+             (arc-reindex-all)
+             (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+             (should (= 1 (caar (sqlite-select
+                                 (arc-db) "SELECT count(*) FROM sources WHERE path LIKE '%a.txt';"))))
+             (should (= 0 (caar (sqlite-select
+                                 (arc-db) "SELECT count(*) FROM sources WHERE path LIKE '%b.txt';"))))
+             (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
+             (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_embeddings;"))))
+             (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_fts;"))))))
+       (delete-directory dir t)))))
+
+;;; --- I7: priority-ordered manuals + I8: skip a missing directory ----
+
+(ert-deftest ai-prioritize-manuals-reorders-matches-first ()
+  (should (equal (arc--prioritize-manuals '("auth" "autotype" "bash" "emacs" "elisp" "org" "zsh")
+                                          '("emacs" "elisp" "org"))
+                 '("emacs" "elisp" "org" "auth" "autotype" "bash" "zsh"))))
+
+(ert-deftest ai-prioritize-manuals-matches-gzip-suffixed-spelling ()
+  "On a host whose Info pages are gzip-compressed, `file-name-base'
+leaves a manual as e.g. \"emacs.info\" rather than \"emacs\" -- the
+priority list must still find it."
+  (should (equal (arc--prioritize-manuals '("auth.info" "emacs.info" "elisp.info" "org.info" "zsh")
+                                          '("emacs" "elisp" "org"))
+                 '("emacs.info" "elisp.info" "org.info" "auth.info" "zsh"))))
+
+(ert-deftest ai-prioritize-manuals-tolerates-a-missing-priority-entry ()
+  (should (equal (arc--prioritize-manuals '("auth" "bash") '("emacs" "elisp" "org"))
+                 '("auth" "bash"))))
+
+(ert-deftest ai-reindex-all-skips-a-missing-collection-directory-without-erroring ()
+  "`arc-collection-directory-alist' can name a directory absent on this
+host (`eminix' on a machine with no such checkout, for instance); this
+must be a reported skip, not a `file-missing' error that aborts every
+collection still queued behind it in `arc-index-plan'."
+  (ai-with-temp-db
+   (let ((dir (make-temp-file "arc-present-tree" t)))
+     (unwind-protect
+         (progn
+           (with-temp-file (expand-file-name "a.txt" dir) (insert "hello\n"))
+           (let ((arc-index-plan '(("gone" . file) ("still-here" . file)))
+                 (arc-collection-directory-alist
+                  `(("gone" . ,(expand-file-name "nope" (make-temp-name (expand-file-name "arc-missing-"
+                                                                                           temporary-file-directory))))
+                    ("still-here" . ,dir))))
+             ;; must not signal file-missing
+             (arc-reindex-all)
+             (should (= 1 (caar (sqlite-select
+                                 (arc-db) "SELECT count(*) FROM sources WHERE kind = 'file';"))))))
+       (delete-directory dir t)))))
+
+(ert-deftest ai-reindex-all-does-not-prune-a-collection-whose-directory-went-missing ()
+  "A collection directory present at the last full index but gone now
+must be skipped, not mistaken for \"the walk found nothing\" and used
+as a reason to delete every source this collection already has -- the
+corpus here was never walked this run, not emptied."
+  (ai-with-temp-db
+   (let ((dir (make-temp-file "arc-vanishing-tree" t)))
+     (with-temp-file (expand-file-name "a.txt" dir) (insert "hello\n"))
+     (let ((arc-index-plan '(("vanishing" . file)))
+           (arc-collection-directory-alist `(("vanishing" . ,dir))))
+       (arc-reindex-all)
+       (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+       (delete-directory dir t)
+       (arc-reindex-all)
+       (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))))))
