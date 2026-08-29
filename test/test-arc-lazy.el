@@ -7,13 +7,18 @@
         (or (getenv "ARC_VEC0_PATH")
             "/nix/store/77440dch8lnph95xaj5fs634iwvgvmja-sqlite-vec-0.1.6/lib/vec0.so"))
 
-(ert-deftest al-require-does-not-embed ()
-  "Requiring arc must not call the embedding provider."
-  (let ((called nil))
-    (cl-letf (((symbol-function 'llm-embedding)
-               (lambda (&rest _) (setq called t) (make-vector 768 0.0))))
-      (require 'arc)
-      (should-not called))))
+(ert-deftest al-require-does-not-touch-disk-or-model ()
+  "Requiring arc must not create the database file or call the embedding model."
+  (when (featurep 'arc)
+    (unload-feature 'arc t))
+  (let* ((tmp (make-temp-file "arc-lazy-test-" t))
+         (arc-db-directory tmp))
+    (unwind-protect
+        (progn
+          (require 'arc)
+          (should-not (directory-files-recursively tmp "\\`arc\\.sqlite\\'"))
+          (should (null arc--db)))
+      (delete-directory tmp t))))
 
 (ert-deftest al-db-is-a-function ()
   (require 'arc)
