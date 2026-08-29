@@ -144,10 +144,16 @@ ingest."
   :type '(choice (const nil) natnum) :group 'arc)
 
 ;;;###autoload
-(defun arc-reindex-all ()
-  "Rebuild every collection in `arc-index-plan'.  Reports per-kind counts."
+(defun arc-reindex-all (&optional collections)
+  "Rebuild collections in `arc-index-plan'.  Reports per-kind counts.
+With COLLECTIONS (a list of collection names), only rebuilds the
+`arc-index-plan' entries whose name is a member of it, leaving every
+other collection's rows untouched.  With no COLLECTIONS (the default),
+rebuilds every entry in the plan."
   (interactive)
-  (dolist (cell arc-index-plan)
+  (dolist (cell (if collections
+                     (seq-filter (lambda (c) (member (car c) collections)) arc-index-plan)
+                   arc-index-plan))
     (let ((name (car cell)))
       (message "arc: indexing %s" name)
       (pcase (cdr cell)

@@ -125,3 +125,30 @@ returns -- the full-ingest escape hatch has to actually be one edit."
      (should (= 3 (caar (sqlite-select
                          (arc-db)
                          "SELECT count(*) FROM sources WHERE kind = 'info';")))))))
+
+(ert-deftest ai-reindex-all-collections-argument-scopes-the-rebuild ()
+  "Passing COLLECTIONS to arc-reindex-all must rebuild only the named
+plan entries and leave every other collection alone -- this is what
+lets a caller (eminix/arc-reindex, eminix/arc-reindex-notes) rebuild
+just its own collections instead of the whole plan."
+  (ai-with-temp-db
+   (let* ((arc-index-plan '(("manuals-a" . info) ("manuals-b" . info)))
+          (arc-index-info-cap nil)
+          (calls 0))
+     (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+               ((symbol-function 'arc-info-sources)
+                (lambda (_manuals)
+                  (setq calls (1+ calls))
+                  (list (list :kind "info" :info-node "(m)Node"
+                              :chunks (list (list :text "x" :line-start 1 :line-end 1)))))))
+       (arc-reindex-all '("manuals-b")))
+     ;; only the requested plan entry ran arc-info-sources at all
+     (should (= 1 calls))
+     (should (= 0 (caar (sqlite-select
+                         (arc-db)
+                         "SELECT count(*) FROM data WHERE collection_id =
+                          (SELECT id FROM collections WHERE name = 'manuals-a');"))))
+     (should (= 1 (caar (sqlite-select
+                         (arc-db)
+                         "SELECT count(*) FROM data WHERE collection_id =
+                          (SELECT id FROM collections WHERE name = 'manuals-b');")))))))
