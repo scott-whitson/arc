@@ -133,6 +133,16 @@ to prove the ingestion path end-to-end without paying that cost, and
 back to nil for a real full ingest."
   :type '(choice (const nil) natnum) :group 'arc)
 
+(defcustom arc-index-info-cap 150
+  "Maximum number of Info manual nodes to index, or nil for all of them.
+`arc-get-builtin-manuals' names 94 manuals whose node counts add up to
+far more than this; `arc-reindex-all' previously had no way to bound
+this branch at all, so running it embedded every node in every manual
+unconditionally.  This default keeps a verification run bounded the
+same way `arc-index-nixopt-cap' does; set to nil for a real full
+ingest."
+  :type '(choice (const nil) natnum) :group 'arc)
+
 ;;;###autoload
 (defun arc-reindex-all ()
   "Rebuild every collection in `arc-index-plan'.  Reports per-kind counts."
@@ -159,7 +169,8 @@ back to nil for a real full ingest."
                                                   (list (list :text (plist-get s :text)
                                                               :line-start 1 :line-end 1)))
                                        name)))
-        ('info   (dolist (s (arc-info-sources (arc-get-builtin-manuals)))
+        ('info   (dolist (s (let ((all (arc-info-sources (arc-get-builtin-manuals))))
+                              (if arc-index-info-cap (take arc-index-info-cap all) all)))
                    (arc-index-source s name))))))
   (message "arc: %S" (arc-index-stats)))
 

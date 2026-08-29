@@ -83,3 +83,45 @@ crashing, and still write the (now-clean) chunk."
      (should (= n 1))
      (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
      (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_embeddings;")))))))
+
+(ert-deftest ai-reindex-all-info-branch-honors-the-cap ()
+  "arc-reindex-all's `info' branch had no bound of its own at all --
+running it embedded every node in every builtin manual unconditionally.
+A fake `arc-info-sources' returning more sources than the cap must
+still only get `arc-index-info-cap' of them actually indexed."
+  (ai-with-temp-db
+   (let* ((arc-index-plan '(("builtin manuals" . info)))
+          (arc-index-info-cap 2)
+          (fake-sources
+           (list '(:kind "info" :info-node "(m)One"
+                   :chunks ((:text "one" :line-start 1 :line-end 1)))
+                 '(:kind "info" :info-node "(m)Two"
+                   :chunks ((:text "two" :line-start 1 :line-end 1)))
+                 '(:kind "info" :info-node "(m)Three"
+                   :chunks ((:text "three" :line-start 1 :line-end 1))))))
+     (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+               ((symbol-function 'arc-info-sources) (lambda (_manuals) fake-sources)))
+       (arc-reindex-all))
+     (should (= 2 (caar (sqlite-select
+                         (arc-db)
+                         "SELECT count(*) FROM sources WHERE kind = 'info';")))))))
+
+(ert-deftest ai-reindex-all-info-branch-nil-cap-means-unlimited ()
+  "A nil `arc-index-info-cap' must index every source `arc-info-sources'
+returns -- the full-ingest escape hatch has to actually be one edit."
+  (ai-with-temp-db
+   (let* ((arc-index-plan '(("builtin manuals" . info)))
+          (arc-index-info-cap nil)
+          (fake-sources
+           (list '(:kind "info" :info-node "(m)One"
+                   :chunks ((:text "one" :line-start 1 :line-end 1)))
+                 '(:kind "info" :info-node "(m)Two"
+                   :chunks ((:text "two" :line-start 1 :line-end 1)))
+                 '(:kind "info" :info-node "(m)Three"
+                   :chunks ((:text "three" :line-start 1 :line-end 1))))))
+     (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+               ((symbol-function 'arc-info-sources) (lambda (_manuals) fake-sources)))
+       (arc-reindex-all))
+     (should (= 3 (caar (sqlite-select
+                         (arc-db)
+                         "SELECT count(*) FROM sources WHERE kind = 'info';")))))))
