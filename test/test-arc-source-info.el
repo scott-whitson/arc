@@ -61,3 +61,42 @@
   ;; "emacs" -- a pre-existing upstream quirk, moved here unchanged
   ;; and out of this task's scope.  bash.info ships uncompressed.
   (should (member "bash" (arc-get-builtin-manuals))))
+
+;;; --- CAP: bound how many sources are produced, without parsing every
+;;; manual into memory first -----------------------------------------
+
+(ert-deftest asi-cap-limits-the-number-of-sources ()
+  (should (= (length (arc-info-sources '("info") 2)) 2)))
+
+(ert-deftest asi-nil-cap-returns-every-source ()
+  (should (= (length (arc-info-sources '("info") nil))
+             (length (arc-info-sources '("info"))))))
+
+(ert-deftest asi-cap-stops-parsing-further-manuals-once-satisfied ()
+  "A cap smaller than one manual's own node count must never cause a
+SECOND manual to be parsed at all -- `arc-parse-info-manual' walks a
+whole manual's node graph, which is not cheap 94 times over, so a
+capped run must not pay to parse a manual whose nodes would just be
+discarded afterwards."
+  (let ((calls 0))
+    (cl-letf (((symbol-function 'arc--info-valid-p) (lambda (_m) t))
+              ((symbol-function 'arc-parse-info-manual)
+               (lambda (m)
+                 (setq calls (1+ calls))
+                 (list (cons (format "%s-node" m) (format "%s text" m))))))
+      (let ((sources (arc-info-sources '("m1" "m2" "m3") 1)))
+        (should (= (length sources) 1))
+        (should (= calls 1))))))
+
+(ert-deftest asi-cap-satisfied-mid-manual-still-stops-before-the-next-one ()
+  "When the first manual alone produces enough nodes to satisfy the cap,
+no later manual is parsed at all."
+  (let ((calls 0))
+    (cl-letf (((symbol-function 'arc--info-valid-p) (lambda (_m) t))
+              ((symbol-function 'arc-parse-info-manual)
+               (lambda (m)
+                 (setq calls (1+ calls))
+                 (list (cons (format "%s-a" m) "a") (cons (format "%s-b" m) "b")))))
+      (let ((sources (arc-info-sources '("m1" "m2") 2)))
+        (should (= (length sources) 2))
+        (should (= calls 1))))))

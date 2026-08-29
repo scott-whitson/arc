@@ -75,18 +75,29 @@ its start)."
                 (error (setq continue nil)))))))
       (nreverse nodes))))
 
-(defun arc-info-sources (manuals)
+(defun arc-info-sources (manuals &optional cap)
   "Return a source plist per node across MANUALS, a list of manual names.
-Each plist has :kind, :info-node and :chunks."
+Each plist has :kind, :info-node and :chunks.
+With CAP, a positive integer, stop parsing further manuals as soon as
+CAP sources have been produced, and return at most CAP of them: MANUALS
+is walked one manual at a time rather than all 94 of them parsed into
+memory up front and truncated afterwards, so a capped caller never
+pays to parse a manual whose nodes would just be discarded.  CAP nil
+(the default) parses every manual in MANUALS, same as before this
+existed."
   (let (out)
-    (dolist (manual manuals)
-      (when (arc--info-valid-p manual)
-        (pcase-dolist (`(,node . ,text) (arc-parse-info-manual manual))
-          (push (list :kind "info"
-                      :info-node (format "(%s)%s" manual node)
-                      :chunks (list (list :text text :line-start 1 :line-end 1)))
-                out))))
-    (nreverse out)))
+    (catch 'arc-info-sources-done
+      (dolist (manual manuals)
+        (when (arc--info-valid-p manual)
+          (pcase-dolist (`(,node . ,text) (arc-parse-info-manual manual))
+            (push (list :kind "info"
+                        :info-node (format "(%s)%s" manual node)
+                        :chunks (list (list :text text :line-start 1 :line-end 1)))
+                  out)
+            (when (and cap (>= (length out) cap))
+              (throw 'arc-info-sources-done nil))))))
+    (let ((result (nreverse out)))
+      (if cap (take cap result) result))))
 
 (provide 'arc-source-info)
 ;;; arc-source-info.el ends here
