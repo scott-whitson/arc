@@ -44,6 +44,16 @@
   (should (assoc "nixopt" org-link-parameters))
   (should (assoc "hmopt" org-link-parameters)))
 
+(ert-deftest as-link-types-are-registered-just-by-requiring-the-module ()
+  "Requiring `arc-source' -- with no explicit call to
+`arc-source-register-link-types' in this test -- must be sufficient:
+that call used to exist only as a definition nobody ever invoked, so a
+real Emacs that required `arc-source' still had unregistered `nixopt:'
+and `hmopt:' link types and `C-c C-o' on either errored."
+  (require 'org)
+  (should (assoc "nixopt" org-link-parameters))
+  (should (assoc "hmopt" org-link-parameters)))
+
 (ert-deftest as-follow-option-no-root-reports-message ()
   "With no root configured, report the option instead of erroring."
   (let ((captured nil))

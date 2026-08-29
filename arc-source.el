@@ -72,5 +72,12 @@ found\"."
   (org-link-set-parameters
    "hmopt" :follow (lambda (opt _) (arc--follow-option arc-hm-directory opt))))
 
+;; Call this at load time, not just define it: before this, nothing in arc
+;; ever called `arc-source-register-link-types', so `nixopt:' and `hmopt:'
+;; were never registered org link types in a real running Emacs, and
+;; `C-c C-o' (or a plain click) on one signalled "No link abbreviation"
+;; instead of following it.  Requiring this file is now itself sufficient.
+(arc-source-register-link-types)
+
 (provide 'arc-source)
 ;;; arc-source.el ends here
