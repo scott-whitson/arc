@@ -63,7 +63,7 @@ Defaults to the ARC_VEC0_PATH environment variable (set by Nix)."
 
 (defun arc-collections-create-table-sql ()
   "Generate sql for create collections table."
-  "CREATE TABLE IF NOT EXISTS collections (name TEXT UNIQUE);")
+  "CREATE TABLE IF NOT EXISTS collections (id INTEGER PRIMARY KEY, name TEXT UNIQUE);")
 
 (defun arc-kinds-create-table-sql ()
   "Generate sql for create kinds table."
@@ -201,8 +201,8 @@ PLIST keys: :kind (required), :path, :org-id, :option-name, :info-node,
   "Initialize the arc DB."
   (if (not (and arc-sqlite-vec-path (file-exists-p arc-sqlite-vec-path)))
       (warn "Set `arc-sqlite-vec-path' (or ARC_VEC0_PATH) to the sqlite-vec vec0 extension")
-    (sqlite-pragma db "PRAGMA journal_mode=WAL;")
-    (sqlite-pragma db "PRAGMA foreign_keys=ON;")
+    (sqlite-pragma db "journal_mode=WAL")
+    (sqlite-pragma db "foreign_keys=ON")
     (sqlite-load-extension db arc-sqlite-vec-path)
     (sqlite-execute db (arc-collections-create-table-sql))
     (sqlite-execute db (arc-kinds-create-table-sql))
