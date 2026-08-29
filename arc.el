@@ -29,9 +29,10 @@
 ;; arc is a fork of ELISA by Sergey Kostyaev
 ;; (http://github.com/s-kostyaev/elisa).  Changes from upstream: the vector
 ;; backend was ported from sqlite-vss to sqlite-vec; the schema gained a
-;; `sources' table carrying per-chunk source identity; web search, Apache
-;; Tika and pandoc extraction were removed; org-roam node, NixOS option and
-;; Home-Manager option source kinds were added; the answer UI was replaced.
+;; `sources' table carrying per-chunk source identity; web search and
+;; third-party document-conversion services were removed; org-roam node,
+;; NixOS option and Home-Manager option source kinds were added; the answer
+;; UI was replaced.
 
 ;;; Commentary:
 ;;
@@ -45,8 +46,6 @@
 (require 'llm-provider-utils)
 (require 'info)
 (require 'async)
-(require 'dom)
-(require 'shr)
 (require 'plz)
 (require 'json)
 (require 'sqlite)
@@ -136,35 +135,6 @@ How to buy a pony?
   "Prompt template for prompt rewriting."
   :type 'string)
 
-(defcustom arc-tika-url "http://localhost:9998/"
-  "Apache tika url for file parsing."
-  :type 'string)
-
-(defcustom arc-searxng-url "http://localhost:8080/"
-  "Searxng url for web search.  Json format should be enabled for this instance."
-  :type 'string)
-
-(defcustom arc-pandoc-executable "pandoc"
-  "Path to pandoc (https://pandoc.org/) executable."
-  :type 'string)
-
-(defcustom arc-webpage-extraction-function #'arc-get-webpage-buffer
-  "Function to get buffer with webpage content."
-  :type 'function)
-
-(defcustom arc-complex-file-extraction-function #'arc-parse-with-tika-buffer
-  "Function to get buffer with complex file (like pdf, odt etc.) content."
-  :type 'function)
-
-(defcustom arc-web-search-function #'arc-search-duckduckgo
-  "Function to search the web.
-Function should get prompt and return list of urls."
-  :type 'function)
-
-(defcustom arc-web-pages-limit 10
-  "Limit of web pages to parse during web search."
-  :type 'natnum)
-
 (defcustom arc-breakpoint-threshold-amount 0.4
   "Breakpoint threshold amount.
 Increase it if you need decrease semantic split granularity."
@@ -207,10 +177,6 @@ If set, all quotes with similarity less than threshold will be filtered out."
   "Enabled collections for arc chat."
   :type '(repeat string))
 
-(defcustom arc-supported-complex-document-extensions '("doc" "dot" "ppt" "xls" "rtf" "docx" "pptx" "xlsx" "xlsm" "pdf" "epub" "msg" "odt" "odp" "ods" "odg" "docm")
-  "Supported complex document file extensions."
-  :type '(repeat string))
-
 (defcustom arc-batch-embeddings-enabled nil
   "Enable batch embeddings if supported."
   :type 'boolean)
@@ -218,12 +184,6 @@ If set, all quotes with similarity less than threshold will be filtered out."
 (defcustom arc-batch-size 300
   "Batch size to send to provider during batch embeddings calculation."
   :type 'integer)
-
-(defun arc-supported-complex-document-p (path)
-  "Check if PATH contain supported complex document."
-  (cl-find (file-name-extension path)
-	   arc-supported-complex-document-extensions :test #'string=))
-
 
 (defun arc-get-embedding-size ()
   "Get embedding size."
@@ -258,9 +218,17 @@ If set, all quotes with similarity less than threshold will be filtered out."
   "Generate sql for create kinds table."
   "CREATE TABLE IF NOT EXISTS kinds (name TEXT UNIQUE);")
 
+(defconst arc-kind-list '("file" "info" "org-node" "nix-option" "hm-option")
+  "The source kinds arc understands, in schema order.")
+
+(defun arc-kinds ()
+  "Return the list of source kinds arc understands."
+  arc-kind-list)
+
 (defun arc-fill-kinds-sql ()
-  "Generate sql for fill kinds table."
-  "INSERT INTO KINDS (name) VALUES ('web'), ('file'), ('info') ON CONFLICT DO NOTHING;")
+  "Generate sql for filling the kinds table."
+  (format "INSERT INTO kinds (name) VALUES %s ON CONFLICT DO NOTHING;"
+          (mapconcat (lambda (k) (format "('%s')" k)) arc-kind-list ", ")))
 
 (defun arc-files-create-table-sql ()
   "Generate sql for create files table."
@@ -641,18 +609,14 @@ than T, it will be packed into single semantic chunk."
 		  (and (not (seq-some (lambda (regexp)
 					(string-match-p regexp file))
 				      ignore-regexps))
-		       (or
-			(arc-supported-complex-document-p file)
-			(arc--text-file-p file))))
+		       (arc--text-file-p file)))
 		(directory-files-recursively directory ".*"))))
 
 (defun arc-parse-file (collection-id path &optional force)
   "Parse file PATH for COLLECTION-ID.
 When FORCE parse even if already parsed."
   (let* ((opened (get-file-buffer path))
-	 (buf (if (arc-supported-complex-document-p path)
-		  (funcall arc-complex-file-extraction-function path)
-		(or opened (find-file-noselect path t t))))
+	 (buf (or opened (find-file-noselect path t t)))
 	 (hash (secure-hash 'sha256 buf))
 	 (prev-hash (caar (sqlite-select
 			   arc-db
@@ -782,139 +746,6 @@ When FORCE parse even if already parsed."
 		     (arc-parse-directory
 		      (expand-file-name dir)))))
 
-(defvar eww-accept-content-types)
-
-(defun arc-search-duckduckgo (prompt)
-  "Search duckduckgo for PROMPT and return list of urls."
-  (require 'eww)
-  (let* ((url (format "https://duckduckgo.com/html/?q=%s" (url-hexify-string prompt)))
-	 (buffer-name (plz 'get url :as 'buffer
-			:headers `(("Accept" . ,eww-accept-content-types)
-				   ("Accept-Encoding" . "gzip")
-				   ("User-Agent" . ,(url-http--user-agent-default-string))))))
-    (with-current-buffer buffer-name
-      (goto-char (point-min))
-      (search-forward "<!DOCTYPE")
-      (beginning-of-line)
-      (cl-remove-if
-       #'string-empty-p
-       (cl-remove-duplicates
-	(mapcar
-	 (lambda (el)
-	   (when el
-	     (string-trim-right
-	      (url-unhex-string
-	       (cdar (url-parse-args (or (dom-attr el 'href) ""))))
-	      "[&\\?].*")))
-	 (dom-by-tag
-	  (libxml-parse-html-region
-	   (point) (point-max))
-	  'a))
-	:test #'string-equal)))))
-
-(defun arc-starts-with-lowercase-p (string)
-  "Check if STRING start with lowercase character."
-  (let ((category (get-char-code-property (seq-first string) 'general-category)))
-    (or (eq 'Ll category)
-	(eq 'Ps category))))
-
-(defun arc-dehyphen (text)
-  "Dehyphen TEXT."
-  (ignore-errors (with-temp-buffer
-		   (insert (string-join
-			    (mapcar #'string-trim (string-split text "\n"))
-			    "\n"))
-		   (goto-char (point-min))
-		   (while (not (eobp))
-		     (end-of-line)
-		     (if (eq (preceding-char) ?-)
-			 (progn
-			   (delete-char 1)
-			   (delete-char -1))
-		       (forward-line)))
-		   (buffer-substring-no-properties (point-min) (point-max)))))
-
-(defun arc-parse-with-tika-buffer (file)
-  "Parse FILE with tika."
-  (let* ((url (format "%s/tika" (string-trim-right arc-tika-url "/")))
-	 (buf (plz 'put url :body (list 'file file) :as 'buffer))
-	 (shr-use-fonts nil)
-	 (shr-width (- ellama-long-lines-length 5))
-	 (data (with-current-buffer buf
-		 (libxml-parse-html-region (point-min) (point-max))))
-	 (prev-elt nil))
-    (dolist (elt (dom-by-tag data 'p))
-      (dolist (text (dom-children elt))
-	;; trim string content
-	(when-let* ((trimmed-text (string-trim text))
-		    (new-elt (if (or (string-match "^[0-9]+$" trimmed-text)
-				     (string= "" trimmed-text))
-				 (progn (dom-remove-node data elt)
-					nil)
-			       (if (arc-starts-with-lowercase-p trimmed-text)
-				   (progn
-				     (dom-remove-node data prev-elt)
-				     (dom-node 'p nil (arc-dehyphen
-						       (concat
-							(car (dom-children prev-elt))
-							"\n" trimmed-text))))
-				 (dom-node 'p nil (arc-dehyphen trimmed-text))))))
-	  (setq prev-elt new-elt)
-	  (setq data (cl-nsubst new-elt elt data :test #'equal))))
-      (when (eq (length (dom-children elt)) 0)
-	(dom-remove-node data elt)))
-    (with-current-buffer buf
-      (delete-region (point-min) (point-max))
-      (ignore-errors
-	(shr-insert-document data))
-      buf)))
-
-(defun arc-search-searxng (prompt)
-  "Search searxng for PROMPT and return list of urls.
-You can customize `arc-searxng-url' to use non local instance."
-  (let ((url (format "%s/search?format=json&q=%s" arc-searxng-url (url-hexify-string prompt))))
-    (thread-last
-      (plz 'get url :as #'json-read)
-      (alist-get 'results)
-      (mapcar (lambda (el) (alist-get 'url el))))))
-
-(defun arc-get-webpage-buffer (url)
-  "Get buffer with URL content."
-  (require 'eww)
-  (let ((buffer-name (ignore-errors
-		       (plz 'get url :as 'buffer
-			 :headers `(("Accept" . ,eww-accept-content-types)
-				    ("Accept-Encoding" . "gzip")
-				    ("User-Agent" . ,(url-http--user-agent-default-string))))))
-	;; fix one word lines for async execution
-	(shr-use-fonts nil)
-	(shr-width (- ellama-long-lines-length 5)))
-    (when buffer-name
-      (with-current-buffer buffer-name
-	(goto-char (point-min))
-	(or (search-forward "<!DOCTYPE" nil t)
-            (search-forward "<html" nil t))
-	(beginning-of-line)
-	(kill-region (point-min) (point))
-	(ignore-errors
-	  (shr-insert-document (libxml-parse-html-region (point-min) (point-max))))
-	(goto-char (point-min))
-	(or (search-forward "<!DOCTYPE" nil t)
-            (search-forward "<html" nil t))
-	(beginning-of-line)
-	(kill-region (point) (point-max))
-	buffer-name))))
-
-(defun arc-get-webpage-buffer-pandoc (url)
-  "Get buffer with URL content translated to markdown with pandoc."
-  (let ((buffer-name (plz 'get url :as 'buffer)))
-    (with-current-buffer buffer-name
-      (shell-command-on-region
-       (point-min) (point-max)
-       (format "%s --from html --to plain" arc-pandoc-executable)
-       buffer-name t)
-      buffer-name)))
-
 (defun arc-fts-query (prompt)
   "Return fts match query for PROMPT."
   (thread-last
@@ -973,57 +804,6 @@ You can customize `arc-searxng-url' to use non local instance."
       arc-reranker-limit
     arc-limit))
 
-(defun arc--parse-web-page (collection-id url)
-  "Parse URL into collection with COLLECTION-ID."
-  (let ((kind-id (caar (sqlite-select
-			arc-db "SELECT rowid FROM kinds WHERE name = 'web';"))))
-    (message "collecting data from %S..." url)
-    (dolist (chunk (arc-extact-webpage-chunks url))
-      (let* ((hash (secure-hash 'sha256 chunk))
-	      (embedding (llm-embedding arc-embeddings-provider chunk))
-	      (rowid
-	       (if-let ((rowid (caar (sqlite-select
-				      arc-db
-				      (format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';" kind-id collection-id url hash)))))
-		   nil
-		 (sqlite-execute
-		  arc-db
-		  (format
-		   "INSERT INTO data(kind_id, collection_id, path, hash, data) VALUES (%s, %s, '%s', '%s', '%s');"
-		   kind-id collection-id url hash (arc-sqlite-escape chunk)))
-		 (caar (sqlite-select
-			arc-db
-			(format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';" kind-id collection-id url hash))))))
-	 (when rowid
-	   (sqlite-execute
-	    arc-db
-	    (format "INSERT INTO data_embeddings(rowid, embedding) VALUES (%s, %s);"
-		    rowid (arc-vector-to-sqlite embedding)))
-	   (sqlite-execute
-	    arc-db
-	    (format "INSERT INTO data_fts(rowid, data) VALUES (%s, '%s');"
-		    rowid (arc-sqlite-escape chunk))))))))
-
-(defun arc--web-search (prompt)
-  "Search the web for PROMPT.
-Return sqlite query that extract data for adding to context."
-  (sqlite-execute
-   arc-db
-   (format
-    "INSERT INTO collections (name) VALUES ('%s') ON CONFLICT DO NOTHING;"
-    (arc-sqlite-escape prompt)))
-  (let* ((collection-id (caar (sqlite-select
-			       arc-db
-			       (format
-				"SELECT rowid FROM collections WHERE name = '%s';"
-				(arc-sqlite-escape prompt)))))
-	 (urls (funcall arc-web-search-function prompt))
-	 (collected-pages 0))
-    (dolist (url urls)
-      (when (<= collected-pages arc-web-pages-limit)
-	(arc--parse-web-page collection-id url)
-	(cl-incf collected-pages)))))
-
 (defun arc--rewrite-prompt (prompt action)
   "Rewrite PROMPT if `arc-prompt-rewriting-enabled'.
 Call ACTION with new prompt."
@@ -1043,22 +823,6 @@ Call ACTION with new prompt."
 	   :provider arc-chat-provider
 	   :on-done action))
       (funcall action prompt))))
-
-;;;###autoload
-(defun arc-web-search (prompt)
-  "Search the web for PROMPT."
-  (interactive "sAsk arc with web search: ")
-  (arc--rewrite-prompt prompt #'arc--web-search-internal))
-
-(defun arc--web-search-internal (prompt)
-  "Search the web for PROMPT."
-  (message "searching the web")
-  (arc--async-do
-   (lambda () (arc--web-search prompt))
-   (lambda (_)
-     (arc-find-similar
-      prompt (list prompt)
-      (lambda (query) (arc-retrieve-ask query prompt))))))
 
 (defun arc-retrieve-ask (query prompt)
   "Retrieve data with QUERY and ask arc for PROMPT."
@@ -1083,8 +847,6 @@ WHERE d.rowid in %s;"
 			      (path (cl-second row))
 			      (text (cl-third row)))
 		     (pcase kind
-		       ("web"
-			(ellama-context-add-webpage-quote-noninteractive path path text))
 		       ("file"
 			(ellama-context-add-file-quote-noninteractive path text))
 		       ("info"
@@ -1167,16 +929,7 @@ Call ON-DONE callback with result as an argument after FUNC evaluation done."
 		    ,(async-inject-variables "arc-batch-size")
 		    ,(async-inject-variables "arc-rewrite-prompt-template")
 		    ,(async-inject-variables "arc-semantic-split-function")
-		    ,(async-inject-variables "arc-webpage-extraction-function")
-		    ,(async-inject-variables "arc-supported-complex-document-extensions")
-		    ,(async-inject-variables "arc-complex-file-extraction-function")
-		    ,(async-inject-variables "arc-web-search-function")
-		    ,(async-inject-variables "arc-tika-url")
-		    ,(async-inject-variables "arc-searxng-url")
-		    ,(async-inject-variables "arc-web-pages-limit")
 		    ,(async-inject-variables "arc-breakpoint-threshold-amount")
-		    ,(async-inject-variables "arc-pandoc-executable")
-		    ,(async-inject-variables "ellama-long-lines-length")
 		    ,(async-inject-variables "arc-reranker-enabled")
 		    ,(async-inject-variables "arc-sqlite-vec-path")
 		    ,(async-inject-variables "load-path")
@@ -1190,12 +943,6 @@ Call ON-DONE callback with result as an argument after FUNC evaluation done."
 		   (arc--reopen-db)
 		   (when on-done
 		     (funcall on-done res))))))
-
-(defun arc-extact-webpage-chunks (url)
-  "Extract semantic chunks for webpage fetched from URL."
-  (when-let ((buf (funcall arc-webpage-extraction-function url)))
-    (with-current-buffer buf
-      (arc-split-semantically))))
 
 ;;;###autoload
 (defun arc-async-parse-builtin-manuals ()
@@ -1309,28 +1056,6 @@ It does nothing if buffer file not inside one of existing collections."
 			       "SELECT rowid FROM collections WHERE name = '%s';"
 			       (arc-sqlite-escape collection))))))
     (arc--async-do (lambda () (arc-parse-file collection-id file)))))
-
-;;;###autoload
-(defun arc-add-webpage-to-collection (url collection)
-  "Add webpage by URL to COLLECTION."
-  (interactive
-   (list
-    (if-let ((url (or (thing-at-point 'url)
-                      (shr-url-at-point nil))))
-        url
-      (read-string "Enter URL you want to summarize: "))
-    (completing-read
-     "Enable collection: "
-     (flatten-tree
-      (sqlite-select
-       arc-db
-       "SELECT name FROM collections;")))))
-  (let ((collection-id (caar (sqlite-select
-			      arc-db
-			      (format
-			       "SELECT rowid FROM collections WHERE name = '%s';"
-			       (arc-sqlite-escape collection))))))
-    (arc--async-do (lambda () (arc--parse-web-page collection-id url)))))
 
 ;;;###autoload
 (defun arc-remove-collection (&optional collection)
