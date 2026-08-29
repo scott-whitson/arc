@@ -49,6 +49,16 @@
 (require 'json)
 (require 'sqlite)
 (require 'arc-db)
+;; arc-source's job -- rendering a citation as an org link, and (as of the
+;; whole-branch fix round) registering the `nixopt:'/`hmopt:' link types as
+;; a side effect of being loaded at all -- belongs to this file, which is
+;; required unconditionally before any entry point (`eminix/arc--setup')
+;; goes on to require `arc-index'.  `arc-index.el' used to require
+;; `arc-source' too, despite calling nothing in it; that accidentally made
+;; it the ONLY thing in the real load path that registered the link
+;; types, which would have silently broken the moment that unrelated
+;; require was ever cleaned up.
+(require 'arc-source)
 (require 'arc-source-file) ; arc--file-list, for arc-parse-directory below
 (require 'arc-source-info) ; arc-find-executable, injected into async workers
 
@@ -165,8 +175,12 @@ If set, all quotes with similarity less than threshold will be filtered out."
   "Number of quotes for send to reranker."
   :type 'integer)
 
-(defcustom arc-enabled-collections '("builtin manuals" "external manuals")
-  "Enabled collections for arc chat."
+(defcustom arc-enabled-collections '("builtin manuals")
+  "Enabled collections for arc chat.
+Used to default to `(\"builtin manuals\" \"external manuals\")', but
+nothing in `arc-index-plan' has ever created an \"external manuals\"
+collection -- it matches no `collections.name' row and silently
+retrieves nothing, same failure mode as a stale directory-path entry."
   :type '(repeat string))
 
 (defcustom arc-batch-embeddings-enabled nil
@@ -548,7 +562,11 @@ When FORCE parse even if already parsed."
 	  (sqlite-select
 	   (arc-db)
 	   (format
-	    "SELECT rowid, data FROM data WHERE rowid IN %s;"
+	    ;; `data' has had no `data' column since Task 4 -- the chunk text
+	    ;; column is `chunk'.  This raised `sqlite-error' whenever the
+	    ;; reranker actually ran; nothing caught it because
+	    ;; `arc-reranker-enabled' defaults to nil.
+	    "SELECT rowid, chunk FROM data WHERE rowid IN %s;"
 	    (arc-sqlite-format-int-list ids))))))
     (json-encode `(("query" . ,prompt)
 		   ("documents" . ,docs)))))

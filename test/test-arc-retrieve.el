@@ -81,3 +81,27 @@
 
 (ert-deftest ar-retrieve-ask-is-no-longer-guarded ()
   (should-not (memq 'arc-retrieve-ask arc--unmigrated-functions)))
+
+(ert-deftest ar-rerank-request-query-shape-matches-the-real-schema ()
+  "`arc--rerank-request' selected `rowid, data FROM data' -- the `data'
+table has had no `data' column since Task 4 (it is `chunk'), so this
+raised `sqlite-error' the moment the reranker actually ran.
+`arc-reranker-enabled' defaults to nil, which is exactly why nothing
+caught it: this test exercises the query shape against a real schema
+so it cannot rot silently again, reranker on or not."
+  (arc-test-with-temp-db
+   (let ((arc-embedding-size 3))
+     (cl-letf (((symbol-function 'llm-embedding) (lambda (&rest _) (vector 0.1 0.2 0.3))))
+       (arc-index-source
+        '(:kind "file" :path "/tmp/x.nix"
+          :chunks ((:text "alpha" :line-start 1 :line-end 1)
+                   (:text "beta"  :line-start 2 :line-end 2)))
+        "test")))
+   (let* ((ids (flatten-tree (sqlite-select (arc-db) "SELECT id FROM data ORDER BY id;")))
+          (body (json-parse-string (arc--rerank-request "a prompt" ids)
+                                    :object-type 'alist :array-type 'list))
+          (docs (alist-get 'documents body)))
+     (should (equal (alist-get 'query body) "a prompt"))
+     (should (= (length docs) 2))
+     (should (member "alpha" (mapcar (lambda (d) (alist-get 'text d)) docs)))
+     (should (member "beta" (mapcar (lambda (d) (alist-get 'text d)) docs))))))
