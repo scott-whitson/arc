@@ -2,7 +2,7 @@
 (require 'ert)
 (require 'json)
 
-(defvar tv-vec0 (or (getenv "ELISA_VEC0_PATH")
+(defvar tv-vec0 (or (getenv "AUGUR_VEC0_PATH")
                     "/nix/store/77440dch8lnph95xaj5fs634iwvgvmja-sqlite-vec-0.1.6/lib/vec0.so"))
 
 (defun tv-lit (v) (format "vec_f32('%s')" (json-encode v)))
