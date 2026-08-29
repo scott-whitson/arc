@@ -48,36 +48,11 @@
 (require 'plz)
 (require 'json)
 (require 'sqlite)
+(require 'arc-db)
 
 (defgroup arc nil
   "RAG implementation for `ellama'."
   :group 'tools)
-
-(defcustom arc-embeddings-provider (progn (require 'llm-ollama)
-					    (make-llm-ollama
-					     :embedding-model "nomic-embed-text"))
-  "Embeddings provider to generate embeddings."
-  :type '(sexp :validate llm-standard-provider-p))
-
-(defcustom arc-chat-provider (progn (require 'llm-ollama)
-				      (make-llm-ollama
-				       :chat-model "qwen2.5-coder:3b"
-				       :embedding-model "nomic-embed-text"))
-  "Chat provider."
-  :type '(sexp :validate llm-standard-provider-p))
-
-(defcustom arc-db-directory (file-truename
-			       (file-name-concat
-				user-emacs-directory "arc"))
-  "Directory for arc database."
-  :type 'directory)
-
-(defcustom arc-embedding-size 768
-  "Dimension of the embedding vectors arc stores.
-Must match the embedding model.  nomic-embed-text is 768.  Changing
-this requires reindexing, because the vec0 table is created with a
-fixed width."
-  :type 'integer :group 'arc)
 
 (defcustom arc-limit 5
   "Count quotes to pass into llm context for answer."
@@ -90,11 +65,6 @@ fixed width."
 (defcustom arc-tar-executable "tar"
   "Path to tar executable."
   :type 'string)
-
-(defcustom arc-sqlite-vec-path (getenv "ARC_VEC0_PATH")
-  "Path to the sqlite-vec (vec0) loadable extension.
-Defaults to the ARC_VEC0_PATH environment variable (set by Nix)."
-  :type '(choice (const nil) file))
 
 (defcustom arc-semantic-split-function #'arc-split-by-paragraph
   "Function for semantic text split."
@@ -191,125 +161,9 @@ If set, all quotes with similarity less than threshold will be filtered out."
   "Batch size to send to provider during batch embeddings calculation."
   :type 'integer)
 
-(defun arc-embeddings-create-table-sql ()
-  "Generate sql for create embeddings table."
-  "DROP TABLE IF EXISTS arc_embeddings;")
-
-(defun arc-data-embeddings-create-table-sql ()
-  "Generate sql for creating the vec0 embeddings table."
-  (format "CREATE VIRTUAL TABLE IF NOT EXISTS data_embeddings USING vec0(embedding float[%d]);"
-	  arc-embedding-size))
-
 (defun arc-data-embeddings-drop-table-sql ()
   "Generate sql for drop data embeddings table."
   "DROP TABLE IF EXISTS data_embeddings;")
-
-(defun arc-data-fts-create-table-sql ()
-  "Generate sql for create full text search table."
-  "CREATE VIRTUAL TABLE IF NOT EXISTS data_fts USING FTS5(data);")
-
-(defun arc-info-create-table-sql ()
-  "Generate sql for create info table."
-  "DROP TABLE IF EXISTS info;")
-
-(defun arc-collections-create-table-sql ()
-  "Generate sql for create collections table."
-  "CREATE TABLE IF NOT EXISTS collections (name TEXT UNIQUE);")
-
-(defun arc-kinds-create-table-sql ()
-  "Generate sql for create kinds table."
-  "CREATE TABLE IF NOT EXISTS kinds (name TEXT UNIQUE);")
-
-(defconst arc-kind-list '("file" "info" "org-node" "nix-option" "hm-option")
-  "The source kinds arc understands, in schema order.")
-
-(defun arc-kinds ()
-  "Return the list of source kinds arc understands."
-  arc-kind-list)
-
-(defun arc-fill-kinds-sql ()
-  "Generate sql for filling the kinds table."
-  (format "INSERT INTO kinds (name) VALUES %s ON CONFLICT DO NOTHING;"
-          (mapconcat (lambda (k) (format "('%s')" k)) arc-kind-list ", ")))
-
-(defun arc-files-create-table-sql ()
-  "Generate sql for create files table."
-  "CREATE TABLE IF NOT EXISTS files (path TEXT UNIQUE, hash TEXT)")
-
-(defun arc-data-create-table-sql ()
-  "Generate sql for create data table."
-  "CREATE TABLE IF NOT EXISTS data (
-kind_id INTEGER,
-collection_id INTEGER,
-path TEXT,
-hash TEXT,
-data TEXT,
-FOREIGN KEY(kind_id) REFERENCES kinds(rowid),
-FOREIGN KEY(collection_id) REFERENCES collections(rowid)
-);")
-
-(defun arc--init-db (db)
-  "Initialize arc DB."
-  (if (not (and arc-sqlite-vec-path (file-exists-p arc-sqlite-vec-path)))
-      (warn "Set `arc-sqlite-vec-path' (or ARC_VEC0_PATH) to the sqlite-vec vec0 extension")
-    (sqlite-pragma db "PRAGMA journal_mode=WAL;")
-    (sqlite-load-extension db arc-sqlite-vec-path)
-    (sqlite-execute db (arc-embeddings-create-table-sql))
-    (sqlite-execute db (arc-info-create-table-sql))
-    (sqlite-execute db (arc-collections-create-table-sql))
-    (sqlite-execute db (arc-kinds-create-table-sql))
-    (sqlite-execute db (arc-fill-kinds-sql))
-    (sqlite-execute db (arc-files-create-table-sql))
-    (sqlite-execute db (arc-data-create-table-sql))
-    (sqlite-execute db (arc-data-embeddings-create-table-sql))
-    (sqlite-execute db (arc-data-fts-create-table-sql))))
-
-(defvar arc--db nil
-  "Live sqlite connection, or nil before first use.")
-
-(defun arc-db ()
-  "Return the arc database connection, opening and initializing it if needed."
-  (unless (and arc--db (sqlitep arc--db))
-    (make-directory arc-db-directory t)
-    (setq arc--db (sqlite-open (file-name-concat arc-db-directory "arc.sqlite")))
-    (arc--init-db arc--db))
-  arc--db)
-
-(defun arc-close-db ()
-  "Close the arc database connection, if open."
-  (interactive)
-  (when (and arc--db (sqlitep arc--db))
-    (sqlite-close arc--db))
-  (setq arc--db nil))
-
-(defun arc-vector-to-sqlite (data)
-  "Convert DATA to sqlite vector representation."
-  (format "vec_f32('%s')" (json-encode data)))
-
-(defun arc-sqlite-escape (string)
-  "Escape single quotes in STRING for sqlite."
-  (let ((reps '(("'" . "''")
-                ("\\" . "\\\\")
-                ("\0" . "\n"))))
-    (replace-regexp-in-string
-     (regexp-opt (mapcar #'car reps))
-     (lambda (str) (alist-get str reps nil nil #'string=))
-     string nil t)))
-
-(defun arc-sqlite-format-int-list (ids)
-  "Convert list of integer IDS list to sqlite list representation."
-  (format
-   "(%s)"
-   (mapconcat (lambda (id) (format "%d" id)) ids ", ")))
-
-(defun arc-sqlite-format-string-list (names)
-  "Convert list of string NAMES list to sqlite list representation."
-  (format
-   "(%s)"
-   (mapconcat (lambda (name)
-		(format "'%s'"
-			(arc-sqlite-escape name)))
-              names ", ")))
 
 (defun arc-avg (list)
   "Calculate arithmetic average value of LIST."
