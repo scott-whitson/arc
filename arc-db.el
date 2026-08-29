@@ -198,28 +198,44 @@ PLIST keys: :kind (required), :path, :org-id, :option-name, :info-node,
   nil)
 
 (defun arc--init-db (db)
-  "Initialize the arc DB."
-  (if (not (and arc-sqlite-vec-path (file-exists-p arc-sqlite-vec-path)))
-      (warn "Set `arc-sqlite-vec-path' (or ARC_VEC0_PATH) to the sqlite-vec vec0 extension")
-    (sqlite-pragma db "journal_mode=WAL")
-    (sqlite-pragma db "foreign_keys=ON")
-    (sqlite-load-extension db arc-sqlite-vec-path)
-    (sqlite-execute db (arc-collections-create-table-sql))
-    (sqlite-execute db (arc-kinds-create-table-sql))
-    (sqlite-execute db (arc-fill-kinds-sql))
-    (sqlite-execute db (arc-sources-create-table-sql))
-    (sqlite-execute db (arc-sources-create-index-sql))
-    (sqlite-execute db (arc-data-create-table-sql))
-    (sqlite-execute db (arc-data-embeddings-create-table-sql))
-    (sqlite-execute db (arc-data-fts-create-table-sql))
-    (sqlite-execute db (format "PRAGMA user_version = %d;" arc-db-schema-version))))
+  "Initialize the arc DB.
+A missing or nonexistent `arc-sqlite-vec-path' is a hard error, not a
+warning: opening the database without loading vec0 used to silently
+skip every CREATE TABLE, so the db \"opened\" successfully but every
+table was missing -- the failure only surfaced much later as a
+confusing \"no such table: collections\" far from its real cause.
+Signal here instead, naming both the variable and the path it tried."
+  (unless (and arc-sqlite-vec-path (file-exists-p arc-sqlite-vec-path))
+    (error "arc: `arc-sqlite-vec-path' (or ARC_VEC0_PATH) does not point to an existing \
+sqlite-vec vec0 extension: %S" arc-sqlite-vec-path))
+  (sqlite-pragma db "journal_mode=WAL")
+  (sqlite-pragma db "foreign_keys=ON")
+  (sqlite-load-extension db arc-sqlite-vec-path)
+  (sqlite-execute db (arc-collections-create-table-sql))
+  (sqlite-execute db (arc-kinds-create-table-sql))
+  (sqlite-execute db (arc-fill-kinds-sql))
+  (sqlite-execute db (arc-sources-create-table-sql))
+  (sqlite-execute db (arc-sources-create-index-sql))
+  (sqlite-execute db (arc-data-create-table-sql))
+  (sqlite-execute db (arc-data-embeddings-create-table-sql))
+  (sqlite-execute db (arc-data-fts-create-table-sql))
+  (sqlite-execute db (format "PRAGMA user_version = %d;" arc-db-schema-version)))
 
 (defun arc-db ()
-  "Return the arc database connection, opening and initializing it if needed."
+  "Return the arc database connection, opening and initializing it if needed.
+If initialization signals (a bad `arc-sqlite-vec-path', for instance),
+the half-open handle is closed and `arc--db' is left nil rather than
+holding a broken connection -- a caller who fixes the misconfiguration
+and calls `arc-db' again must get a fresh, fully-initialized database,
+not a table-less one silently reused from a failed first attempt."
   (unless (and arc--db (sqlitep arc--db))
     (make-directory arc-db-directory t)
-    (setq arc--db (sqlite-open (file-name-concat arc-db-directory "arc.sqlite")))
-    (arc--init-db arc--db))
+    (let ((db (sqlite-open (file-name-concat arc-db-directory "arc.sqlite"))))
+      (condition-case err
+          (progn (arc--init-db db)
+                 (setq arc--db db))
+        (error (sqlite-close db)
+               (signal (car err) (cdr err))))))
   arc--db)
 
 (defun arc-close-db ()

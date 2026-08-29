@@ -77,3 +77,20 @@ silently failing to turn on."
      (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
      (sqlite-execute (arc-db) (format "DELETE FROM sources WHERE id = %d;" id))
      (should (= 0 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;")))))))
+
+(ert-deftest adb-bad-vec-path-signals-a-hard-error-not-a-broken-handle ()
+  "A missing or nonexistent `arc-sqlite-vec-path' must signal at open
+time, naming the variable and the path -- not warn and hand back a
+db with no tables, which is exactly how the previous run's confusing
+\"no such table: collections\" error came about far from its cause."
+  (arc-test-with-temp-db
+   (let ((arc-sqlite-vec-path "/nonexistent/vec0.so"))
+     (let ((err (should-error (arc-db) :type 'error)))
+       (should (string-match-p "arc-sqlite-vec-path" (cadr err)))
+       (should (string-match-p "/nonexistent/vec0.so" (cadr err)))))
+   ;; the failed attempt must not leave a broken handle behind: arc--db
+   ;; stays nil, so a caller who fixes the path and retries gets a
+   ;; fresh, fully-initialized database rather than a table-less one.
+   (should (null arc--db))
+   (let ((arc-sqlite-vec-path (getenv "ARC_VEC0_PATH")))
+     (should (= (arc-db-schema-version) 1)))))
