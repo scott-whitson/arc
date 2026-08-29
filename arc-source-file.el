@@ -4,9 +4,15 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;; Changes:
 ;; The directory walk and ignore-file handling are ELISA's, moved here
-;; unchanged (as `elisa--file-list', `elisa--text-file-p' and
-;; `elisa--read-ignore-file-regexps', already renamed to `arc-' by Task 1).
-;; Content hashing and line-tracked chunk attachment are new.
+;; (as `elisa--file-list', `elisa--text-file-p' and
+;; `elisa--read-ignore-file-regexps', already renamed to `arc-' by Task 1),
+;; with two ignore-matching bugs fixed: patterns were matched against each
+;; file's absolute path, so `wildcard-to-regexp''s whole-string anchoring
+;; meant a bare filename could never match; and three ordinary gitignore
+;; pattern shapes -- a trailing-slash directory, a bare name (matches any
+;; path component, not just the whole relative path), and a leading-slash
+;; anchor -- were silently inert.  Content hashing and line-tracked chunk
+;; attachment are new.
 ;;; Code:
 
 (require 'arc-chunk)
@@ -20,17 +26,64 @@
   "Ignore invisible files and directories during file parsing."
   :type 'boolean :group 'arc)
 
+(defun arc--ignore-pattern-to-regexp (pattern)
+  "Convert one ignore-file PATTERN line to a regexp, or nil.
+Nil is returned for a blank line or a `#' comment.
+
+The regexp is meant to be tested with `string-match-p' against a
+file's path relative to the ignore file's own directory.  Beyond
+plain `wildcard-to-regexp' translation of the pattern text, this
+also gives three gitignore shapes their ordinary meaning:
+
+- a trailing slash marks a directory-only pattern: everything under
+  that directory is excluded, so the match must be followed by a
+  `/' (more path underneath) rather than end-of-string;
+- a pattern with no slash at all is a bare name, matched as a whole
+  path component at ANY depth -- bounded by `/' or a string edge on
+  both sides -- not only when it happens to equal the entire
+  relative path;
+- a leading slash (or, per plain gitignore, any interior slash)
+  anchors the pattern to the very start of the relative path
+  instead of letting it match at any depth; the leading slash
+  itself is stripped before translation, since it marks the anchor
+  rather than being part of what is matched.
+
+A pattern with an interior slash and no trailing slash -- e.g.
+`keys/*_host_ed25519' -- needs none of this: matching the whole
+relative path exactly, which `wildcard-to-regexp' already anchors
+to on both ends, is already the correct behaviour for that shape."
+  (let ((trimmed (string-trim pattern)))
+    (unless (or (string-empty-p trimmed) (string-prefix-p "#" trimmed))
+      (let* ((explicit-anchor (string-prefix-p "/" trimmed))
+             (body (if explicit-anchor (substring trimmed 1) trimmed))
+             (directory-only (string-suffix-p "/" body))
+             (body (if directory-only (substring body 0 -1) body)))
+        (unless (string-empty-p body)
+          (let* ((bare-name (not (string-match-p "/" body)))
+                 (anchored (or explicit-anchor (not bare-name)))
+                 (wildcarded (wildcard-to-regexp body))
+                 (core (string-remove-suffix
+                        "\\'" (string-remove-prefix "\\`" wildcarded)))
+                 (left (if anchored "\\`" "\\(?:\\`\\|/\\)"))
+                 (right (cond (directory-only "/")
+                              (bare-name "\\(?:\\'\\|/\\)")
+                              (t "\\'"))))
+            (concat left core right)))))))
+
 (defun arc--read-ignore-file-regexps (directory)
-  "Read ignore patterns from `arc-ignore-patterns-files' in DIRECTORY."
-  (mapcar #'wildcard-to-regexp
-	  (flatten-tree
-	   (mapcar (lambda (file)
-		     (let ((filepath (expand-file-name file directory)))
-		       (when (file-exists-p filepath)
-			 (with-temp-buffer
-			   (insert-file-contents filepath)
-			   (split-string (buffer-string) "\n" t)))))
-		   arc-ignore-patterns-files))))
+  "Read ignore patterns from `arc-ignore-patterns-files' in DIRECTORY.
+Return regexps ready to test against a path relative to DIRECTORY;
+see `arc--ignore-pattern-to-regexp'."
+  (delq nil
+        (mapcar #'arc--ignore-pattern-to-regexp
+                (flatten-tree
+                 (mapcar (lambda (file)
+                           (let ((filepath (expand-file-name file directory)))
+                             (when (file-exists-p filepath)
+                               (with-temp-buffer
+                                 (insert-file-contents filepath)
+                                 (split-string (buffer-string) "\n" t)))))
+                         arc-ignore-patterns-files)))))
 
 (defun arc--text-file-p (filename)
   "Check if FILENAME contain text."
