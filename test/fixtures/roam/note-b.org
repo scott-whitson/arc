@@ -1,0 +1,7 @@
+:PROPERTIES:
+:ID:       33333333-3333-3333-3333-333333333333
+:END:
+#+title: eminix
+#+filetags: :distro:
+
+eminix is the distribution, never a host.
