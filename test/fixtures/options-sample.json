@@ -1,0 +1,19 @@
+{
+  "services.syncthing.enable": {
+    "declarations": ["nixos/modules/services/networking/syncthing.nix"],
+    "default": { "_type": "literalExpression", "text": "false" },
+    "description": "Whether to enable Syncthing, a self-hosted open-source alternative to Dropbox.",
+    "example": { "_type": "literalExpression", "text": "true" },
+    "loc": ["services", "syncthing", "enable"],
+    "readOnly": false,
+    "type": "boolean"
+  },
+  "services.syncthing.guiAddress": {
+    "declarations": ["nixos/modules/services/networking/syncthing.nix"],
+    "default": { "_type": "literalExpression", "text": "\"127.0.0.1:8384\"" },
+    "description": "The address to serve the web interface at.",
+    "loc": ["services", "syncthing", "guiAddress"],
+    "readOnly": false,
+    "type": "string"
+  }
+}
