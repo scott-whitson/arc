@@ -15,6 +15,13 @@
 ;; that scope to `(list buffer-file-name)'.  SCOPE nil ("the current
 ;; buffer, respecting the restriction if any") is used instead, and is
 ;; correct here because the buffer is freshly widened.
+;;
+;; The directory walk never descends into a dot-directory (.git,
+;; .stversions, and anything of that shape).  Syncthing keeps stale
+;; historical copies of every note under .stversions, some of them still
+;; carrying their live original's :ID: -- walked in unfiltered, those
+;; duplicate ids make `[[id:...]]' citations ambiguous, which is exactly
+;; the capability this file exists to deliver.
 ;;; Code:
 
 (require 'org)
@@ -62,10 +69,21 @@
      nil nil)
     (nreverse nodes)))
 
+(defun arc--org-not-dotdir-p (dir)
+  "Return non-nil unless DIR is a dot-directory such as .git or .stversions.
+Used as `directory-files-recursively''s descend predicate so state that
+a tool hides in a dot-directory -- Syncthing's .stversions, .git, and
+anything of that shape -- is never walked into, whatever its name is."
+  (not (string-prefix-p "." (file-name-nondirectory (directory-file-name dir)))))
+
 (defun arc-org-nodes (directory)
-  "Return node plists for every org file under DIRECTORY."
+  "Return node plists for every org file under DIRECTORY.
+Dot-directories (.git, .stversions, and the like) are never descended
+into, so a stale or hidden copy of a note never shadows or duplicates
+its live :org-id."
   (let (out)
-    (dolist (path (directory-files-recursively directory "\\.org\\'"))
+    (dolist (path (directory-files-recursively
+                   directory "\\.org\\'" nil #'arc--org-not-dotdir-p))
       (with-temp-buffer
         (insert-file-contents path)
         (let ((org-inhibit-startup t))

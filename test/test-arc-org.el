@@ -39,3 +39,12 @@
          (n (cl-find "33333333-3333-3333-3333-333333333333" nodes
                      :key (lambda (x) (plist-get x :org-id)) :test #'equal)))
     (should (member "distro" (plist-get n :tags)))))
+
+(ert-deftest ao2-skips-dot-directories ()
+  "A Syncthing .stversions copy must not become a node or duplicate an id."
+  (let ((nodes (arc-org-nodes ao2-dir)))
+    (should (= (length nodes) 3))
+    (should (= 1 (cl-count "11111111-1111-1111-1111-111111111111" nodes
+                           :key (lambda (n) (plist-get n :org-id)) :test #'equal)))
+    (should (cl-notany (lambda (n) (string-match-p "\\.stversions" (plist-get n :path)))
+                       nodes))))

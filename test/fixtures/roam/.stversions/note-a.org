@@ -1,0 +1,6 @@
+:PROPERTIES:
+:ID:       11111111-1111-1111-1111-111111111111
+:END:
+#+title: syncthing on rafik (stale synced copy)
+
+This is a stale Syncthing version-history copy and must not be indexed.
