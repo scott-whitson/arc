@@ -288,6 +288,32 @@ every retrieved citation as an org link; put point on one and press
 Lisp with an explicit collections list to search a one-off set instead
 of ~arc-enabled-collections~: ~(arc-ask "prompt" '("vault"))~.
 
+*** 7. Capture an answer to your vault
+
+arc does not guess where your notes live -- that is exactly the kind
+of assumption that let the phase 2 path bug ship a hardcoded location
+and silently index nothing for six weeks. ~arc-ui-capture-function~
+defaults to ~nil~, and pressing ~w~ (~arc-ui-capture~) in the ~*arc*~
+buffer with it unset just reports that it is unconfigured rather than
+writing anywhere. Set it to a function of one argument -- the answer
+subtree at point, as a string, question heading and ~Sources~ link
+list included -- to actually file answers, e.g. wired to
+~org-capture~:
+
+#+begin_src elisp
+(add-to-list 'org-capture-templates
+             '("a" "arc answer"
+               entry (file+headline "~/docs/org/refile.org" "Captured answers")
+               "%i" :immediate-finish t))
+
+(setopt arc-ui-capture-function
+        (lambda (text) (org-capture-string text "a")))
+#+end_src
+
+With point anywhere inside an answer -- its body or its ~Sources~
+subtree, in a buffer that may hold several answers -- ~w~ files just
+that answer, not the whole buffer.
+
 ** Known limitations
 
 *** Asynchronous reindex never removes departed sources

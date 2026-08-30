@@ -39,6 +39,7 @@
     (define-key m (kbd "RET") #'arc-ui-follow-citation)
     (define-key m (kbd "TAB") #'org-cycle)
     (define-key m (kbd "q")   #'arc-ui-quit)
+    (define-key m (kbd "w")   #'arc-ui-capture)
     m)
   "Keymap for `arc-answer-mode'.
 Acts on the answer at point.  Entry points live on the global `C-c i'
@@ -164,6 +165,37 @@ on a citation."
   "Bury the arc answer buffer."
   (interactive)
   (quit-window))
+
+(defcustom arc-ui-capture-function nil
+  "Function called with the answer subtree as a string, or nil.
+arc does not guess where your notes live.  Set this to something like
+a wrapper around `org-capture' to file an answer.  While nil, the `w'
+key reports that it is unconfigured rather than writing anywhere."
+  :type '(choice (const :tag "Not configured" nil) function)
+  :group 'arc)
+
+(defun arc-ui-answer-at-point ()
+  "Return the current answer subtree as a string, including its sources.
+The answer buffer can hold several answers (`arc-ask' appends); this
+walks up from point to the enclosing level-2 question heading before
+narrowing, so it returns only the answer at point -- question, body
+and its `Sources' subtree -- never the whole buffer or a neighbour."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (org-back-to-heading t)
+      (while (and (> (org-current-level) 2) (org-up-heading-safe)))
+      (org-narrow-to-subtree)
+      (buffer-substring-no-properties (point-min) (point-max)))))
+
+(defun arc-ui-capture ()
+  "Send the answer at point to `arc-ui-capture-function'.
+Signals a `user-error' instead of writing anywhere when that function
+is unconfigured -- arc does not guess where your notes live."
+  (interactive)
+  (unless arc-ui-capture-function
+    (user-error "arc: set `arc-ui-capture-function' to capture answers"))
+  (funcall arc-ui-capture-function (arc-ui-answer-at-point)))
 
 (require 'transient)
 

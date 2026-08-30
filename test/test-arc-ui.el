@@ -234,3 +234,59 @@
    (should (equal arc-ui--last-question "why 8385?"))
    (should (= (length arc-ui--last-sources) 1))
    (should (equal (plist-get (car arc-ui--last-sources) :path) "/tmp/x.nix"))))
+
+(ert-deftest aui-capture-is-bound-and-a-command ()
+  (should (eq (lookup-key arc-answer-mode-map (kbd "w")) 'arc-ui-capture))
+  (should (commandp 'arc-ui-capture)))
+
+(ert-deftest aui-capture-passes-the-answer-subtree-to-the-configured-function ()
+  (aui-with-fresh-buffer
+   (arc-ui-begin-answer "why 8385?")
+   (let ((m (point-marker)))
+     (arc-ui-stream-answer m "Because 8385."))
+   (arc-ui-render-sources
+    (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b")))
+   (let ((got nil))
+     (let ((arc-ui-capture-function (lambda (text) (setq got text))))
+       (goto-char (point-min))
+       (arc-ui-capture))
+     (should (string-match-p "why 8385\\?" got))
+     (should (string-match-p "Because 8385\\." got))
+     (should (string-match-p "\\[\\[file:/tmp/x\\.nix::12\\]\\]" got)))))
+
+(ert-deftest aui-capture-without-a-configured-function-says-so ()
+  (aui-with-fresh-buffer
+   (arc-ui-begin-answer "q")
+   (let ((arc-ui-capture-function nil))
+     (goto-char (point-min))
+     (should-error (arc-ui-capture) :type 'user-error))))
+
+(ert-deftest aui-answer-at-point-picks-the-answer-at-point-in-a-multi-answer-buffer ()
+  ;; Three answers appended to the same buffer (Task 6's `arc-ask' appends).
+  ;; Point lands inside the *second* answer's Sources subtree -- the exact
+  ;; case the brief calls out -- and `arc-ui-answer-at-point' must return
+  ;; only that answer's subtree, not the whole buffer and not a neighbour.
+  (aui-with-fresh-buffer
+   (let ((m1 (arc-ui-begin-answer "q1")))
+     (arc-ui-stream-answer m1 "answer one"))
+   (arc-ui-render-sources
+    (list '(:kind "file" :path "/tmp/a.nix" :line-start 1 :chunk "b")))
+   (let ((m2 (arc-ui-begin-answer "q2")))
+     (arc-ui-stream-answer m2 "answer two"))
+   (arc-ui-render-sources
+    (list '(:kind "file" :path "/tmp/b.nix" :line-start 2 :chunk "b")))
+   (let ((m3 (arc-ui-begin-answer "q3")))
+     (arc-ui-stream-answer m3 "answer three"))
+   (arc-ui-render-sources
+    (list '(:kind "file" :path "/tmp/c.nix" :line-start 3 :chunk "b")))
+   (goto-char (point-min))
+   (should (search-forward "answer two" nil t))
+   (should (re-search-forward "^\\*\\*\\* Sources" nil t))
+   (let ((got (arc-ui-answer-at-point)))
+     (should (string-match-p "q2" got))
+     (should (string-match-p "answer two" got))
+     (should (string-match-p "/tmp/b\\.nix" got))
+     (should-not (string-match-p "answer one" got))
+     (should-not (string-match-p "answer three" got))
+     (should-not (string-match-p "/tmp/a\\.nix" got))
+     (should-not (string-match-p "/tmp/c\\.nix" got)))))
