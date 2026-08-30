@@ -367,14 +367,77 @@
    (setq arc-ui--last-question "why 8385?")
    (let ((a (arc-ui-begin-answer "why 8385?")))
      (arc-ui-stream-answer a "Because the WSL profile sets it."))
-   (let ((prompt nil))
+   (let ((prompt nil) (heading 'not-set))
      (cl-letf (((symbol-function 'arc-ask)
-                (lambda (q &rest _) (setq prompt q))))
+                (lambda (q &optional _cols h) (setq prompt q) (setq heading h))))
        (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "and the listen port?")))
          (arc-ui-follow-up)))
      (should (string-match-p "and the listen port\\?" prompt))
      (should (string-match-p "why 8385\\?" prompt))
-     (should (string-match-p "Because the WSL profile sets it\\." prompt)))))
+     (should (string-match-p "Because the WSL profile sets it\\." prompt))
+     ;; Critical 2: the model's context (PROMPT) may carry the whole
+     ;; quoted exchange, but the buffer HEADING must stay the plain
+     ;; follow-up line -- never the thing that would render the quoted
+     ;; structure as this answer's own heading.
+     (should (equal heading "and the listen port?")))))
+
+(ert-deftest aui-follow-up-end-to-end-renders-one-new-heading-and-fresh-sources ()
+  ;; Critical 2's full reproduction and proof, driven through the real
+  ;; `arc-ui-follow-up' key rather than by hand-building a prompt: after a
+  ;; follow-up, the buffer must have exactly one new `**' heading holding
+  ;; the follow-up's own plain question text, exactly one new `*** Sources'
+  ;; subtree holding only the new citation, and `arc-ui-answer-at-point'
+  ;; in the new answer must return the new question and new citation --
+  ;; never the quoted earlier exchange rendered as live org structure of
+  ;; its own.
+  (require 'arc)
+  (aui-with-fresh-buffer
+   (cl-letf (((symbol-function 'arc-find-similar)
+              (lambda (_text _cols on-done &optional _on-error) (funcall on-done 'QUERY1)))
+             ((symbol-function 'arc--retrieve-ids) (lambda (_q _p) '(1)))
+             ((symbol-function 'arc--retrieve-rows)
+              (lambda (_ids) '(("file" "/tmp/a.nix" nil nil nil "chunk a" 1 1 nil))))
+             ((symbol-function 'arc-answer-request)
+              (lambda (_q _s on-partial on-done _on-error)
+                (funcall on-partial "Because")
+                (funcall on-done "Because the WSL profile sets it."))))
+     (arc-ask "why 8385?"))
+   (cl-letf (((symbol-function 'arc-find-similar)
+              (lambda (_text _cols on-done &optional _on-error) (funcall on-done 'QUERY2)))
+             ((symbol-function 'arc--retrieve-ids) (lambda (_q _p) '(2)))
+             ((symbol-function 'arc--retrieve-rows)
+              (lambda (_ids) '(("file" "/tmp/b.nix" nil nil nil "chunk b" 2 2 nil))))
+             ((symbol-function 'arc-answer-request)
+              (lambda (_q _s on-partial on-done _on-error)
+                (funcall on-partial "The port")
+                (funcall on-done "The port is 8385.")))
+             ((symbol-function 'read-string) (lambda (&rest _) "and the listen port?")))
+     (goto-char (point-min))
+     (arc-ui-follow-up))
+   ;; exactly two `**' headings: the original question, then the plain
+   ;; one-line follow-up -- never "Earlier exchange:" or any quoted blob
+   (goto-char (point-min))
+   (let (headings)
+     (while (re-search-forward "^\\*\\* \\(.*\\)$" nil t)
+       (push (match-string 1) headings))
+     (should (equal (nreverse headings) '("why 8385?" "and the listen port?"))))
+   ;; exactly two Sources subtrees, the second holding only the new
+   ;; citation
+   (goto-char (point-min))
+   (let ((count 0))
+     (while (re-search-forward "^\\*\\*\\* Sources" nil t) (setq count (1+ count)))
+     (should (= count 2)))
+   (goto-char (point-min))
+   (should (search-forward "[[file:/tmp/a.nix::1]]" nil t))
+   (should (search-forward "[[file:/tmp/b.nix::2]]" nil t))
+   ;; and `arc-ui-answer-at-point' in the new answer returns the new
+   ;; question and the new citation only
+   (goto-char (point-max))
+   (let ((sub (arc-ui-answer-at-point)))
+     (should (string-match-p "and the listen port\\?" sub))
+     (should (string-match-p "/tmp/b\\.nix" sub))
+     (should-not (string-match-p "why 8385" sub))
+     (should-not (string-match-p "/tmp/a\\.nix" sub)))))
 
 (ert-deftest aui-follow-up-quotes-the-answer-at-point-not-the-last-asked-question ()
   ;; Regression: `arc-ui--last-question' tracks the most recently *asked*

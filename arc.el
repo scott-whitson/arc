@@ -632,18 +632,30 @@ citation can name the line it actually came from."
       (take arc-limit raw))))
 
 ;;;###autoload
-(defun arc-ask (question &optional collections)
-  "Ask arc QUESTION, grounded in COLLECTIONS, rendering into the arc buffer."
+(defun arc-ask (question &optional collections heading)
+  "Ask arc QUESTION, grounded in COLLECTIONS, rendering into the arc buffer.
+QUESTION is what is sent to retrieval and to the model.  HEADING, when
+non-nil, is what is rendered as the answer's heading and recorded as
+`arc-ui--last-question' instead of QUESTION.
+
+A caller that folds earlier context into QUESTION -- `arc-ui-follow-up'
+does, so the model sees the earlier exchange -- passes its own plain,
+one-line follow-up text as HEADING, so the buffer heading (and
+anything a later `arc-ui-reask' resends) stays that one line rather
+than the whole quoted exchange QUESTION carries.  `arc-ui-begin-answer'
+enforces that whatever ends up as the heading is a single line, no
+matter which of QUESTION or HEADING that turns out to be."
   (interactive "sAsk arc: ")
-  (let ((cols (or collections arc-enabled-collections)))
+  (let* ((cols (or collections arc-enabled-collections))
+         (display (or heading question)))
     (arc-find-similar
      question cols
      (lambda (query)
        (let* ((ids (arc--retrieve-ids query question))
               (sources (mapcar #'arc-row-to-source (arc--retrieve-rows ids)))
-              (answer (arc-ui-begin-answer question)))
+              (answer (arc-ui-begin-answer display)))
          (pop-to-buffer (arc-ui-buffer))
-         (setq arc-ui--last-question question)
+         (setq arc-ui--last-question display)
          (setq arc-ui--last-sources sources)
          (arc-answer-request
           question sources

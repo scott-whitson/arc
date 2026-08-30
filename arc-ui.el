@@ -37,7 +37,7 @@
 (require 'arc-source)
 
 (declare-function arc-index-stats "arc-index")
-(declare-function arc-ask "arc")
+(declare-function arc-ask "arc" (question &optional collections heading))
 
 (defconst arc-ui-buffer-name "*arc*"
   "Name of the buffer arc renders answers into.")
@@ -115,7 +115,22 @@ first argument.  Two answers begun in the same buffer -- `arc-ask' is
 fully async, so the buffer stays focused and usable while an earlier
 answer is still streaming -- each get their own pair, so writes to one
 can never be misdirected into the other the way a single shared
-buffer-local marker used to allow."
+buffer-local marker used to allow.
+
+QUESTION becomes the heading text verbatim, so it must be a single
+line: a `\\n' inside it inserts everything after the first line as
+ordinary buffer text right below the heading, uncontrolled by anything
+this function does.  If QUESTION happens to be, or quote, an earlier
+answer's own `** question' heading and `*** Sources' subtree -- as a
+naively-built follow-up prompt would -- that uncontrolled text is a
+second, stale heading and a second, stale Sources subtree sitting
+live under the new answer.  Signalling here catches that regardless of
+which caller gets it wrong, rather than relying on every caller to
+remember to keep its own text to one line; see `arc-ask''s HEADING
+argument and `arc-ui-follow-up' for the caller this actually happened
+to."
+  (when (string-match-p "\n" question)
+    (user-error "arc: a heading must be a single line, got: %S" question))
   (with-current-buffer (arc-ui-buffer)
     (goto-char (point-max))
     (unless (bolp) (insert "\n"))
@@ -237,14 +252,23 @@ earlier answer before following up on it) via `arc-ui-answer-at-point'.
 That subtree already opens with its own `** question' heading, so the
 earlier question travels with the quoted text instead of being named
 separately -- there is deliberately no second, independently-sourced
-label for it that could name a different answer than the one quoted."
+label for it that could name a different answer than the one quoted.
+
+That quoted subtree -- heading, body and its own `*** Sources' subtree
+included -- is folded into the text handed to the model as
+`arc-ask''s QUESTION, never into what becomes this new answer's
+heading: the follow-up's own one-line prompt is passed as `arc-ask''s
+HEADING instead, so the buffer heading for this answer stays that one
+line and the quoted structure never becomes live buffer content of its
+own."
   (interactive)
   (unless arc-ui--last-question
     (user-error "arc: no answer to follow up on"))
   (let ((next (read-string "Follow up: "))
         (previous (arc-ui-answer-at-point)))
     (arc-ask (format "Earlier exchange:\n%s\n\nFollow-up: %s"
-                     previous next))))
+                     previous next)
+             nil next)))
 
 (require 'transient)
 
