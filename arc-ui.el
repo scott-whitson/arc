@@ -114,11 +114,18 @@ a later `arc-ui-stream-answer' call cannot delete into it."
                           (arc-source-link s (plist-get s :line-start)))))))))
 
 (defun arc-ui-follow-citation ()
-  "Follow the citation at point.
-A thin wrapper over `org-open-at-point': citations are org links, so
-org already knows how to open every kind arc renders."
+  "Follow the citation link at point, if point is genuinely on one.
+`org-open-at-point' resolves through `org-offer-links-in-entry' whenever
+point falls anywhere inside a heading's entry -- which the answer body's
+`** question' heading always does -- so, left unguarded, it can silently
+jump to the one link elsewhere in the entry when there is exactly one, or
+block on a link-selection prompt when there are several.  Requiring a
+link at point first keeps this command inert everywhere except squarely
+on a citation."
   (interactive)
-  (org-open-at-point))
+  (if (org-in-regexp org-link-bracket-re)
+      (org-open-at-point)
+    (message "No citation at point")))
 
 (defun arc-ui-quit ()
   "Bury the arc answer buffer."

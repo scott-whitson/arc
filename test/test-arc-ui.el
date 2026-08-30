@@ -123,3 +123,48 @@
                 (lambda (&rest _) (setq called t))))
        (arc-ui-follow-citation))
      (should called))))
+
+(ert-deftest aui-follow-citation-does-nothing-off-a-link ()
+  ;; Point on ordinary answer prose, no link there, but a link does exist
+  ;; elsewhere in the entry (the rendered Sources citation).
+  (aui-with-fresh-buffer
+   (let ((m (arc-ui-begin-answer "q")))
+     (arc-ui-stream-answer m "plain answer text, no links here"))
+   (arc-ui-render-sources
+    (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b")))
+   (goto-char (point-min))
+   (should (search-forward "plain answer text" nil t))
+   (goto-char (match-beginning 0))
+   (let ((called nil))
+     (cl-letf (((symbol-function 'org-open-at-point)
+                (lambda (&rest _) (setq called t))))
+       (arc-ui-follow-citation))
+     (should-not called))))
+
+(ert-deftest aui-follow-citation-does-nothing-on-the-sources-header-line ()
+  ;; This is the reproduction of the silent-jump bug: exactly one link in
+  ;; the entry (the single rendered citation), and point on a non-link
+  ;; line inside the Sources subtree -- the header line itself.  Left
+  ;; unguarded, `org-open-at-point' resolves this via
+  ;; `org-offer-links-in-entry' and silently follows that one link even
+  ;; though point is nowhere near it.
+  (aui-with-fresh-buffer
+   (arc-ui-begin-answer "q")
+   (arc-ui-render-sources
+    (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b")))
+   (goto-char (point-min))
+   (should (re-search-forward "^\\*\\*\\* Sources" nil t))
+   (goto-char (match-beginning 0))
+   (let ((called nil))
+     (cl-letf (((symbol-function 'org-open-at-point)
+                (lambda (&rest _) (setq called t))))
+       (arc-ui-follow-citation))
+     (should-not called))))
+
+(ert-deftest aui-quit-calls-quit-window ()
+  (aui-with-fresh-buffer
+   (let ((called nil))
+     (cl-letf (((symbol-function 'quit-window)
+                (lambda (&rest _) (setq called t))))
+       (arc-ui-quit))
+     (should called))))
