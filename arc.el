@@ -52,6 +52,13 @@
 (require 'json)
 (require 'sqlite)
 (require 'arc-db)
+;; `arc-scope' compiles a scope plist (collections, kinds, tags, a path
+;; prefix) to the single SQL predicate that both the vector and FTS sides
+;; of retrieval join against.  Required unconditionally here, like every
+;; other module in this file, rather than left for a caller to require
+;; separately -- `arc-scope-predicate' with no scope at all (nil) still
+;; has to work, so unscoped `arc-ask' keeps behaving exactly as before.
+(require 'arc-scope)
 ;; `arc-index' is required unconditionally here, not left for some external
 ;; setup function (`eminix/arc--setup', say) to require separately: nothing
 ;; in this file called into it before, so `arc-index-stats' -- which
