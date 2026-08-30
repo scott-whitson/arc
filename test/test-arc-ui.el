@@ -146,8 +146,28 @@
 
 (ert-deftest aui-mode-map-binds-the-documented-keys ()
   (dolist (cell '(("q" . arc-ui-quit)
-                  ("TAB" . org-cycle)))
+                  ("TAB" . org-cycle)
+                  ("RET" . arc-ui-follow-citation)))
     (should (eq (lookup-key arc-answer-mode-map (kbd (car cell))) (cdr cell)))))
+
+(ert-deftest aui-ret-follows-a-citation-through-the-keymap ()
+  ;; The equality check above catches RET being unbound; this exercises
+  ;; it the way a user actually would -- dispatching through the keymap
+  ;; binding itself, not by calling `arc-ui-follow-citation' directly the
+  ;; way the other citation tests do (which would keep passing even if
+  ;; RET were unbound).
+  (aui-with-fresh-buffer
+   (let ((a (arc-ui-begin-answer "q")))
+     (arc-ui-render-sources
+      a (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b"))))
+   (goto-char (point-min))
+   (should (re-search-forward org-link-bracket-re nil t))
+   (goto-char (match-beginning 0))
+   (let ((called nil))
+     (cl-letf (((symbol-function 'org-open-at-point)
+                (lambda (&rest _) (setq called t))))
+       (call-interactively (lookup-key arc-answer-mode-map (kbd "RET"))))
+     (should called))))
 
 (ert-deftest aui-mode-map-keys-are-all-real-commands ()
   (map-keymap
@@ -218,6 +238,13 @@
                 (lambda (&rest _) (setq called t))))
        (arc-ui-quit))
      (should called))))
+
+(ert-deftest aui-mode-installs-the-header-line ()
+  ;; The tests below call `arc-ui-header-line' directly, so none of them
+  ;; would notice `header-line-format' being set to nil in
+  ;; `arc-answer-mode' itself; this checks the mode actually wires it up.
+  (aui-with-fresh-buffer
+   (should (equal header-line-format '(:eval (arc-ui-header-line))))))
 
 (ert-deftest aui-header-line-summarises-the-corpus ()
   (cl-letf (((symbol-function 'arc-index-stats)
@@ -344,6 +371,40 @@
      (should (string-match-p "why 8385\\?" got))
      (should (string-match-p "Because 8385\\." got))
      (should (string-match-p "\\[\\[file:/tmp/x\\.nix::12\\]\\]" got)))))
+
+(ert-deftest aui-capture-sends-only-the-answer-at-point-not-the-whole-buffer ()
+  ;; Regression for `arc-ui-capture' wired to `(buffer-string)' instead of
+  ;; `(arc-ui-answer-at-point)': on a single-answer buffer the two happen
+  ;; to be equal and that mistake is invisible, which is exactly the gap
+  ;; the whole-branch review found -- three answers, capturing the middle
+  ;; one, is the smallest buffer that can actually catch it.
+  (aui-with-fresh-buffer
+   (let ((a1 (arc-ui-begin-answer "q1")))
+     (arc-ui-stream-answer a1 "answer one")
+     (arc-ui-render-sources
+      a1 (list '(:kind "file" :path "/tmp/a.nix" :line-start 1 :chunk "b"))))
+   (let ((a2 (arc-ui-begin-answer "q2")))
+     (arc-ui-stream-answer a2 "answer two")
+     (arc-ui-render-sources
+      a2 (list '(:kind "file" :path "/tmp/b.nix" :line-start 2 :chunk "b"))))
+   (let ((a3 (arc-ui-begin-answer "q3")))
+     (arc-ui-stream-answer a3 "answer three")
+     (arc-ui-render-sources
+      a3 (list '(:kind "file" :path "/tmp/c.nix" :line-start 3 :chunk "b"))))
+   (goto-char (point-min))
+   (should (search-forward "answer two" nil t))
+   (let ((got nil))
+     (let ((arc-ui-capture-function (lambda (text) (setq got text))))
+       (arc-ui-capture))
+     (should (string-match-p "q2" got))
+     (should (string-match-p "answer two" got))
+     (should (string-match-p "/tmp/b\\.nix" got))
+     (should-not (string-match-p "q1" got))
+     (should-not (string-match-p "q3" got))
+     (should-not (string-match-p "answer one" got))
+     (should-not (string-match-p "answer three" got))
+     (should-not (string-match-p "/tmp/a\\.nix" got))
+     (should-not (string-match-p "/tmp/c\\.nix" got)))))
 
 (ert-deftest aui-capture-without-a-configured-function-says-so ()
   (aui-with-fresh-buffer
