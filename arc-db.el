@@ -9,6 +9,7 @@
 
 (require 'sqlite)
 (require 'json)
+(require 'seq)
 
 ;; The defcustom default-value forms below construct llm-ollama structs
 ;; unconditionally at file-load time (defcustom evaluates its default
@@ -92,8 +93,10 @@ Defaults to the ARC_VEC0_PATH environment variable (set by Nix)."
   (format "INSERT INTO kinds (name) VALUES %s ON CONFLICT DO NOTHING;"
           (mapconcat (lambda (k) (format "('%s')" k)) arc-kind-list ", ")))
 
-(defconst arc-db-schema-version 1
-  "Current schema version.  Bump when adding a migration.")
+(defconst arc-db-schema-version 2
+  "Current schema version.  Bump when adding a migration.
+2 added `sources.tags' -- org tags, colon-delimited -- so a query can
+be scoped to a tag without arc having to load org-roam's own database.")
 
 (defun arc-db-schema-version ()
   "Return the schema version recorded in the open database."
@@ -110,7 +113,8 @@ Defaults to the ARC_VEC0_PATH environment variable (set by Nix)."
   info_node TEXT,
   hash TEXT,
   mtime INTEGER,
-  indexed_at INTEGER
+  indexed_at INTEGER,
+  tags TEXT
 );")
 
 (defun arc-sources-create-index-sql ()
@@ -141,6 +145,41 @@ covers all five kinds."
   "Return VALUE as a SQL literal: a quoted string, or NULL when nil."
   (if (null value) "NULL" (format "'%s'" (arc-sqlite-escape (format "%s" value)))))
 
+(defun arc-source-tags-string (tags)
+  "Render TAGS, a list of strings, as org's own colon-delimited form.
+`(\"emacs\" \"nix\")' becomes \":emacs:nix:\".  The leading and trailing
+colons matter: they are what let `:nix:' match as a substring without
+also matching a tag merely ending in `nix'.  Returns nil for no tags,
+so the column stays NULL rather than holding a meaningless \"::\"."
+  (when tags (concat ":" (string-join tags ":") ":")))
+
+(defun arc-source-tags-parse (string)
+  "Inverse of `arc-source-tags-string'.  Return a list of tag strings."
+  (and string (split-string string ":" t)))
+
+(defun arc--column-exists-p (db table column)
+  "Return non-nil when TABLE in DB has a column named COLUMN."
+  (seq-some (lambda (row) (equal (nth 1 row) column))
+            (sqlite-select db (format "PRAGMA table_info(%s);" table))))
+
+(defun arc--ensure-column (db table column ddl-type)
+  "Add COLUMN of DDL-TYPE to TABLE in DB unless it is already there.
+Return non-nil when the column was added.  Checking the actual table
+shape rather than trusting `user_version' makes this idempotent and
+survivable: a database left half-migrated by an interrupted run is
+repaired on the next open rather than skipped over because its version
+number claims otherwise."
+  (unless (arc--column-exists-p db table column)
+    (sqlite-execute db (format "ALTER TABLE %s ADD COLUMN %s %s;" table column ddl-type))
+    t))
+
+(defun arc--migrate-db (db)
+  "Bring DB's schema up to `arc-db-schema-version'.
+Idempotent: safe to run on a fresh database, on a current one, and on
+one interrupted midway through an earlier migration."
+  (arc--ensure-column db "sources" "tags" "TEXT")
+  (sqlite-execute db (format "PRAGMA user_version = %d;" arc-db-schema-version)))
+
 (defun arc-source-upsert (plist)
   "Insert or update the source described by PLIST.  Return its id.
 PLIST keys: :kind (required), :path, :org-id, :option-name, :info-node,
@@ -150,13 +189,14 @@ PLIST keys: :kind (required), :path, :org-id, :option-name, :info-node,
       (error "arc: unknown source kind %S" kind))
     (sqlite-execute
      (arc-db)
-     (format "INSERT INTO sources (kind, path, org_id, option_name, info_node, hash, mtime, indexed_at)
-              VALUES (%s, %s, %s, %s, %s, %s, %s, %d)
+     (format "INSERT INTO sources (kind, path, org_id, option_name, info_node, hash, mtime, indexed_at, tags)
+              VALUES (%s, %s, %s, %s, %s, %s, %s, %d, %s)
               ON CONFLICT (kind, COALESCE(path,''), COALESCE(org_id,''),
                            COALESCE(option_name,''), COALESCE(info_node,''))
               DO UPDATE SET hash = excluded.hash,
                             mtime = excluded.mtime,
-                            indexed_at = excluded.indexed_at;"
+                            indexed_at = excluded.indexed_at,
+                            tags = excluded.tags;"
              (arc--sql-quote kind)
              (arc--sql-quote (plist-get plist :path))
              (arc--sql-quote (plist-get plist :org-id))
@@ -164,7 +204,8 @@ PLIST keys: :kind (required), :path, :org-id, :option-name, :info-node,
              (arc--sql-quote (plist-get plist :info-node))
              (arc--sql-quote (plist-get plist :hash))
              (or (plist-get plist :mtime) "NULL")
-             (truncate (float-time))))
+             (truncate (float-time))
+             (arc--sql-quote (arc-source-tags-string (plist-get plist :tags)))))
     (caar (sqlite-select
            (arc-db)
            (format "SELECT id FROM sources WHERE kind = %s
@@ -183,7 +224,8 @@ PLIST keys: :kind (required), :path, :org-id, :option-name, :info-node,
   (when row
     (list :id (nth 0 row) :kind (nth 1 row) :path (nth 2 row)
           :org-id (nth 3 row) :option-name (nth 4 row)
-          :info-node (nth 5 row) :hash (nth 6 row) :mtime (nth 7 row))))
+          :info-node (nth 5 row) :hash (nth 6 row) :mtime (nth 7 row)
+          :tags (arc-source-tags-parse (nth 8 row)))))
 
 (defun arc-source-get (id)
   "Return the source with ID as a plist, or nil."
@@ -264,7 +306,7 @@ exactly `vec0.so' (or your platform's loadable-module suffix)"
   (sqlite-execute db (arc-data-create-table-sql))
   (sqlite-execute db (arc-data-embeddings-create-table-sql))
   (sqlite-execute db (arc-data-fts-create-table-sql))
-  (sqlite-execute db (format "PRAGMA user_version = %d;" arc-db-schema-version)))
+  (arc--migrate-db db))
 
 (defun arc-db ()
   "Return the arc database connection, opening and initializing it if needed.

@@ -7,6 +7,7 @@
 (require 'arc-test-vec0)
 (arc-test-ensure-vec0-or-skip!)
 (require 'arc)
+(require 'arc-test-helpers)
 
 (ert-deftest am-unmigrated-list-has-exactly-five-entries ()
   "This list may only shrink as functions are migrated off the
@@ -64,3 +65,27 @@ different error, or none, and this test would catch that instead."
                        (progn (apply fn args) "NO ERROR WAS SIGNALED")
                      (error (error-message-string err)))))
       (should (equal actual expected)))))
+
+(ert-deftest am-adds-tags-column-to-a-v1-database ()
+  "A database created before Task 2 must gain `tags' without losing rows."
+  (arc-test-with-temp-db
+   ;; Build a v1-shaped sources table by hand, then let arc open it.
+   (let ((db (arc-db)))
+     (sqlite-execute db "DROP TABLE IF EXISTS sources;")
+     (sqlite-execute db "CREATE TABLE sources (
+  id INTEGER PRIMARY KEY, kind TEXT NOT NULL, path TEXT, org_id TEXT,
+  option_name TEXT, info_node TEXT, hash TEXT, mtime INTEGER, indexed_at INTEGER);")
+     (sqlite-execute db "INSERT INTO sources (kind, path) VALUES ('file', '/tmp/pre-existing.txt');")
+     (sqlite-execute db "PRAGMA user_version = 1;")
+     (should-not (arc--column-exists-p db "sources" "tags"))
+     (arc--migrate-db db)
+     (should (arc--column-exists-p db "sources" "tags"))
+     (should (= 1 (caar (sqlite-select db "SELECT count(*) FROM sources;"))))
+     (should (= 2 (caar (sqlite-select db "PRAGMA user_version;")))))))
+
+(ert-deftest am-migration-is-idempotent ()
+  (arc-test-with-temp-db
+   (let ((db (arc-db)))
+     (arc--migrate-db db)
+     (arc--migrate-db db)
+     (should (arc--column-exists-p db "sources" "tags")))))

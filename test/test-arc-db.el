@@ -11,7 +11,7 @@
 
 (ert-deftest adb-schema-version-is-set ()
   (arc-test-with-temp-db
-   (should (= (arc-db-schema-version) 1))))
+   (should (= (arc-db-schema-version) 2))))
 
 (ert-deftest adb-sources-table-exists ()
   (arc-test-with-temp-db
@@ -110,7 +110,7 @@ db with no tables, which is exactly how the previous run's confusing
    ;; fresh, fully-initialized database rather than a table-less one.
    (should (null arc--db))
    (let ((arc-sqlite-vec-path (getenv "ARC_VEC0_PATH")))
-     (should (= (arc-db-schema-version) 1)))))
+     (should (= (arc-db-schema-version) 2)))))
 
 (ert-deftest adb-broken-vec0-extension-signals-clear-error-naming-path ()
   "A file that exists, passes Emacs's own `sqlite-load-extension' \
@@ -153,3 +153,46 @@ a real round trip through `arc-db' must reproduce it byte-identical."
       (format "INSERT INTO data (source_id, chunk, line_start, line_end) VALUES (%d, %s, 1, 1);"
               id (arc--sql-quote text)))
      (should (equal (caar (sqlite-select (arc-db) "SELECT chunk FROM data;")) text)))))
+
+(ert-deftest ed-tags-string-formats-org-style ()
+  (should (equal (arc-source-tags-string '("emacs" "nix")) ":emacs:nix:"))
+  (should (equal (arc-source-tags-string '("solo")) ":solo:"))
+  (should (null (arc-source-tags-string nil)))
+  (should (null (arc-source-tags-string '()))))
+
+(ert-deftest ed-upsert-persists-tags ()
+  (arc-test-with-temp-db
+   (let ((sid (arc-source-upsert
+               (list :kind "org-node" :org-id "abc-123" :path "/tmp/n.org"
+                     :tags '("emacs" "nix")))))
+     (should (equal (caar (sqlite-select
+                           (arc-db)
+                           (format "SELECT tags FROM sources WHERE id = %d;" sid)))
+                    ":emacs:nix:")))))
+
+(ert-deftest ed-upsert-tags-nil-stays-null ()
+  (arc-test-with-temp-db
+   (let ((sid (arc-source-upsert (list :kind "file" :path "/tmp/x.txt"))))
+     (should (null (caar (sqlite-select
+                          (arc-db)
+                          (format "SELECT tags FROM sources WHERE id = %d;" sid))))))))
+
+(ert-deftest ed-upsert-updates-tags-on-conflict ()
+  "Re-indexing a node whose tags changed must not keep the old ones."
+  (arc-test-with-temp-db
+   (arc-source-upsert (list :kind "org-node" :org-id "abc-123" :tags '("old")))
+   (let ((sid (arc-source-upsert (list :kind "org-node" :org-id "abc-123" :tags '("new")))))
+     (should (equal (caar (sqlite-select
+                           (arc-db)
+                           (format "SELECT tags FROM sources WHERE id = %d;" sid)))
+                    ":new:")))))
+
+(ert-deftest ed-source-row-plist-carries-tags ()
+  (arc-test-with-temp-db
+   (arc-source-upsert (list :kind "org-node" :org-id "t-1" :tags '("a" "b")))
+   (let* ((row (car (sqlite-select
+                     (arc-db)
+                     "SELECT id, kind, path, org_id, option_name, info_node, hash, mtime, tags
+                      FROM sources WHERE org_id = 't-1';")))
+          (pl (arc--source-row-to-plist row)))
+     (should (equal (plist-get pl :tags) '("a" "b"))))))
