@@ -290,3 +290,39 @@
      (should-not (string-match-p "answer three" got))
      (should-not (string-match-p "/tmp/a\\.nix" got))
      (should-not (string-match-p "/tmp/c\\.nix" got)))))
+
+(ert-deftest aui-follow-up-and-reask-are-bound-commands ()
+  (should (eq (lookup-key arc-answer-mode-map (kbd "f")) 'arc-ui-follow-up))
+  (should (eq (lookup-key arc-answer-mode-map (kbd "r")) 'arc-ui-reask))
+  (should (commandp 'arc-ui-follow-up))
+  (should (commandp 'arc-ui-reask)))
+
+(ert-deftest aui-reask-reuses-the-last-question ()
+  (require 'arc)
+  (aui-with-fresh-buffer
+   (setq arc-ui--last-question "why 8385?")
+   (let ((asked nil))
+     (cl-letf (((symbol-function 'arc-ask)
+                (lambda (q &rest _) (setq asked q))))
+       (arc-ui-reask))
+     (should (equal asked "why 8385?")))))
+
+(ert-deftest aui-reask-without-a-previous-question-says-so ()
+  (aui-with-fresh-buffer
+   (setq arc-ui--last-question nil)
+   (should-error (arc-ui-reask) :type 'user-error)))
+
+(ert-deftest aui-follow-up-carries-the-previous-answer-as-context ()
+  (require 'arc)
+  (aui-with-fresh-buffer
+   (setq arc-ui--last-question "why 8385?")
+   (arc-ui-begin-answer "why 8385?")
+   (let ((m (point-marker))) (arc-ui-stream-answer m "Because the WSL profile sets it."))
+   (let ((prompt nil))
+     (cl-letf (((symbol-function 'arc-ask)
+                (lambda (q &rest _) (setq prompt q))))
+       (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "and the listen port?")))
+         (arc-ui-follow-up)))
+     (should (string-match-p "and the listen port\\?" prompt))
+     (should (string-match-p "why 8385\\?" prompt))
+     (should (string-match-p "Because the WSL profile sets it\\." prompt)))))

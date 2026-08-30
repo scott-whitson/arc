@@ -314,6 +314,32 @@ With point anywhere inside an answer -- its body or its ~Sources~
 subtree, in a buffer that may hold several answers -- ~w~ files just
 that answer, not the whole buffer.
 
+*** 8. In-buffer keys
+
+~arc-answer-mode~ (the major mode of ~*arc*~, derived from ~org-mode~)
+binds these keys, all acting on the answer at point:
+
+| Key   | Command                    | Effect                                              |
+|-------+-----------------------------+------------------------------------------------------|
+| ~RET~ | ~arc-ui-follow-citation~   | Jump to the citation link at point; does nothing off a link. |
+| ~TAB~ | ~org-cycle~                | Fold/unfold the answer or Sources subtree at point (plain org behaviour). |
+| ~f~   | ~arc-ui-follow-up~        | Prompt for a follow-up question and ask it with the current answer's question and text folded in as context, as a new answer appended to the buffer. |
+| ~r~   | ~arc-ui-reask~            | Ask the current answer's question again, retrieving afresh -- useful after a bad sampling or a model swap, without retyping. |
+| ~w~   | ~arc-ui-capture~          | File the answer at point via ~arc-ui-capture-function~ (see above); reports that it is unconfigured rather than writing anywhere if that is unset. |
+| ~q~   | ~arc-ui-quit~             | Bury the ~*arc*~ buffer. |
+
+~f~ and ~r~ both read ~arc-ui--last-question~ (and, for ~f~, the answer
+text via ~arc-ui-answer-at-point~) rather than the buffer's last
+heading, and both signal a ~user-error~ if there is no previous
+question to work from -- i.e. in a freshly created buffer that has
+never had ~arc-ask~ render an answer into it.
+
+The spec (~docs/design/2026-08-29-design.md~) also names an in-buffer
+~s~ key (change scope and re-ask) and two global entry points, ~n~
+(vault only) and ~o~ (options only). None of the three are built:
+they all need the scoped retrieval that phase 3 adds, and binding them
+now would ship keys that cannot work.
+
 ** Known limitations
 
 *** Asynchronous reindex never removes departed sources

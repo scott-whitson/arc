@@ -30,6 +30,7 @@
 (require 'arc-source)
 
 (declare-function arc-index-stats "arc-index")
+(declare-function arc-ask "arc")
 
 (defconst arc-ui-buffer-name "*arc*"
   "Name of the buffer arc renders answers into.")
@@ -40,6 +41,8 @@
     (define-key m (kbd "TAB") #'org-cycle)
     (define-key m (kbd "q")   #'arc-ui-quit)
     (define-key m (kbd "w")   #'arc-ui-capture)
+    (define-key m (kbd "f")   #'arc-ui-follow-up)
+    (define-key m (kbd "r")   #'arc-ui-reask)
     m)
   "Keymap for `arc-answer-mode'.
 Acts on the answer at point.  Entry points live on the global `C-c i'
@@ -196,6 +199,24 @@ is unconfigured -- arc does not guess where your notes live."
   (unless arc-ui-capture-function
     (user-error "arc: set `arc-ui-capture-function' to capture answers"))
   (funcall arc-ui-capture-function (arc-ui-answer-at-point)))
+
+(defun arc-ui-reask ()
+  "Ask the last question again, retrieving afresh.
+Recovers from a bad sampling or a model swap without retyping."
+  (interactive)
+  (unless arc-ui--last-question
+    (user-error "arc: no previous question to re-ask"))
+  (arc-ask arc-ui--last-question))
+
+(defun arc-ui-follow-up ()
+  "Ask a follow-up, carrying the current question and answer as context."
+  (interactive)
+  (unless arc-ui--last-question
+    (user-error "arc: no answer to follow up on"))
+  (let ((next (read-string "Follow up: "))
+        (previous (arc-ui-answer-at-point)))
+    (arc-ask (format "Earlier question: %s\n\nEarlier answer:\n%s\n\nFollow-up: %s"
+                     arc-ui--last-question previous next))))
 
 (require 'transient)
 
