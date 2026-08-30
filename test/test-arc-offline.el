@@ -25,15 +25,24 @@ localhost:11434 and the optional reranker's POST to 127.0.0.1 are
 both loopback-only and are intentionally left alone -- do not add
 them here.")
 
+(defconst ao-policed-files '("arc.el" "arc-ui.el" "arc-answer.el")
+  "Files scanned for `ao-forbidden' identifiers.
+Used to be `arc.el' alone; `arc-ui.el' and `arc-answer.el' also talk
+to the model or render into the answer buffer and were entirely
+unpoliced by this guard, which is exactly the kind of place a
+reintroduced network dependency (an ellama-style chat package, say)
+would show up first.")
+
 (ert-deftest ao-no-network-identifiers ()
-  (with-temp-buffer
-    (insert-file-contents (expand-file-name "arc.el" ao-root))
-    (goto-char (point-min))
-    (search-forward ";;; Code:")
-    (let ((code-start (point)))
-      (dolist (needle ao-forbidden)
-        (goto-char code-start)
-        (should-not (search-forward needle nil t))))))
+  (dolist (file ao-policed-files)
+    (with-temp-buffer
+      (insert-file-contents (expand-file-name file ao-root))
+      (goto-char (point-min))
+      (search-forward ";;; Code:")
+      (let ((code-start (point)))
+        (dolist (needle ao-forbidden)
+          (goto-char code-start)
+          (should-not (search-forward needle nil t)))))))
 
 (ert-deftest ao-kinds-are-local-only ()
   (require 'arc)
