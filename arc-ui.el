@@ -209,14 +209,21 @@ Recovers from a bad sampling or a model swap without retyping."
   (arc-ask arc-ui--last-question))
 
 (defun arc-ui-follow-up ()
-  "Ask a follow-up, carrying the current question and answer as context."
+  "Ask a follow-up, carrying the answer at point as context.
+Reads the answer subtree at point (not necessarily the most recently
+asked one -- a multi-answer buffer invites scrolling back to an
+earlier answer before following up on it) via `arc-ui-answer-at-point'.
+That subtree already opens with its own `** question' heading, so the
+earlier question travels with the quoted text instead of being named
+separately -- there is deliberately no second, independently-sourced
+label for it that could name a different answer than the one quoted."
   (interactive)
   (unless arc-ui--last-question
     (user-error "arc: no answer to follow up on"))
   (let ((next (read-string "Follow up: "))
         (previous (arc-ui-answer-at-point)))
-    (arc-ask (format "Earlier question: %s\n\nEarlier answer:\n%s\n\nFollow-up: %s"
-                     arc-ui--last-question previous next))))
+    (arc-ask (format "Earlier exchange:\n%s\n\nFollow-up: %s"
+                     previous next))))
 
 (require 'transient)
 

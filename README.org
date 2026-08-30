@@ -317,22 +317,32 @@ that answer, not the whole buffer.
 *** 8. In-buffer keys
 
 ~arc-answer-mode~ (the major mode of ~*arc*~, derived from ~org-mode~)
-binds these keys, all acting on the answer at point:
+binds these keys, acting on the answer or citation at point -- except
+~r~, which always re-asks the most recently asked question in this
+buffer, not necessarily the one at point:
 
 | Key   | Command                    | Effect                                              |
 |-------+-----------------------------+------------------------------------------------------|
 | ~RET~ | ~arc-ui-follow-citation~   | Jump to the citation link at point; does nothing off a link. |
 | ~TAB~ | ~org-cycle~                | Fold/unfold the answer or Sources subtree at point (plain org behaviour). |
-| ~f~   | ~arc-ui-follow-up~        | Prompt for a follow-up question and ask it with the current answer's question and text folded in as context, as a new answer appended to the buffer. |
-| ~r~   | ~arc-ui-reask~            | Ask the current answer's question again, retrieving afresh -- useful after a bad sampling or a model swap, without retyping. |
+| ~f~   | ~arc-ui-follow-up~        | Prompt for a follow-up question and ask it with the answer subtree *at point* (its own question heading, body and Sources) quoted in as context, as a new answer appended to the buffer. |
+| ~r~   | ~arc-ui-reask~            | Ask the most recently asked question in this buffer again, retrieving afresh -- useful after a bad sampling or a model swap, without retyping. |
 | ~w~   | ~arc-ui-capture~          | File the answer at point via ~arc-ui-capture-function~ (see above); reports that it is unconfigured rather than writing anywhere if that is unset. |
 | ~q~   | ~arc-ui-quit~             | Bury the ~*arc*~ buffer. |
 
-~f~ and ~r~ both read ~arc-ui--last-question~ (and, for ~f~, the answer
-text via ~arc-ui-answer-at-point~) rather than the buffer's last
-heading, and both signal a ~user-error~ if there is no previous
-question to work from -- i.e. in a freshly created buffer that has
-never had ~arc-ask~ render an answer into it.
+~r~ reads ~arc-ui--last-question~ -- the most recently *asked* question
+in this buffer -- and re-asks exactly that, regardless of where point
+is; that is the right source for "ask the last question again". ~f~
+is deliberately different: a multi-answer buffer invites scrolling
+back to an earlier answer before following up on it, so ~f~ builds its
+prompt entirely from the answer subtree at point via
+~arc-ui-answer-at-point~ -- which already opens with its own
+~** question~ heading -- rather than naming the question separately
+from ~arc-ui--last-question~, which would risk pairing one answer's
+text with a different (and possibly much later) question. Both still
+guard on ~arc-ui--last-question~ being non-nil before doing anything,
+and signal a ~user-error~ in a buffer that has never had ~arc-ask~
+render an answer into it.
 
 The spec (~docs/design/2026-08-29-design.md~) also names an in-buffer
 ~s~ key (change scope and re-ask) and two global entry points, ~n~

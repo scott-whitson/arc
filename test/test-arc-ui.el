@@ -326,3 +326,42 @@
      (should (string-match-p "and the listen port\\?" prompt))
      (should (string-match-p "why 8385\\?" prompt))
      (should (string-match-p "Because the WSL profile sets it\\." prompt)))))
+
+
+(ert-deftest aui-follow-up-quotes-the-answer-at-point-not-the-last-asked-question ()
+  ;; Regression: `arc-ui--last-question' tracks the most recently *asked*
+  ;; question, buffer-local across the whole buffer -- not whichever
+  ;; answer point happens to sit in. A multi-answer buffer actively
+  ;; invites scrolling back to an earlier answer before following up on
+  ;; it, so the follow-up prompt must be built entirely from the answer
+  ;; at point (`arc-ui-answer-at-point', question heading included) and
+  ;; must never name a different question by pulling it from
+  ;; `arc-ui--last-question'.
+  (require 'arc)
+  (aui-with-fresh-buffer
+   (let ((m1 (arc-ui-begin-answer "q1?")))
+     (arc-ui-stream-answer m1 "answer one text"))
+   (arc-ui-render-sources nil)
+   (let ((m2 (arc-ui-begin-answer "q2?")))
+     (arc-ui-stream-answer m2 "answer two text"))
+   (arc-ui-render-sources nil)
+   (let ((m3 (arc-ui-begin-answer "q3?")))
+     (arc-ui-stream-answer m3 "answer three text"))
+   (arc-ui-render-sources nil)
+   (setq arc-ui--last-question "q3?")
+   (goto-char (point-min))
+   (should (search-forward "answer one text" nil t))
+   (let ((prompt nil))
+     (cl-letf (((symbol-function 'arc-ask)
+                (lambda (q &rest _) (setq prompt q))))
+       (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "a follow-up question")))
+         (arc-ui-follow-up)))
+     (should (string-match-p "q1\\?" prompt))
+     (should (string-match-p "answer one text" prompt))
+     (should-not (string-match-p "q3\\?" prompt))
+     (should-not (string-match-p "answer three text" prompt)))))
+
+(ert-deftest aui-follow-up-without-a-previous-question-says-so ()
+  (aui-with-fresh-buffer
+   (setq arc-ui--last-question nil)
+   (should-error (arc-ui-follow-up) :type 'user-error)))
