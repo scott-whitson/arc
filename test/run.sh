@@ -15,6 +15,23 @@ if [ -n "${ARC_VEC0_PATH:-}" ] && [ ! -f "$ARC_VEC0_PATH" ]; then
   exit 2
 fi
 fail=0
+
+# Byte-compile gate. A missing `require' can leave every ERT suite green
+# -- phase 4's header line shipped broken exactly that way, because
+# nothing in the package required `arc-index' and six suites did not
+# care. Warnings are errors here: this gate exists to catch the class,
+# not to be negotiated with.
+echo "== byte-compile"
+bclog="$(mktemp)"
+emacs -Q -batch -L . -f batch-byte-compile arc*.el >"$bclog" 2>&1
+bcstatus=$?
+rm -f ./*.elc
+if grep -q 'Warning:' "$bclog" || [ "$bcstatus" -ne 0 ]; then
+  cat "$bclog" >&2
+  echo "byte-compile gate FAILED" >&2
+  fail=1
+fi
+rm -f "$bclog"
 total_tests=0
 skipped=0
 log="$(mktemp)"

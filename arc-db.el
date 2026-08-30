@@ -10,24 +10,32 @@
 (require 'sqlite)
 (require 'json)
 
+;; `make-llm-ollama' is only required lazily, inside the defcustom
+;; default-value forms below, so the byte-compiler never sees a
+;; top-level `require' for `llm-ollama' to resolve it against.
+(declare-function make-llm-ollama "llm-ollama")
+
 (defcustom arc-embeddings-provider (progn (require 'llm-ollama)
 					    (make-llm-ollama
 					     :embedding-model "nomic-embed-text"))
   "Embeddings provider to generate embeddings."
-  :type '(sexp :validate llm-standard-provider-p))
+  :type '(sexp :validate llm-standard-provider-p)
+  :group 'arc)
 
 (defcustom arc-chat-provider (progn (require 'llm-ollama)
 				      (make-llm-ollama
 				       :chat-model "qwen2.5-coder:3b"
 				       :embedding-model "nomic-embed-text"))
   "Chat provider."
-  :type '(sexp :validate llm-standard-provider-p))
+  :type '(sexp :validate llm-standard-provider-p)
+  :group 'arc)
 
 (defcustom arc-db-directory (file-truename
 			       (file-name-concat
 				user-emacs-directory "arc"))
   "Directory for arc database."
-  :type 'directory)
+  :type 'directory
+  :group 'arc)
 
 (defcustom arc-embedding-size 768
   "Dimension of the embedding vectors arc stores.
@@ -39,7 +47,8 @@ fixed width."
 (defcustom arc-sqlite-vec-path (getenv "ARC_VEC0_PATH")
   "Path to the sqlite-vec (vec0) loadable extension.
 Defaults to the ARC_VEC0_PATH environment variable (set by Nix)."
-  :type '(choice (const nil) file))
+  :type '(choice (const nil) file)
+  :group 'arc)
 
 (defvar arc--db nil
   "Live sqlite connection, or nil before first use.")
