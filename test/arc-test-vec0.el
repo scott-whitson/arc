@@ -17,13 +17,25 @@
 ;;; Code:
 
 (defun arc-test-locate-vec0 ()
-  "Return a path to a usable sqlite-vec (vec0) extension, or nil.
+  "Return a path to a usable sqlite-vec (vec0) extension.
 Checks `ARC_VEC0_PATH' first (the documented, explicit way to point at
-one -- see `arc-sqlite-vec-path'), then a few common install
-locations.  Never guesses: every candidate is confirmed with
-`file-exists-p' before being returned."
-  (or (let ((e (getenv "ARC_VEC0_PATH")))
-        (and e (not (string-empty-p e)) (file-exists-p e) e))
+one -- see `arc-sqlite-vec-path'): if it is set to a real, existing
+file, that path is returned, full stop -- it is never silently
+second-guessed by falling through to a search elsewhere.  If it is set
+to something that does NOT exist, that is a real mistake worth failing
+loudly on, not quietly working around: this signals an `error' naming
+the bad value, exactly the way `test/run.sh' already does for the same
+situation, rather than silently substituting a DIFFERENT extension the
+caller never asked for and never being told.  Only when `ARC_VEC0_PATH'
+is unset (or empty) does this fall back to searching a few common
+install locations, returning nil -- never a guess -- if none exist,
+so a caller can skip cleanly instead of failing obscurely deep inside
+the first database a test opens."
+  (let ((e (getenv "ARC_VEC0_PATH")))
+    (if (and e (not (string-empty-p e)))
+        (if (file-exists-p e)
+            e
+          (error "arc: ARC_VEC0_PATH is set to %S, which does not exist -- fix it or unset it; this will not silently try a different extension instead" e))
       (car (seq-filter
             #'file-exists-p
             (append
@@ -34,7 +46,7 @@ locations.  Never guesses: every candidate is confirmed with
                    "/usr/lib/sqlite3/vec0.so"
                    "/usr/lib/x86_64-linux-gnu/vec0.so"
                    "/usr/local/lib/vec0.so"
-                   "/opt/homebrew/lib/vec0.so"))))))
+                   "/opt/homebrew/lib/vec0.so")))))))
 
 (defmacro arc-test-ensure-vec0-or-skip! ()
   "Set `ARC_VEC0_PATH' to a located vec0 extension for the rest of this

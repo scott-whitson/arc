@@ -29,19 +29,37 @@
 ;;
 ;; Called interactively -- `M-x arc-reindex-all', the first command a
 ;; new user is likely to run -- it instead runs
-;; `arc--reindex-all-async', which drives the very same producers and
-;; the very same per-chunk write (`arc--write-chunk') but gets each
-;; chunk's embedding via `llm-embedding-async' (a subprocess `curl'
-;; call driven by `plz', with a callback -- never a blocking wait) and
-;; keeps at most `arc-index-max-in-flight' requests outstanding at
-;; once.  Emacs's single command loop is therefore never occupied by
-;; the embedding step; between any two chunks it is exactly as free to
-;; redisplay, accept a keystroke or run a timer as it would be sitting
-;; idle at a prompt.  This is what actually fixes the freeze: options.json
-;; alone is 24,661 NixOS options plus 5,513 Home-Manager ones, and the
-;; 94 builtin Info manuals are thousands more nodes on top of that --
-;; each one a blocking network call under the old synchronous path, and
+;; `arc--reindex-all-async', which drives the very same producers but
+;; gets each chunk's embedding via `llm-embedding-async' (a subprocess
+;; `curl' call driven by `plz', with a callback -- never a blocking
+;; wait) and keeps at most `arc-index-max-in-flight' requests
+;; outstanding at once, spanning several sources concurrently.  Emacs's
+;; single command loop is therefore never occupied by the embedding
+;; step; between any two chunks it is exactly as free to redisplay,
+;; accept a keystroke or run a timer as it would be sitting idle at a
+;; prompt.  This is what actually fixes the freeze: options.json alone
+;; is 24,661 NixOS options plus 5,513 Home-Manager ones, and the 94
+;; builtin Info manuals are thousands more nodes on top of that -- each
+;; one a blocking network call under the old synchronous path, and
 ;; tens of minutes of a completely unusable Emacs.
+;;
+;; Unlike the synchronous path -- which deletes a source's old chunks
+;; up front and writes each new one via `arc--write-chunk' as it is
+;; embedded, one chunk-sized transaction at a time -- the asynchronous
+;; path never deletes a source's old content until *all* of that
+;; source's replacement chunks have been embedded: see
+;; `arc--replace-source-chunks', which does the delete and every
+;; insert together as one transaction, called by
+;; `arc--reindex-async-collection' only once a source is fully ready to
+;; replace.  An eager per-chunk delete is safe for the synchronous path
+;; (a `C-g' there is already unusual, and stopping it mid-source is an
+;; accepted, documented cost of batch use); it is not safe for a path
+;; whose entire reason to exist is that a user is expected to interrupt
+;; it interactively -- an earlier version of this file's asynchronous
+;; path deleted eagerly too, and cancelling two minutes into a real run
+;; over a large multi-chunk source (a 477-chunk file, reproduced live)
+;; silently cut it down to whatever had settled by then, while reporting
+;; success.
 ;;
 ;; This is deliberately NOT built on `async-start' (the `arc--async-do'
 ;; pattern arc.el's still-unmigrated ELISA functions use).  That would
@@ -98,12 +116,37 @@ outright, and does so audibly via `message', not silently."
       (message "arc: replaced undecodable byte(s) in a chunk (%d chars)" (length text)))
     cleaned))
 
+(defun arc--insert-chunk-row (sid cid text line-start line-end title vec)
+  "Insert one chunk row for source SID/collection CID plus its
+`data_embeddings' and `data_fts' rows.  Does NOT wrap this in a
+transaction of its own -- callers that need atomicity (one chunk in
+`arc--write-chunk', or a whole source's worth of chunks at once in
+`arc--replace-source-chunks') wrap their own call to this around
+whatever unit of work needs to be all-or-nothing."
+  (sqlite-execute
+   (arc-db)
+   (format "INSERT INTO data (source_id, collection_id, chunk, line_start, line_end, title)
+            VALUES (%d, %d, %s, %s, %s, %s);"
+           sid cid (arc--sql-quote text)
+           (or line-start "NULL") (or line-end "NULL") (arc--sql-quote title)))
+  (let ((rowid (caar (sqlite-select (arc-db) "SELECT last_insert_rowid();"))))
+    (sqlite-execute (arc-db)
+                    (format "INSERT INTO data_embeddings (rowid, embedding) VALUES (%d, %s);"
+                            rowid (arc-vector-to-sqlite vec)))
+    (sqlite-execute (arc-db)
+                    (format "INSERT INTO data_fts (rowid, data) VALUES (%d, %s);"
+                            rowid (arc--sql-quote text)))))
+
 (defun arc--write-chunk (sid cid text line-start line-end title vec)
   "Write one chunk row for source SID/collection CID plus its
 `data_embeddings' and `data_fts' rows, as a single sqlite transaction.
-This is the one place either indexing path (`arc-index-source', the
-synchronous per-chunk loop, or `arc--reindex-async-embed-chunk', the
-asynchronous one) actually writes a chunk, and it must be all-or-
+Used by the synchronous path (`arc-index-source''s per-chunk loop),
+where each source's stale chunks are already deleted up front by the
+caller and each new chunk is written as it is embedded.  The
+asynchronous path does NOT use this for its main per-source replace --
+see `arc--replace-source-chunks', which needs the delete and every
+chunk's insert inside *one* shared transaction, not one transaction
+per chunk -- but still needs the underlying insert to be all-or-
 nothing: `data', `data_embeddings' and `data_fts' are three separate
 statements with no foreign key tying the two virtual tables back to
 `data' (see `arc--delete-data-for-source'), so anything that could
@@ -123,19 +166,33 @@ would silently become a no-op guard against exactly nothing."
   ;; 29.2, not merely "29.x" -- 29.1's `with-sqlite-transaction' always
   ;; committed.
   (with-sqlite-transaction (arc-db)
-    (sqlite-execute
-     (arc-db)
-     (format "INSERT INTO data (source_id, collection_id, chunk, line_start, line_end, title)
-              VALUES (%d, %d, %s, %s, %s, %s);"
-             sid cid (arc--sql-quote text)
-             (or line-start "NULL") (or line-end "NULL") (arc--sql-quote title)))
-    (let ((rowid (caar (sqlite-select (arc-db) "SELECT last_insert_rowid();"))))
-      (sqlite-execute (arc-db)
-                      (format "INSERT INTO data_embeddings (rowid, embedding) VALUES (%d, %s);"
-                              rowid (arc-vector-to-sqlite vec)))
-      (sqlite-execute (arc-db)
-                      (format "INSERT INTO data_fts (rowid, data) VALUES (%d, %s);"
-                              rowid (arc--sql-quote text))))))
+    (arc--insert-chunk-row sid cid text line-start line-end title vec)))
+
+(defun arc--replace-source-chunks (sid cid title chunks)
+  "Atomically replace every `data'/`data_embeddings'/`data_fts' row
+belonging to source SID/collection CID with CHUNKS -- a list of
+\(TEXT LINE-START LINE-END VEC\), one already-embedded replacement
+chunk each -- as a single sqlite transaction spanning the delete AND
+every insert together.
+
+This is what makes a source's reindex atomic as a *whole*, not merely
+chunk-by-chunk: `arc--reindex-async-collection' calls this only once
+every one of SID's replacement chunks has actually been embedded and
+is ready to write, never before, so the old content is deleted only at
+the moment the full new content is already in hand.  An interruption
+\(a cancelled async run\) or an embedding failure partway through this
+source's chunks therefore never reaches this function for that source
+at all -- its old content survives completely intact, not cut down to
+whatever had settled before the interruption, which is what an
+eagerly-deleting version of this used to do: reproduced live, a
+477-chunk source cancelled after only 2 of its chunks had settled was
+left with 6 chunks (a 99%+ silent loss), because the old delete ran
+the instant the source was *advanced into*, not once its replacement
+was actually ready."
+  (with-sqlite-transaction (arc-db)
+    (arc--delete-data-for-source sid)
+    (dolist (c chunks)
+      (arc--insert-chunk-row sid cid (nth 0 c) (nth 1 c) (nth 2 c) title (nth 3 c)))))
 
 (defun arc-index-source (source collection)
   "Index SOURCE into COLLECTION.  Return the number of chunks written.
@@ -459,42 +516,35 @@ one bounded batch at a time."
                                                        arc-index-info-priority-manuals)
                               arc-index-info-cap))))
 
-(defun arc--reindex-async-embed-chunk (chunk cid sid title settle)
-  "Embed one CHUNK of source SID/collection CID via `llm-embedding-async'
-and write it with `arc--write-chunk' when the vector arrives.  Calls
-SETTLE with `ok' or `failed' exactly once, no matter what happens --
-a successful write, an embedding error, or a *write* error (an sqlite
-failure, any signal from `arc--write-chunk') -- via `unwind-protect',
-so `arc--reindex-async-collection' can never lose track of an
-in-flight slot: without this, an error inside the success callback
-(the write happened before the call to SETTLE) skipped SETTLE
-entirely, leaking that slot forever and eventually wedging the whole
-run at less than `arc-index-max-in-flight' below its bound with
-nothing left to fill it -- reproduced live: 3 induced write failures
-stalled a 20-chunk run at 9, un-cancellable, since `in-flight' never
-reached 0 either.  A failed embedding or a failed write is reported via
-`message' and simply skipped rather than aborting the run -- one bad
-chunk (an Ollama hiccup, a transient sqlite error) should not cost the
-rest of the corpus -- but SETTLE's status lets
-`arc--reindex-async-collection' count failures instead of only ever
-seeing a clean multiple-of-nothing."
-  (let ((text (arc--sanitize-text (plist-get chunk :text))))
-    (llm-embedding-async
-     arc-embeddings-provider text
-     (lambda (vec)
-       (let ((wrote nil))
-         (unwind-protect
-             (condition-case err
-                 (progn
-                   (arc--write-chunk sid cid text (plist-get chunk :line-start)
-                                      (plist-get chunk :line-end) title vec)
-                   (setq wrote t))
-               (error (message "arc: writing a chunk of source %d failed: %s"
-                                sid (error-message-string err))))
-           (funcall settle (if wrote 'ok 'failed)))))
-     (lambda (_type msg)
-       (message "arc: embedding failed for a chunk of source %d: %s" sid msg)
-       (funcall settle 'failed)))))
+(defun arc--reindex-async-embed-chunk (chunk sid settle)
+  "Embed one CHUNK belonging to source SID via `llm-embedding-async'.
+Calls SETTLE with `ok' and the resulting (TEXT LINE-START LINE-END VEC)
+on success, or `failed' and nil on any failure -- an embedding error,
+or any signal escaping the setup here (defensive: this used to write
+to the database directly, and needed its own `unwind-protect' for
+exactly that reason; it no longer writes anything itself, since
+writing a whole source's chunks is now `arc--replace-source-chunks''s
+job, done once every one of SID's chunks has settled -- but a
+synchronous throw before `llm-embedding-async' even registers its own
+callbacks would otherwise leak this in-flight slot exactly the same
+way, so the setup here still runs under `condition-case') -- exactly
+once, so `arc--reindex-async-collection' can always free the in-flight
+slot and never mistakes a swallowed error for one more chunk quietly
+done."
+  (condition-case err
+      (let ((text (arc--sanitize-text (plist-get chunk :text))))
+        (llm-embedding-async
+         arc-embeddings-provider text
+         (lambda (vec)
+           (funcall settle 'ok (list text (plist-get chunk :line-start)
+                                     (plist-get chunk :line-end) vec)))
+         (lambda (_type msg)
+           (message "arc: embedding failed for a chunk of source %d: %s" sid msg)
+           (funcall settle 'failed nil))))
+    (error
+     (message "arc: could not start embedding a chunk of source %d: %s"
+              sid (error-message-string err))
+     (funcall settle 'failed nil))))
 
 (defun arc--reindex-async-collection (run name cid sources total on-collection-done)
   "Index SOURCES (all of collection NAME/CID's sources for this run)
@@ -507,43 +557,54 @@ collections this exists to speed up: `arc-index-max-in-flight' sources
 are advanced into concurrently instead, each contributing its chunks
 to one shared queue.
 
-A source is upserted -- and its stale chunks deleted via
-`arc--delete-data-for-source' -- lazily, the moment it is first
-advanced into, never upfront for the whole collection: a source this
-run never reaches because RUN was cancelled first is therefore left
-exactly as it was, not wiped and left with nothing.  A source that
-*was* advanced into but then hit a chunk failure (see
-`arc--reindex-async-embed-chunk') is a different, narrower problem
-this does NOT fix: `arc--delete-data-for-source' already ran for it,
-so it is left with only whichever of its chunks embedded successfully
--- possibly none -- rather than its old content.  That asymmetry with
-the synchronous path (which signals and aborts the whole run instead
-of skipping) is deliberate, but it must not also be silent: FAILED-
-CHUNKS and FAILED-SOURCES below exist so ON-COLLECTION-DONE's caller
-can say so loudly instead of it being one `message' buried among
-hundreds of progress lines.
+A source's replacement is atomic as a *whole*: `arc-source-upsert' runs
+the moment a source is first advanced into (so `kept' below reflects
+every source this run started, same as the synchronous path), but its
+old chunks are NOT deleted then.  Every one of its chunks is embedded
+first and accumulated in SOURCE-CHUNKS; only once all of them have
+settled does `source-settled' hand the whole batch to
+`arc--replace-source-chunks', which deletes the old rows and inserts
+every new one inside a single transaction.  A source RUN never
+finishes reaching -- because it was cancelled, or because one of its
+own chunks failed to embed -- therefore keeps its old content exactly
+as it was: nothing about it is deleted until the complete replacement
+is already in hand.  This is what actually fixes the bug an earlier,
+eagerly-deleting version of this had: reproduced live, a 477-chunk
+source cancelled after only 2 of its chunks had settled was left with
+6 -- 471 gone from one keypress, silently, since `failed-chunks' was 0
+and the run reported success.
 
-Calls ON-COLLECTION-DONE with (KEPT FAILED-CHUNKS FAILED-SOURCE-COUNT)
--- KEPT the list of source ids started, in starting order, FAILED-
-CHUNKS the total number of chunks that never got a successful write,
-FAILED-SOURCE-COUNT how many distinct sources had at least one -- once
-every started source's every chunk has settled and either every
-source in SOURCES has been started, or RUN was cancelled.  Called
-exactly once: `finished' guards not just entry but the completion
-branch itself, because a `settle' that fires synchronously (a stub, a
-cache, any future local embedder that does not genuinely defer) would
-otherwise re-enter `pump' before the outer call has unwound, and an
-unguarded completion check at the end of that outer call would fire
-ON-COLLECTION-DONE a second time against an already-mutated KEPT."
+A source with at least one chunk failure -- an embedding error, or (via
+`arc-index-max-in-flight') simply never getting to run before RUN was
+cancelled -- is never replaced at all, not partially: FAILED-CHUNKS and
+FAILED-SOURCES exist purely so ON-COLLECTION-DONE's caller can say so
+loudly, not to gate a partial write that no longer happens.  A source
+whose own `arc-source-upsert' (or bookkeeping) signals is counted in
+FAILED-TO-START instead and simply skipped, rather than wedging `pump'
+on a source that can never advance past itself.
+
+Calls ON-COLLECTION-DONE with (KEPT FAILED-CHUNKS FAILED-SOURCE-COUNT
+FAILED-TO-START) -- KEPT the list of source ids started, in starting
+order -- once every started source has either been fully replaced or
+given up on, and either every source in SOURCES has been started, or
+RUN was cancelled.  Called exactly once: `finished' guards not just
+entry but the completion branch itself, because a `settle' that fires
+synchronously (a stub, a cache, any future local embedder that does
+not genuinely defer) would otherwise re-enter `pump' before the outer
+call has unwound, and an unguarded completion check at the end of that
+outer call would fire ON-COLLECTION-DONE a second time against an
+already-mutated KEPT."
   (let ((remaining sources)
         (queue nil) ; list of (sid . chunk), oldest first
         (queue-tail nil)
         (remaining-in-source (make-hash-table :test 'eql))
         (source-title (make-hash-table :test 'eql))
+        (source-chunks (make-hash-table :test 'eql)) ; sid -> accumulated (TEXT LS LE VEC) list
         (kept nil)
         (sources-done 0)
         (failed-chunks 0)
         (failed-sources (make-hash-table :test 'eql))
+        (failed-to-start 0)
         (in-flight 0)
         (finished nil))
     (cl-labels
@@ -554,30 +615,56 @@ ON-COLLECTION-DONE a second time against an already-mutated KEPT."
                (setq queue-tail cell))))
          (source-settled (sid)
            (cl-incf sources-done)
+           (if (gethash sid failed-sources)
+               (message "arc: %s: source %d not replaced -- a chunk failed to embed; its old content is untouched"
+                        name sid)
+             (condition-case err
+                 (arc--replace-source-chunks
+                  sid cid (gethash sid source-title) (nreverse (gethash sid source-chunks)))
+               (error
+                (puthash sid t failed-sources)
+                (cl-incf failed-chunks)
+                (message "arc: replacing source %d's chunks failed: %s"
+                         sid (error-message-string err)))))
            (when (or (= sources-done total) (zerop (mod sources-done arc-index-progress-every)))
              (message "arc: %s: %d/%d source(s) indexed" name sources-done total))
            (remhash sid remaining-in-source)
-           (remhash sid source-title))
-         (chunk-settled (sid status)
+           (remhash sid source-title)
+           (remhash sid source-chunks))
+         (chunk-settled (sid status data)
            (cl-decf in-flight)
-           (when (eq status 'failed)
-             (cl-incf failed-chunks)
-             (puthash sid t failed-sources))
+           (if (eq status 'failed)
+               (progn (cl-incf failed-chunks) (puthash sid t failed-sources))
+             (puthash sid (cons data (gethash sid source-chunks)) source-chunks))
            (let ((left (1- (gethash sid remaining-in-source 1))))
              (if (<= left 0) (source-settled sid) (puthash sid left remaining-in-source)))
            (pump))
          (start-next-source ()
-           (let* ((source (car remaining))
-                  (sid (arc-source-upsert source))
-                  (chunks (plist-get source :chunks)))
+           (let ((source (car remaining)))
              (setq remaining (cdr remaining))
-             (arc--delete-data-for-source sid)
-             (push sid kept)
-             (if (null chunks)
-                 (source-settled sid) ; a chunk-less source has nothing to wait on
-               (puthash sid (plist-get source :title) source-title)
-               (puthash sid (length chunks) remaining-in-source)
-               (enqueue sid chunks))))
+             (condition-case err
+                 (let* ((sid (arc-source-upsert source))
+                        (chunks (plist-get source :chunks)))
+                   (push sid kept)
+                   (if (null chunks)
+                       ;; a chunk-less source has nothing to embed, so
+                       ;; its replacement (an empty one -- clearing any
+                       ;; old content, same as the synchronous path)
+                       ;; happens right away rather than waiting on a
+                       ;; chunk that will never settle.
+                       (source-settled sid)
+                     (puthash sid (plist-get source :title) source-title)
+                     (puthash sid (length chunks) remaining-in-source)
+                     (enqueue sid chunks)))
+               (error
+                ;; `arc-source-upsert' (or anything else here) failing
+                ;; must not wedge the run the way this used to when
+                ;; unprotected: `remaining' has already advanced above,
+                ;; so `pump' simply moves on to the next source instead
+                ;; of spinning forever on one that can never progress.
+                (cl-incf failed-to-start)
+                (message "arc: could not start indexing a source in %s: %s"
+                         name (error-message-string err))))))
          (pump ()
            (unless finished
              (while (and (not (plist-get run :cancelled))
@@ -587,9 +674,9 @@ ON-COLLECTION-DONE a second time against an already-mutated KEPT."
                    (let ((task (pop queue)))
                      (unless queue (setq queue-tail nil))
                      (cl-incf in-flight)
-                     (arc--reindex-async-embed-chunk
-                      (cdr task) cid (car task) (gethash (car task) source-title)
-                      (let ((sid (car task))) (lambda (status) (chunk-settled sid status)))))
+                     (let ((sid (car task)))
+                       (arc--reindex-async-embed-chunk
+                        (cdr task) sid (lambda (status data) (chunk-settled sid status data)))))
                  (start-next-source)))
              ;; `(not finished)' here, not just on entry: a `settle' that
              ;; fires synchronously re-enters `pump' from inside the
@@ -610,7 +697,7 @@ ON-COLLECTION-DONE a second time against an already-mutated KEPT."
                ;; the reentrancy bug above into an 8-source index
                ;; mangled down to 1).
                (funcall on-collection-done (reverse kept) failed-chunks
-                        (hash-table-count failed-sources))))))
+                        (hash-table-count failed-sources) failed-to-start)))))
       (pump))))
 
 (defun arc--reindex-async-next-cell (run cells)
@@ -642,11 +729,15 @@ a time, then finish RUN.  See `arc--reindex-all-async'."
           (message "arc: %s: %d source(s) to index" name (length sources))
           (arc--reindex-async-collection
            run name cid sources (length sources)
-           (lambda (kept failed-chunks failed-sources)
-             (message "arc: %s: %d source(s) indexed%s" name (length kept)
+           (lambda (kept failed-chunks failed-sources failed-to-start)
+             (message "arc: %s: %d source(s) indexed%s%s" name (length kept)
                       (if (> failed-chunks 0)
-                          (format " -- %d chunk failure(s) across %d source(s), see messages above"
-                                  failed-chunks failed-sources)
+                          (format " -- %d source(s) not replaced (a chunk failed), old content kept, see messages above"
+                                  failed-sources)
+                        "")
+                      (if (> failed-to-start 0)
+                          (format " -- %d source(s) could not even be started, see messages above"
+                                  failed-to-start)
                         ""))
              (if (plist-get run :cancelled)
                  ;; C1: a cancelled run must NOT prune.  KEPT here is only
@@ -658,8 +749,13 @@ a time, then finish RUN.  See `arc--reindex-all-async'."
                  ;; indexed, cancel after 5, unconditional prune deleted
                  ;; the other 5 -- on the real corpus (`info' alone is
                  ;; 7,748 sources) that is thousands of fine rows gone
-                 ;; for cancelling two minutes into a long run.
-                 (message "arc: %s: reindex cancelled; leaving existing rows untouched (no prune)"
+                 ;; for cancelling two minutes into a long run.  A
+                 ;; started-but-not-fully-replaced source (see
+                 ;; `arc--reindex-async-collection') is not in KEPT's
+                 ;; "safe to assume finished" sense either way, but that
+                 ;; no longer matters here: its content was never
+                 ;; deleted in the first place, cancelled or not.
+                 (message "arc: %s: reindex cancelled; existing rows are untouched (no prune, no partial replacement)"
                           name)
                (let ((removed (arc--prune-collection cid kept)))
                  (when (> removed 0)
@@ -669,14 +765,14 @@ a time, then finish RUN.  See `arc--reindex-all-async'."
 (defun arc--reindex-all-async (&optional collections)
   "Asynchronous implementation of `arc-reindex-all'.  See its docstring.
 Signals a `user-error' if an asynchronous reindex is already running --
-`arc-index-source''s per-chunk transaction makes a single writer safe
-against `C-g', not against a second whole run's sources and prune
-racing the first's.  Also signals if `arc-index-max-in-flight' is not
-a positive integer: 0 (its `:type' widget alone does not actually
-forbid this -- see its docstring) would issue no requests at all and
-leave `arc--reindex-async-active' set with nothing ever going to clear
-it, wedging every later `M-x arc-reindex-all' for the rest of the
-session."
+`arc--replace-source-chunks''s per-source transaction makes a single
+writer safe against `C-g', not against a second whole run's sources
+and prune racing the first's.  Also signals if `arc-index-max-in-flight'
+is not a positive integer: 0 (its `:type' widget alone does not
+actually forbid this -- see its docstring) would issue no requests at
+all and leave `arc--reindex-async-active' set with nothing ever going
+to clear it, wedging every later `M-x arc-reindex-all' for the rest of
+the session."
   (when arc--reindex-async-active
     (user-error "arc: an asynchronous reindex is already running (M-x arc-reindex-cancel to stop it)"))
   (unless (and (integerp arc-index-max-in-flight) (> arc-index-max-in-flight 0))
@@ -694,25 +790,36 @@ session."
 ;;;###autoload
 (defun arc-reindex-cancel ()
   "Stop an in-progress asynchronous `arc-reindex-all' run as soon as
-possible.  Any embedding request already in flight is still written
-when its response arrives -- it was already paid for, and writing a
-complete chunk is never the corruption this is guarding against -- but
-no *new* request is issued after this is called, and no further
-collection is started.  When the collection in progress is cancelled
-partway, it is NOT pruned -- only a run that reaches the end of a
-collection on its own prunes it; see `arc--reindex-async-next-cell'.
-Sources not yet reached are simply left unindexed until the next run.
+possible: no *new* embedding request is issued after this is called,
+and no further collection is started.
+
+A source whose every chunk had already settled by the time this is
+called was already fully, atomically replaced (see
+`arc--replace-source-chunks') and stays that way.  A source caught
+mid-embedding is a different story: any of its requests already in
+flight are allowed to finish, but their results are simply discarded,
+not written -- a source is replaced all-or-nothing, and since this run
+will never dispatch the rest of that source's chunks now, the source
+as a whole never reaches \"every chunk settled\", so nothing about it
+is ever deleted or rewritten.  Its old content survives completely
+intact; the handful of embeddings already computed for it are wasted,
+not written piecemeal the way an earlier version of this used to risk.
+
+When the collection in progress is cancelled partway, it is also NOT
+pruned -- only a run that reaches the end of a collection on its own
+prunes it; see `arc--reindex-async-next-cell'.  Sources not yet reached
+are simply left unindexed until the next run.
 
 Also clears `arc--reindex-async-active' immediately, as an escape
 hatch: ordinarily the run itself clears it once every in-flight
 request has actually settled (see `arc--reindex-async-next-cell'), but
 if something upstream of that ever leaks a slot the way the bug fixed
-in `arc--reindex-async-embed-chunk' did -- `in-flight' never reaching
-0, nothing left to converge on -- cancelling could never recover the
-session; a stuck run's now-orphaned callbacks, if any ever do still
-arrive, still see `:cancelled' on their own RUN object (unaffected by
-this) and still stop issuing new work, they just no longer hold the
-one flag a fresh `M-x arc-reindex-all' checks.
+in `arc--reindex-async-embed-chunk' once did -- `in-flight' never
+reaching 0, nothing left to converge on -- cancelling could never
+recover the session; a stuck run's now-orphaned callbacks, if any ever
+do still arrive, still see `:cancelled' on their own RUN object
+(unaffected by this) and still stop issuing new work, they just no
+longer hold the one flag a fresh `M-x arc-reindex-all' checks.
 
 Does nothing (beyond a `message') if no asynchronous reindex is
 active."
@@ -721,7 +828,7 @@ active."
       (let ((run arc--reindex-async-active))
         (plist-put run :cancelled t)
         (setq arc--reindex-async-active nil)
-        (message "arc: cancelling reindex; any request already in flight will still be written"))
+        (message "arc: cancelling reindex; sources already fully embedded keep their new content, sources caught mid-embedding keep their old content"))
     (message "arc: no asynchronous reindex is running")))
 
 (provide 'arc-index)

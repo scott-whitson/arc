@@ -130,6 +130,18 @@ N-CHUNKS distinct chunks."
          (arc-db)
          (format "SELECT count(*) FROM sources WHERE info_node = %s;" (arc--sql-quote node)))))
 
+(defun aia-chunk-texts-for-node (node)
+  "Return the list of `data.chunk' texts currently stored for the
+source identified by NODE (an `:info-node' value), in no particular
+order.  Used to assert on *content survival*, not just a row count --
+both C1 (round 2) and C1-residual (round 3) held \"row counts agree\"
+under the bug, since a destroyed source's rows were destroyed cleanly."
+  (mapcar #'car
+          (sqlite-select
+           (arc-db)
+           (format "SELECT d.chunk FROM data d JOIN sources s ON s.id = d.source_id
+                    WHERE s.info_node = %s;" (arc--sql-quote node)))))
+
 (defun aia-consistency-ok-p ()
   "Return non-nil iff `data', `data_embeddings' and `data_fts' row counts
 all agree and no `data' row's `source_id' is orphaned.  Necessary, but
@@ -354,31 +366,39 @@ row with no vector and no FTS row."
 ;;; --- C2: a failing write must not leak the in-flight slot -------------
 
 (ert-deftest aia-write-failure-does-not-leak-in-flight-slot-and-run-still-converges ()
-  "Critical regression test (C2): the success callback used to call
-`arc--write-chunk' and only then `settle', so any signal out of the
-write (an sqlite error, here induced) skipped `settle' entirely,
-leaking that in-flight slot forever.  Reproduced live before the fix:
-3 induced write failures stalled a 20-chunk run at 9 of 20, with
+  "Critical regression test (C2): the success callback used to call the
+write directly and only then `settle', so any signal out of the write
+(an sqlite error, here induced) skipped `settle' entirely, leaking
+that in-flight slot forever.  Reproduced live before the fix: 3
+induced write failures stalled a 20-chunk run at 9 of 20, with
 `arc-reindex-cancel' unable to recover it and every later
 `M-x arc-reindex-all' rejected for the rest of the session because
-`arc--reindex-async-active' never cleared.  With the fix
-(`arc--reindex-async-embed-chunk' calls `settle' from an
-`unwind-protect'), a run with some induced write failures must still
-run every request to completion and end with `arc--reindex-async-active'
-nil -- not wedged -- while the failed chunks simply have no `data' row."
+`arc--reindex-async-active' never cleared.  Poisons
+`arc--insert-chunk-row', the shared primitive `arc--replace-source-
+chunks' uses -- not `arc--write-chunk', which the async path no longer
+calls at all since C1-residual's atomic-per-source rewrite -- so this
+also doubles as coverage that a failure inside
+`arc--replace-source-chunks''s own transaction is caught and reported
+by `source-settled' rather than escaping it.  With the fix, a run with
+some induced write failures must still run every request to completion
+and end with `arc--reindex-async-active' nil -- not wedged -- while the
+sources whose replace failed are simply left with no `data' row (fresh
+sources here, so \"left untouched\" and \"left with nothing\" coincide;
+see the C1-residual tests below for the case that actually
+distinguishes the two)."
   (aia-with-temp-db
    (let* ((arc-index-plan '(("m" . info)))
           (arc-index-max-in-flight 3)
           (fake (aia-fake-sources 12))
           (poison-texts '("m text 3" "m text 6" "m text 9"))
-          (real-write (symbol-function 'arc--write-chunk))
+          (real-insert (symbol-function 'arc--insert-chunk-row))
           (captured nil))
      (aia-capturing-messages captured
-       (cl-letf (((symbol-function 'arc--write-chunk)
+       (cl-letf (((symbol-function 'arc--insert-chunk-row)
                   (lambda (sid cid text ls le title vec)
                     (if (member text poison-texts)
                         (error "aia: induced write failure for %s" text)
-                      (funcall real-write sid cid text ls le title vec))))
+                      (funcall real-insert sid cid text ls le title vec))))
                  ((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
                  ((symbol-function 'arc-info-sources) (lambda (&rest _) fake)))
          (arc-reindex-all nil t)
@@ -387,7 +407,7 @@ nil -- not wedged -- while the failed chunks simply have no `data' row."
      (should-not arc--reindex-async-active)
      ;; every source was still upserted...
      (should (= 12 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
-     ;; ...but only the 9 that wrote successfully have a chunk
+     ;; ...but only the 9 whose replace transaction succeeded have a chunk
      (should (= 9 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
      (should (aia-consistency-ok-p))
      ;; a fresh async run -- a different collection entirely, so it
@@ -401,7 +421,7 @@ nil -- not wedged -- while the failed chunks simply have no `data' row."
          (aia-drain-all)))
      (should (= 1 (aia-source-count-for-node "(fresh)Node1")))
      ;; I2: the original failure must be loud, not one message among hundreds
-     (should (cl-some (lambda (m) (string-match-p "3 chunk failure" m)) captured)))))
+     (should (cl-some (lambda (m) (string-match-p "3 source(s) not replaced" m)) captured)))))
 
 ;;; --- I2/error-callback path: an embedding failure is skipped, loudly -
 
@@ -425,7 +445,7 @@ many progress lines."
      (should (= 6 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
      (should (= 4 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
      (should (aia-consistency-ok-p))
-     (should (cl-some (lambda (m) (string-match-p "2 chunk failure" m)) captured)))))
+     (should (cl-some (lambda (m) (string-match-p "2 source(s) not replaced" m)) captured)))))
 
 ;;; --- multi-chunk sources: a source is only "done" after every chunk -
 
@@ -474,6 +494,115 @@ run, and both collections' sources must end up indexed."
      (should (= 5 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
      (should (= 1 (aia-source-count-for-node "(c1)Node1")))
      (should (= 1 (aia-source-count-for-node "(c2)Node1")))
+     (should (aia-consistency-ok-p)))))
+
+
+;;; --- C1-residual: a source's replacement is atomic, not per-chunk ----
+
+(ert-deftest aia-cancel-mid-large-multi-chunk-source-keeps-its-old-content-intact ()
+  "C1-residual regression test: cancelling partway through a single
+large multi-chunk source must not truncate that source's content.
+Reproduced live against the real corpus's worst case: a 477-chunk
+source, default in-flight 4, cancel after only 2 of its chunks had
+settled -- `arc--delete-data-for-source' used to run the instant the
+source was advanced into (not once its replacement was actually ready),
+so the other 475 chunks, never even dispatched by the time cancel took
+effect, were simply gone, while `arc-reindex-cancel' reported \"leaving
+existing rows untouched\" for precisely the source that had just been
+gutted.  Build a real baseline (20 chunks -- smaller, same shape),
+reindex the identical source again with a small in-flight window,
+cancel after only 2 of its chunks settle -- well before all 20 could
+even be dispatched -- and assert the source's chunk *texts*, not just a
+count, are still exactly the original 20."
+  (aia-with-temp-db
+   (let* ((arc-index-plan '(("m" . info)))
+          (arc-index-max-in-flight 4)
+          (big (aia-fake-multi-chunk-source "(m)Big" 20)))
+     (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+               ((symbol-function 'arc-info-sources) (lambda (&rest _) (list big))))
+       (arc-reindex-all nil t)
+       (aia-drain-all))
+     (let ((baseline (sort (aia-chunk-texts-for-node "(m)Big") #'string<)))
+       (should (= 20 (length baseline)))
+       (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+                 ((symbol-function 'arc-info-sources) (lambda (&rest _) (list big))))
+         (arc-reindex-all nil t)
+         (aia-drain-one) (aia-drain-one)
+         (should arc--reindex-async-active) ; well before all 20 could settle
+         (arc-reindex-cancel)
+         (aia-drain-all))
+       (should-not arc--reindex-async-active)
+       (should (equal baseline (sort (aia-chunk-texts-for-node "(m)Big") #'string<)))
+       (should (aia-consistency-ok-p))))))
+
+(ert-deftest aia-embedding-failure-in-one-chunk-of-a-multi-chunk-source-keeps-old-content ()
+  "A source is replaced all-or-nothing: one failed chunk among several
+must leave that source's OLD content exactly as it was, never a mix of
+new-and-missing chunks."
+  (aia-with-temp-db
+   (let* ((arc-index-plan '(("m" . info)))
+          (big (aia-fake-multi-chunk-source "(m)Big" 5)))
+     (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+               ((symbol-function 'arc-info-sources) (lambda (&rest _) (list big))))
+       (arc-reindex-all nil t)
+       (aia-drain-all))
+     (let ((baseline (sort (aia-chunk-texts-for-node "(m)Big") #'string<))
+           (aia-error-texts (list "(m)Big chunk 3")))
+       (should (= 5 (length baseline)))
+       (cl-letf (((symbol-function 'llm-embedding-async) #'aia-fake-embedding-async-with-errors)
+                 ((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+                 ((symbol-function 'arc-info-sources) (lambda (&rest _) (list big))))
+         (arc-reindex-all nil t)
+         (aia-drain-all))
+       (should-not arc--reindex-async-active)
+       (should (equal baseline (sort (aia-chunk-texts-for-node "(m)Big") #'string<)))
+       (should (aia-consistency-ok-p))))))
+
+;;; --- I1 mutation-verified: a synchronously-settling callback ----------
+
+(defun aia-fake-embedding-async-sync (_provider _text vector-callback _error-callback)
+  "Calls VECTOR-CALLBACK synchronously, immediately -- unlike
+`aia-fake-embedding-async', which defers via `aia-pending' for the test
+to drain by hand.  A real embedding provider (plz) never calls back
+this way, but a stub, a cache, or a future local embedder might; this
+is what exercises I1's reentrancy guard, which real `plz' traffic never
+touches (every fake elsewhere in this file defers, which is exactly why
+I1 first shipped without a test that could catch it)."
+  (cl-incf aia-issued)
+  (funcall vector-callback (vector 0.1 0.2 0.3)))
+
+(ert-deftest aia-synchronous-callback-does-not-fire-completion-twice ()
+  "I1 regression test, mutation-verified by hand against both halves of
+the fix (see the report): reverting either -- rechecking `(not
+finished)' in the completion branch, or using non-destructive `reverse'
+-- turns this red.  A synchronously-settling stub re-enters `pump' from
+inside the dispatch loop before the outer call has unwound; an
+unguarded completion check (or a destructive `nreverse' of an
+already-reversed `kept') used to fire `on-collection-done' more than
+once, mangling `kept' on the second call -- reproduced live: 7 firings
+for one 8-source collection, a prune result mangled from 8 down to 1.
+`arc--prune-collection' runs exactly once per genuine completion (see
+`arc--reindex-async-next-cell'), so counting its calls is a direct,
+external proxy for how many times `on-collection-done' actually fired."
+  (aia-with-temp-db
+   (let* ((arc-index-plan '(("m" . info)))
+          (fake (aia-fake-sources 8))
+          (prune-calls 0)
+          (real-prune (symbol-function 'arc--prune-collection))
+          (last-kept nil))
+     (cl-letf (((symbol-function 'llm-embedding-async) #'aia-fake-embedding-async-sync)
+               ((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+               ((symbol-function 'arc-info-sources) (lambda (&rest _) fake))
+               ((symbol-function 'arc--prune-collection)
+                (lambda (cid kept)
+                  (cl-incf prune-calls)
+                  (setq last-kept kept)
+                  (funcall real-prune cid kept))))
+       (arc-reindex-all nil t))
+     (should (= 1 prune-calls))
+     (should (= 8 (length last-kept)))
+     (should (= 8 (length (delete-dups (copy-sequence last-kept)))))
+     (should (= 8 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
      (should (aia-consistency-ok-p)))))
 
 (provide 'test-arc-index-async)
