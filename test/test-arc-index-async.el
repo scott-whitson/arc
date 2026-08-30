@@ -188,15 +188,19 @@ hundreds in a buffer."
      (should (= 5 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
      (should (aia-consistency-ok-p)))))
 
-(ert-deftest aia-async-reindex-prunes-a-source-that-really-left-the-corpus ()
-  "A full (uncancelled) second run whose producer legitimately stopped
-returning some sources must still prune exactly those -- and only
-those, checked by identity, not merely by count."
+(ert-deftest aia-async-reindex-never-prunes-a-source-the-producer-stopped-returning ()
+  "The asynchronous path does not prune at all, by design (see
+`arc-reindex-all''s and `arc--prune-collection''s docstrings): a
+second, full (uncancelled) run whose producer legitimately stopped
+returning some sources must leave them exactly as they were, not
+delete them.  Only a synchronous reindex prunes -- see
+`ai-reindex-all-prunes-sources-removed-from-the-corpus' in
+test-arc-index.el for that."
   (aia-with-temp-db
    (let* ((arc-index-plan '(("m" . info)))
           (arc-index-info-cap nil)
-          (first-run (aia-fake-sources 3 "gone"))   ; (gone)Node1..3
-          (second-run (aia-fake-sources 1 "keep"))) ; (keep)Node1
+          (first-run (aia-fake-sources 3 "stillhere")) ; (stillhere)Node1..3
+          (second-run (aia-fake-sources 1 "new")))     ; (new)Node1
      (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
                ((symbol-function 'arc-info-sources) (lambda (&rest _) first-run)))
        (arc-reindex-all nil t)
@@ -205,11 +209,13 @@ those, checked by identity, not merely by count."
                ((symbol-function 'arc-info-sources) (lambda (&rest _) second-run)))
        (arc-reindex-all nil t)
        (aia-drain-all))
-     (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
-     (should (= 1 (aia-source-count-for-node "(keep)Node1")))
-     (should (= 0 (aia-source-count-for-node "(gone)Node1")))
-     (should (= 0 (aia-source-count-for-node "(gone)Node2")))
-     (should (= 0 (aia-source-count-for-node "(gone)Node3")))
+     ;; the second run's producer never mentioned (stillhere)Node1..3 at
+     ;; all -- an async prune, if one existed, would read that as "gone"
+     (should (= 4 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;")))) ; 3 + 1
+     (should (= 1 (aia-source-count-for-node "(new)Node1")))
+     (should (= 1 (aia-source-count-for-node "(stillhere)Node1")))
+     (should (= 1 (aia-source-count-for-node "(stillhere)Node2")))
+     (should (= 1 (aia-source-count-for-node "(stillhere)Node3")))
      (should (aia-consistency-ok-p)))))
 
 ;;; --- the in-flight window is actually bounded ------------------------
@@ -233,25 +239,24 @@ tiny corpus, at least that many really do overlap."
        (should (= aia-max-concurrent 2))
        (should (= 9 aia-issued))))))
 
-;;; --- C1: a cancelled run must not prune sources it never reached -----
+;;; --- cancel never removes a source, by design (async never prunes) --
 
-(ert-deftest aia-cancel-mid-run-does-not-prune-sources-the-run-never-reached ()
-  "Critical regression test (C1): `arc-reindex-cancel' partway through a
-collection must not delete sources this run had not gotten to yet.
-Reproduced live before the fix: 10 good sources indexed, cancel after
-5 processed -> the other 5 good sources deleted by an unconditional
-prune (`kept' only ever held sources this run actually started).  On
-the real corpus `info' alone is 7,748 sources, so this was thousands
-of fine rows silently gone for cancelling two minutes into a long run.
+(ert-deftest aia-cancel-mid-run-does-not-remove-sources-the-run-never-reached ()
+  "Originally a C1 regression test against a since-deleted prune call:
+`arc-reindex-cancel' partway through a collection used to delete
+sources this run had not gotten to yet, because the run's own
+(now-removed) prune ran against an incomplete kept-list.  Pruning is
+gone from the asynchronous path entirely now (see `arc-reindex-all''s
+docstring), so nothing here CAN delete anything -- this test now
+checks the more basic property that a cancel genuinely leaves
+untouched sources untouched, end to end, by `info_node' identity and
+not just a count.
 
 Build a real baseline of 10 sources via a completed run first -- a
-cancel against an empty database, as an earlier version of this test
-did, proves nothing: there is nothing yet for a buggy prune to delete,
-so it passes whether or not the fix is even present.  Then start a
-second run over the very same 10 sources, cancel after only a few have
-been touched, and assert every one of the original 10 survives, by
-`info_node' identity, with exactly one chunk -- not just that a count
-happens to match."
+cancel against an empty database proves nothing: there is nothing yet
+to lose, so it would pass regardless.  Then start a second run over the
+very same 10 sources, cancel after only a few have settled, and assert
+every one of the original 10 survives with exactly one chunk."
   (aia-with-temp-db
    (let* ((arc-index-plan '(("m" . info)))
           (arc-index-info-cap nil)
@@ -335,32 +340,50 @@ set forever with nothing to converge on -- caught explicitly instead."
        (should-error (arc-reindex-all nil t) :type 'user-error)
        (should-not arc--reindex-async-active)))))
 
-;;; --- the write itself is all-or-nothing under a quit ------------------
+;;; --- the replace itself is all-or-nothing under a quit ----------------
 
-(ert-deftest aia-write-chunk-rolls-back-a-quit-partway-through ()
-  "`arc--write-chunk' is a single sqlite transaction spanning `data',
-`data_embeddings' and `data_fts'; a `quit' signal (what `C-g' raises)
-landing after the `data' insert but before the embedding/FTS inserts
-must roll the whole thing back rather than leaving an orphaned `data'
-row with no vector and no FTS row."
+(ert-deftest aia-replace-source-chunks-rolls-back-a-quit-partway-through ()
+  "`arc--replace-source-chunks' is a single sqlite transaction spanning
+the upsert, the delete of old content, and every new chunk's insert; a
+`quit' signal (what `C-g' raises) landing partway through -- here,
+after the `data' insert but before the embedding/FTS inserts -- must
+roll the whole thing back: no half-upserted `sources' row, no orphaned
+`data' row with no vector and no FTS row."
   (aia-with-temp-db
-   (let ((cid (arc--collection-id "test"))
-         (sid (arc-source-upsert '(:kind "info" :info-node "(m)X"))))
+   (let ((cid (arc--collection-id "test")))
      (cl-letf (((symbol-function 'arc-vector-to-sqlite)
                 (lambda (&rest _) (signal 'quit nil))))
        (condition-case nil
-           (arc--write-chunk sid cid "hello" 1 1 nil (vector 0.1 0.2 0.3))
+           (arc--replace-source-chunks '(:kind "info" :info-node "(m)X") cid
+                                        (list (list "hello" 1 1 (vector 0.1 0.2 0.3))))
          (quit nil)))
+     (should (= 0 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
      (should (= 0 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
      (should (= 0 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_embeddings;"))))
      (should (= 0 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_fts;")))))))
 
-(ert-deftest aia-write-chunk-succeeds-normally ()
+(ert-deftest aia-replace-source-chunks-succeeds-normally ()
   (aia-with-temp-db
-   (let ((cid (arc--collection-id "test"))
-         (sid (arc-source-upsert '(:kind "info" :info-node "(m)X"))))
-     (arc--write-chunk sid cid "hello" 1 1 nil (vector 0.1 0.2 0.3))
+   (let ((cid (arc--collection-id "test")))
+     (arc--replace-source-chunks '(:kind "info" :info-node "(m)X") cid
+                                  (list (list "hello" 1 1 (vector 0.1 0.2 0.3))))
+     (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
      (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
+     (should (aia-consistency-ok-p)))))
+
+(ert-deftest aia-replace-source-chunks-genuinely-changes-content-on-success ()
+  "Guards against an implementation that never actually writes: replace
+a source that already has content with DIFFERENT content and confirm
+the new text wins, not the old -- proves the success path really does
+replace, not just that failure paths correctly do nothing."
+  (aia-with-temp-db
+   (let ((cid (arc--collection-id "test")))
+     (arc--replace-source-chunks '(:kind "info" :info-node "(m)X")
+                                  cid (list (list "old text" 1 1 (vector 0.1 0.2 0.3))))
+     (should (equal '("old text") (aia-chunk-texts-for-node "(m)X")))
+     (arc--replace-source-chunks '(:kind "info" :info-node "(m)X")
+                                  cid (list (list "new text" 1 1 (vector 0.4 0.5 0.6))))
+     (should (equal '("new text") (aia-chunk-texts-for-node "(m)X")))
      (should (aia-consistency-ok-p)))))
 
 ;;; --- C2: a failing write must not leak the in-flight slot -------------
@@ -382,10 +405,12 @@ also doubles as coverage that a failure inside
 by `source-settled' rather than escaping it.  With the fix, a run with
 some induced write failures must still run every request to completion
 and end with `arc--reindex-async-active' nil -- not wedged -- while the
-sources whose replace failed are simply left with no `data' row (fresh
-sources here, so \"left untouched\" and \"left with nothing\" coincide;
-see the C1-residual tests below for the case that actually
-distinguishes the two)."
+sources whose replace failed never get a `sources' row at all now
+(round 4 moved the upsert itself into `arc--replace-source-chunks',
+inside the same transaction), so \"left untouched\" and \"never
+created\" coincide for these fresh sources; see the C1-residual tests
+below for the case (an existing source) that actually distinguishes
+the two."
   (aia-with-temp-db
    (let* ((arc-index-plan '(("m" . info)))
           (arc-index-max-in-flight 3)
@@ -405,9 +430,10 @@ distinguishes the two)."
          (aia-drain-all)))
      ;; the run converged -- not wedged -- despite 3 write failures
      (should-not arc--reindex-async-active)
-     ;; every source was still upserted...
-     (should (= 12 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
-     ;; ...but only the 9 whose replace transaction succeeded have a chunk
+     ;; only the 9 sources whose replace transaction succeeded exist at
+     ;; all: the upsert itself is inside that same failed transaction
+     ;; for the other 3, so it rolled back along with everything else
+     (should (= 9 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
      (should (= 9 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
      (should (aia-consistency-ok-p))
      ;; a fresh async run -- a different collection entirely, so it
@@ -421,7 +447,9 @@ distinguishes the two)."
          (aia-drain-all)))
      (should (= 1 (aia-source-count-for-node "(fresh)Node1")))
      ;; I2: the original failure must be loud, not one message among hundreds
-     (should (cl-some (lambda (m) (string-match-p "3 source(s) not replaced" m)) captured)))))
+     (should (cl-some (lambda (m) (string-match-p "3 source(s) not replaced" m)) captured))
+     ;; and the message must be a fair count, not a misleading one
+     (should (cl-some (lambda (m) (string-match-p "9 source(s) replaced" m)) captured)))))
 
 ;;; --- I2/error-callback path: an embedding failure is skipped, loudly -
 
@@ -442,7 +470,10 @@ many progress lines."
          (arc-reindex-all nil t)
          (aia-drain-all)))
      (should-not arc--reindex-async-active)
-     (should (= 6 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+     ;; the 2 sources whose one chunk failed to embed never get a
+     ;; `sources' row at all: nothing about a source is created until
+     ;; it is actually replaced.
+     (should (= 4 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
      (should (= 4 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
      (should (aia-consistency-ok-p))
      (should (cl-some (lambda (m) (string-match-p "2 source(s) not replaced" m)) captured)))))
@@ -575,35 +606,140 @@ I1 first shipped without a test that could catch it)."
   "I1 regression test, mutation-verified by hand against both halves of
 the fix (see the report): reverting either -- rechecking `(not
 finished)' in the completion branch, or using non-destructive `reverse'
--- turns this red.  A synchronously-settling stub re-enters `pump' from
-inside the dispatch loop before the outer call has unwound; an
-unguarded completion check (or a destructive `nreverse' of an
-already-reversed `kept') used to fire `on-collection-done' more than
-once, mangling `kept' on the second call -- reproduced live: 7 firings
-for one 8-source collection, a prune result mangled from 8 down to 1.
-`arc--prune-collection' runs exactly once per genuine completion (see
-`arc--reindex-async-next-cell'), so counting its calls is a direct,
-external proxy for how many times `on-collection-done' actually fired."
+where `kept' once lived -- turns this red.  A synchronously-settling
+stub re-enters `pump' from inside the dispatch loop before the outer
+call has unwound; an unguarded completion check used to fire
+`on-collection-done' more than once -- reproduced live: 7 firings for
+one 8-source collection (back when `on-collection-done' still carried
+a destructively-`nreverse'd `kept' list, a prune result mangled from 8
+down to 1; `kept' and the prune it fed are both gone now, per round 4,
+but the reentrancy this exercises is a property of `pump' itself, not
+of what `on-collection-done' used to do with its arguments).
+`arc--reindex-async-next-cell' calls itself with an empty CELLS exactly
+once per genuine completion (the \"this collection is done, move on\"
+step), so counting *that* is a direct, external proxy for how many
+times `on-collection-done' actually fired that does not depend on
+pruning existing at all."
   (aia-with-temp-db
    (let* ((arc-index-plan '(("m" . info)))
           (fake (aia-fake-sources 8))
-          (prune-calls 0)
-          (real-prune (symbol-function 'arc--prune-collection))
-          (last-kept nil))
+          (finish-calls 0)
+          (real-next-cell (symbol-function 'arc--reindex-async-next-cell)))
      (cl-letf (((symbol-function 'llm-embedding-async) #'aia-fake-embedding-async-sync)
                ((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
                ((symbol-function 'arc-info-sources) (lambda (&rest _) fake))
-               ((symbol-function 'arc--prune-collection)
-                (lambda (cid kept)
-                  (cl-incf prune-calls)
-                  (setq last-kept kept)
-                  (funcall real-prune cid kept))))
+               ((symbol-function 'arc--reindex-async-next-cell)
+                (lambda (run cells)
+                  (when (null cells) (cl-incf finish-calls))
+                  (funcall real-next-cell run cells))))
        (arc-reindex-all nil t))
-     (should (= 1 prune-calls))
-     (should (= 8 (length last-kept)))
-     (should (= 8 (length (delete-dups (copy-sequence last-kept)))))
+     (should (= 1 finish-calls))
      (should (= 8 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
      (should (aia-consistency-ok-p)))))
+
+
+;;; --- C-4: an upsert failure must not cascade into deleting anything --
+
+(ert-deftest aia-induced-transient-upsert-failure-does-not-destroy-anything ()
+  "C-4 regression test: an error out of `arc-source-upsert' for one
+source used to leave that source out of a since-removed `kept' list;
+the run's own (now-removed) end-of-collection prune then read the
+incomplete kept-list and deleted every OTHER source in the collection
+too -- measured before the fix: 30 chunks / 10 sources reindexed with
+one upsert failure among them converged cleanly reporting \"removed 10
+stale source(s)\".  Pruning is gone from the asynchronous path
+entirely now, so this reproduction must be inert: build a baseline,
+reindex again with one source's upsert failing exactly once (a
+transient failure -- a momentary sqlite lock, say), and confirm every
+OTHER source's chunk texts are byte-identical to baseline and nothing
+at all was deleted."
+  (aia-with-temp-db
+   (let* ((arc-index-plan '(("m" . info)))
+          (fake (aia-fake-sources 10))
+          (real-upsert (symbol-function 'arc-source-upsert))
+          (poisoned nil))
+     (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+               ((symbol-function 'arc-info-sources) (lambda (&rest _) fake)))
+       (arc-reindex-all nil t)
+       (aia-drain-all))
+     (should (= 10 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+     (let ((baseline (mapcar (lambda (n) (cons n (aia-chunk-texts-for-node (format "(m)Node%d" n))))
+                              (number-sequence 1 10))))
+       (cl-letf (((symbol-function 'arc-source-upsert)
+                  (lambda (source)
+                    (if (and (equal (plist-get source :info-node) "(m)Node5") (not poisoned))
+                        (progn (setq poisoned t)
+                               (error "aia: induced transient upsert failure"))
+                      (funcall real-upsert source))))
+                 ((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+                 ((symbol-function 'arc-info-sources) (lambda (&rest _) fake)))
+         (arc-reindex-all nil t)
+         (aia-drain-all))
+       (should-not arc--reindex-async-active)
+       (should (= 10 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+       (dolist (pair baseline)
+         (should (equal (cdr pair) (aia-chunk-texts-for-node (format "(m)Node%d" (car pair))))))
+       (should (aia-consistency-ok-p))))))
+
+(ert-deftest aia-induced-persistent-upsert-failure-does-not-destroy-anything ()
+  "Same reproduction as the transient case, but the failure never
+lifts -- a permanently locked path, say -- across two consecutive
+runs, confirming repetition alone never cascades into deleting
+anything either."
+  (aia-with-temp-db
+   (let* ((arc-index-plan '(("m" . info)))
+          (fake (aia-fake-sources 10))
+          (real-upsert (symbol-function 'arc-source-upsert)))
+     (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+               ((symbol-function 'arc-info-sources) (lambda (&rest _) fake)))
+       (arc-reindex-all nil t)
+       (aia-drain-all))
+     (let ((baseline (mapcar (lambda (n) (cons n (aia-chunk-texts-for-node (format "(m)Node%d" n))))
+                              (number-sequence 1 10)))
+           (poison (lambda (source)
+                     (if (equal (plist-get source :info-node) "(m)Node5")
+                         (error "aia: induced persistent upsert failure")
+                       (funcall real-upsert source)))))
+       (dotimes (_ 2)
+         (cl-letf (((symbol-function 'arc-source-upsert) poison)
+                   ((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+                   ((symbol-function 'arc-info-sources) (lambda (&rest _) fake)))
+           (arc-reindex-all nil t)
+           (aia-drain-all))
+         (should-not arc--reindex-async-active)
+         (should (= 10 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+         (dolist (pair baseline)
+           (should (equal (cdr pair) (aia-chunk-texts-for-node (format "(m)Node%d" (car pair))))))
+         (should (aia-consistency-ok-p)))))))
+
+;;; --- a settle called twice must be inert, not destructive ------------
+
+(ert-deftest aia-embed-chunk-settle-is-idempotent ()
+  "Unit-level regression test for `arc--reindex-async-embed-chunk''s
+own contract: SETTLE must be called exactly once, even when the
+underlying `llm-embedding-async' misbehaves and invokes its success
+callback twice (a buggy provider, or standing in for any other reason
+a second call could happen).  This is the mechanism that keeps a
+double-settle from being destructive one level up: without it,
+`arc--reindex-async-collection''s `chunk-settled' would run twice for
+one chunk, and a second run reads bookkeeping the first run already
+cleared -- `remaining-in-source' back to a default \"1 remaining\",
+`source-chunks' reset to empty -- re-triggering `source-settled' and a
+second, premature `arc--replace-source-chunks' call built from
+whatever the accumulator happens to hold at that moment, not the
+source's true, complete set of chunks.  Testing this directly, at the
+boundary that actually guarantees it, is more precise than trying to
+predict the exact shape of the resulting corruption several calls
+downstream."
+  (let ((calls 0))
+    (cl-letf (((symbol-function 'llm-embedding-async)
+               (lambda (_provider _text vector-callback _error-callback)
+                 (funcall vector-callback (vector 0.1 0.2 0.3))
+                 (funcall vector-callback (vector 0.7 0.8 0.9)))))
+      (arc--reindex-async-embed-chunk
+       (list :text "hello" :line-start 1 :line-end 1)
+       (lambda (&rest _) (cl-incf calls))))
+    (should (= 1 calls))))
 
 (provide 'test-arc-index-async)
 ;;; test-arc-index-async.el ends here

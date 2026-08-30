@@ -56,6 +56,36 @@ If ~ARC_VEC0_PATH~ is unset or the file does not exist, arc warns
 instead of failing to load, and the database will not have a working
 vector table.
 
+The file must actually be *named* ~vec0.so~ (or your platform's
+equivalent, e.g. ~vec0.dylib~) -- SQLite's extension loader derives the
+entry-point symbol it looks for from the file's own basename, so a
+renamed or relocated copy at, say, ~/path/to/my-vec0.so~ is still a
+perfectly valid extension file, still passes the ~file-exists-p~ check
+above, and still fails to load -- obscurely, with no clear error
+pointing at the filename as the cause.
+
+** Known limitations
+
+*** Asynchronous reindex never removes departed sources
+
+~M-x arc-reindex-all~ (the interactive, non-blocking path -- see its
+docstring) does not prune. A source that has genuinely left the corpus
+(deleted, gitignored, newly excluded) keeps whatever content it was
+last indexed with and stays citable indefinitely under this path
+alone. This is deliberate, not an oversight: a long-running
+asynchronous walk only ever knows "what this run has reached so far",
+never "everything this collection currently has", and three separate
+attempts to prune from the former each turned into a real, reproduced
+way to delete sources the run had simply not gotten to yet.
+
+Only a *synchronous* reindex prunes -- run one occasionally to actually
+remove departed sources:
+
+#+begin_src elisp
+(arc-reindex-all)                  ; every collection in `arc-index-plan'
+(arc-reindex-all '("dotfiles"))     ; just one collection
+#+end_src
+
 ** Running the tests
 
 #+begin_src sh

@@ -266,3 +266,47 @@ corpus here was never walked this run, not emptied."
        (delete-directory dir t)
        (arc-reindex-all)
        (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))))))
+
+;;; --- arc-index-source: a `C-g' mid-embedding must not truncate -------
+
+(ert-deftest ai-index-source-quit-mid-embedding-leaves-old-content-intact ()
+  "A `C-g' (signalled here as `quit') partway through embedding a
+multi-chunk source's replacement chunks must leave that source's OLD
+content completely intact -- not cut down to whichever chunks had
+already been embedded when the quit landed.  Reproduced against the
+unfixed version of `arc-index-source' (which deleted a source's old
+chunks up front, then wrote each new one via a per-chunk transaction as
+it was embedded): a 10-chunk source interrupted after chunk 3 lost 7 of
+its chunks.  The fixed version embeds every chunk first and only then
+calls `arc--replace-source-chunks' once, so a quit during embedding
+never reaches that call at all for this reindex, and the source is
+left exactly as the baseline run left it."
+  (ai-with-temp-db
+   (let ((source '(:kind "file" :path "/tmp/big.nix"
+                    :chunks ((:text "one" :line-start 1 :line-end 1)
+                             (:text "two" :line-start 2 :line-end 2)
+                             (:text "three" :line-start 3 :line-end 3)
+                             (:text "four" :line-start 4 :line-end 4)
+                             (:text "five" :line-start 5 :line-end 5)
+                             (:text "six" :line-start 6 :line-end 6)
+                             (:text "seven" :line-start 7 :line-end 7)
+                             (:text "eight" :line-start 8 :line-end 8)
+                             (:text "nine" :line-start 9 :line-end 9)
+                             (:text "ten" :line-start 10 :line-end 10)))))
+     ;; baseline: fully index the source, no interruption
+     (arc-index-source source "test")
+     (should (= 10 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
+     ;; reindex again; `C-g' (quit) lands partway through embedding,
+     ;; after only 3 of the 10 replacement chunks have been embedded
+     (let ((calls 0))
+       (cl-letf (((symbol-function 'llm-embedding)
+                  (lambda (&rest _)
+                    (cl-incf calls)
+                    (if (= calls 4) (signal 'quit nil) (vector 0.1 0.2 0.3)))))
+         (condition-case nil
+             (arc-index-source source "test")
+           (quit nil))))
+     ;; old content -- all 10 chunks -- survives completely intact
+     (should (= 10 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
+     (should (= 10 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_embeddings;"))))
+     (should (= 10 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_fts;")))))))
