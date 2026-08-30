@@ -4,9 +4,8 @@
                                         (or load-file-name buffer-file-name))))
 (add-to-list 'load-path ar-root)
 (add-to-list 'load-path (file-name-directory (or load-file-name buffer-file-name)))
-(setenv "ARC_VEC0_PATH"
-        (or (getenv "ARC_VEC0_PATH")
-            "/nix/store/77440dch8lnph95xaj5fs634iwvgvmja-sqlite-vec-0.1.6/lib/vec0.so"))
+(require 'arc-test-vec0)
+(arc-test-ensure-vec0-or-skip!)
 (require 'arc)
 (require 'arc-index)
 (require 'arc-test-helpers)

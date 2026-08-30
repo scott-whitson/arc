@@ -1,9 +1,13 @@
 ;;; test-vec0.el --- validate sqlite-vec SQL forms -*- lexical-binding: t; -*-
 (require 'ert)
 (require 'json)
+(add-to-list 'load-path (file-name-directory (or load-file-name buffer-file-name)))
+(require 'arc-test-vec0)
 
-(defvar tv-vec0 (or (getenv "ARC_VEC0_PATH")
-                    "/nix/store/77440dch8lnph95xaj5fs634iwvgvmja-sqlite-vec-0.1.6/lib/vec0.so"))
+(defvar tv-vec0 (arc-test-locate-vec0))
+(unless tv-vec0
+  (message "SKIP: no sqlite-vec (vec0) extension found -- set ARC_VEC0_PATH to run this suite")
+  (kill-emacs 0))
 
 (defun tv-lit (v) (format "vec_f32('%s')" (json-encode v)))
 

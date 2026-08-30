@@ -112,7 +112,16 @@ write during a long reindex -- used to have a real chance of leaving a
 `data' row with no embedding and no FTS row: exactly the corruption
 `arc-reindex-all' promises never happens.  `with-sqlite-transaction'
 rolls the whole triplet back on any non-local exit, `quit' included,
-so an interrupted run ends with fewer chunks, never a broken one."
+so an interrupted run ends with fewer chunks, never a broken one.
+
+This is load-bearing on the Emacs 29.2 floor specifically, not just
+\"29.x\": on 29.1, `with-sqlite-transaction' always committed regardless
+of how BODY exited -- the rollback-on-non-local-exit behavior this
+function depends on only landed in 29.2.  On 29.1 this whole function
+would silently become a no-op guard against exactly nothing."
+  ;; See the docstring above: rollback-on-quit here requires Emacs
+  ;; 29.2, not merely "29.x" -- 29.1's `with-sqlite-transaction' always
+  ;; committed.
   (with-sqlite-transaction (arc-db)
     (sqlite-execute
      (arc-db)
@@ -229,8 +238,14 @@ and pending callbacks can exist at once, rather than real throughput --
 but it must stay a small, finite number.  Issuing all of a collection's
 embedding requests as fast as `llm-embedding-async' will accept them
 would spawn thousands of simultaneous subprocesses for the NixOS or
-Info branches, which is its own way of making Emacs miserable to use."
-  :type 'natnum :group 'arc)
+Info branches, which is its own way of making Emacs miserable to use.
+Must be at least 1: 0 would never issue a request at all, wedging an
+async run forever with `arc--reindex-async-active' left non-nil (see
+the guard in `arc--reindex-all-async', which is what actually enforces
+this -- the widget below only steers the customize UI away from 0)."
+  :type '(restricted-sexp :match-alternatives ((lambda (v) (and (integerp v) (> v 0))))
+                           :tag "Maximum concurrent embedding requests")
+  :group 'arc)
 
 (defcustom arc-index-progress-every 25
   "Report indexing progress every this many sources.
@@ -240,7 +255,7 @@ ingest touches tens of thousands of sources; reporting only once per
 *collection*, as `arc-reindex-all' used to, means long silences that
 read exactly like a hang.  This does not throttle the async path's
 per-chunk progress within one large source -- see
-`arc--reindex-async-chunks'."
+`arc--reindex-async-collection'."
   :type 'natnum :group 'arc)
 
 (defun arc--prioritize-manuals (manuals priority)
@@ -334,11 +349,17 @@ With ASYNC nil (the default when called from Lisp -- this is what the
 test suite and scripted ingests rely on), the whole rebuild runs
 synchronously and deterministically via `arc--reindex-all-sync':
 `llm-embedding' is called and awaited once per chunk, exactly as
-before.  With ASYNC non-nil, it instead runs `arc--reindex-all-async',
-which never blocks Emacs: each chunk's embedding is fetched with
-`llm-embedding-async' instead, at most `arc-index-max-in-flight' of
-them outstanding at a time, so the command loop stays free the entire
-run.  Called interactively -- `M-x arc-reindex-all' -- ASYNC is always
+before.  With ASYNC non-nil, it instead runs `arc--reindex-all-async':
+each chunk's embedding is fetched with `llm-embedding-async' instead,
+at most `arc-index-max-in-flight' of them outstanding at a time, so
+the *embedding* step -- the tens-of-minutes-long part -- never blocks
+the command loop.  Gathering each collection's sources first
+(`arc--plan-cell-source-list': parsing options.json, walking the Info
+manuals) is still a plain, synchronous call and does briefly block
+Emacs, same as any other function call -- measured around 7.44s for
+`info' on the real corpus, not nothing, but not the multi-minute
+freeze this exists to fix either.  Called interactively -- `M-x
+arc-reindex-all' -- ASYNC is always
 non-nil: unlimited caps are the default (see `arc-index-nixopt-cap'
 and friends), and a real full ingest is a 20-40 minute run that must
 not freeze Emacs to get.  Progress is reported via `message' either
@@ -395,7 +416,16 @@ whole run as their RUN argument; `arc-reindex-cancel' mutates it in
 place via `plist-put' so every pending closure -- already holding the
 same list object -- sees the flag flip without any of them needing to
 poll this variable.  nil whenever no async run is active, including
-the entire time the synchronous path runs.")
+the entire time the synchronous path runs.
+
+This variable and a run's RUN plist are related but not the same
+thing, and can go out of sync on purpose: `arc-reindex-cancel' clears
+this variable immediately (so a fresh `M-x arc-reindex-all' is never
+stuck waiting on a run that will not converge), while RUN itself lives
+on, still reachable from that run's own pending closures, until its
+own bookkeeping in `arc--reindex-async-next-cell' decides it is truly
+finished -- which is why that cleanup checks `eq' against this
+variable rather than setting it to nil unconditionally.")
 
 (defun arc--plan-cell-source-list (name kind)
   "Return the list of source plists collection NAME's KIND would index,
@@ -403,10 +433,13 @@ or `arc--reindex-skipped' when its directory is absent.  This is the
 asynchronous path's counterpart to the producer calls inlined in
 `arc--reindex-all-sync': it only gathers sources -- parsing JSON,
 walking a directory, walking Info manuals -- none of which talks to
-the embedding model, so none of it is the slow part and all of it can
-stay a plain, eager, synchronous call.  `arc--reindex-async-collection'
-is what then drives the slow, per-chunk embedding step without
-blocking, one bounded batch at a time."
+the embedding model, so none of it is the *tens-of-minutes-long* part
+-- but it is not free either, and it stays a plain, eager, synchronous
+call that briefly blocks Emacs like any other: gathering `info''s
+sources alone (walking 94 builtin manuals) measured around 7.44s on
+the real corpus.  `arc--reindex-async-collection' is what then drives
+the actual slow part, the per-chunk embedding step, without blocking,
+one bounded batch at a time."
   (pcase kind
     ('file (let ((dir (arc-collection-directory name)))
              (if (not (file-directory-p dir))
@@ -429,21 +462,39 @@ blocking, one bounded batch at a time."
 (defun arc--reindex-async-embed-chunk (chunk cid sid title settle)
   "Embed one CHUNK of source SID/collection CID via `llm-embedding-async'
 and write it with `arc--write-chunk' when the vector arrives.  Calls
-SETTLE (with no arguments) exactly once, whether the request succeeds
-or fails, so `arc--reindex-async-chunks' can free the in-flight slot
-either way; a failed embedding is reported via `message' and simply
-skipped rather than aborting the run -- one bad chunk (an Ollama
-hiccup, a timeout) should not cost the rest of the corpus."
+SETTLE with `ok' or `failed' exactly once, no matter what happens --
+a successful write, an embedding error, or a *write* error (an sqlite
+failure, any signal from `arc--write-chunk') -- via `unwind-protect',
+so `arc--reindex-async-collection' can never lose track of an
+in-flight slot: without this, an error inside the success callback
+(the write happened before the call to SETTLE) skipped SETTLE
+entirely, leaking that slot forever and eventually wedging the whole
+run at less than `arc-index-max-in-flight' below its bound with
+nothing left to fill it -- reproduced live: 3 induced write failures
+stalled a 20-chunk run at 9, un-cancellable, since `in-flight' never
+reached 0 either.  A failed embedding or a failed write is reported via
+`message' and simply skipped rather than aborting the run -- one bad
+chunk (an Ollama hiccup, a transient sqlite error) should not cost the
+rest of the corpus -- but SETTLE's status lets
+`arc--reindex-async-collection' count failures instead of only ever
+seeing a clean multiple-of-nothing."
   (let ((text (arc--sanitize-text (plist-get chunk :text))))
     (llm-embedding-async
      arc-embeddings-provider text
      (lambda (vec)
-       (arc--write-chunk sid cid text (plist-get chunk :line-start) (plist-get chunk :line-end)
-                          title vec)
-       (funcall settle))
+       (let ((wrote nil))
+         (unwind-protect
+             (condition-case err
+                 (progn
+                   (arc--write-chunk sid cid text (plist-get chunk :line-start)
+                                      (plist-get chunk :line-end) title vec)
+                   (setq wrote t))
+               (error (message "arc: writing a chunk of source %d failed: %s"
+                                sid (error-message-string err))))
+           (funcall settle (if wrote 'ok 'failed)))))
      (lambda (_type msg)
        (message "arc: embedding failed for a chunk of source %d: %s" sid msg)
-       (funcall settle)))))
+       (funcall settle 'failed)))))
 
 (defun arc--reindex-async-collection (run name cid sources total on-collection-done)
   "Index SOURCES (all of collection NAME/CID's sources for this run)
@@ -460,12 +511,30 @@ A source is upserted -- and its stale chunks deleted via
 `arc--delete-data-for-source' -- lazily, the moment it is first
 advanced into, never upfront for the whole collection: a source this
 run never reaches because RUN was cancelled first is therefore left
-exactly as it was, not wiped and left with nothing.
+exactly as it was, not wiped and left with nothing.  A source that
+*was* advanced into but then hit a chunk failure (see
+`arc--reindex-async-embed-chunk') is a different, narrower problem
+this does NOT fix: `arc--delete-data-for-source' already ran for it,
+so it is left with only whichever of its chunks embedded successfully
+-- possibly none -- rather than its old content.  That asymmetry with
+the synchronous path (which signals and aborts the whole run instead
+of skipping) is deliberate, but it must not also be silent: FAILED-
+CHUNKS and FAILED-SOURCES below exist so ON-COLLECTION-DONE's caller
+can say so loudly instead of it being one `message' buried among
+hundreds of progress lines.
 
-Calls ON-COLLECTION-DONE with the list of source ids started (in
-starting order) once every started source's every chunk has settled --
-embedded and written, or skipped for a per-chunk error -- and either
-every source in SOURCES has been started, or RUN was cancelled."
+Calls ON-COLLECTION-DONE with (KEPT FAILED-CHUNKS FAILED-SOURCE-COUNT)
+-- KEPT the list of source ids started, in starting order, FAILED-
+CHUNKS the total number of chunks that never got a successful write,
+FAILED-SOURCE-COUNT how many distinct sources had at least one -- once
+every started source's every chunk has settled and either every
+source in SOURCES has been started, or RUN was cancelled.  Called
+exactly once: `finished' guards not just entry but the completion
+branch itself, because a `settle' that fires synchronously (a stub, a
+cache, any future local embedder that does not genuinely defer) would
+otherwise re-enter `pump' before the outer call has unwound, and an
+unguarded completion check at the end of that outer call would fire
+ON-COLLECTION-DONE a second time against an already-mutated KEPT."
   (let ((remaining sources)
         (queue nil) ; list of (sid . chunk), oldest first
         (queue-tail nil)
@@ -473,6 +542,8 @@ every source in SOURCES has been started, or RUN was cancelled."
         (source-title (make-hash-table :test 'eql))
         (kept nil)
         (sources-done 0)
+        (failed-chunks 0)
+        (failed-sources (make-hash-table :test 'eql))
         (in-flight 0)
         (finished nil))
     (cl-labels
@@ -487,8 +558,11 @@ every source in SOURCES has been started, or RUN was cancelled."
              (message "arc: %s: %d/%d source(s) indexed" name sources-done total))
            (remhash sid remaining-in-source)
            (remhash sid source-title))
-         (chunk-settled (sid)
+         (chunk-settled (sid status)
            (cl-decf in-flight)
+           (when (eq status 'failed)
+             (cl-incf failed-chunks)
+             (puthash sid t failed-sources))
            (let ((left (1- (gethash sid remaining-in-source 1))))
              (if (<= left 0) (source-settled sid) (puthash sid left remaining-in-source)))
            (pump))
@@ -515,11 +589,28 @@ every source in SOURCES has been started, or RUN was cancelled."
                      (cl-incf in-flight)
                      (arc--reindex-async-embed-chunk
                       (cdr task) cid (car task) (gethash (car task) source-title)
-                      (let ((sid (car task))) (lambda () (chunk-settled sid)))))
+                      (let ((sid (car task))) (lambda (status) (chunk-settled sid status)))))
                  (start-next-source)))
-             (when (and (zerop in-flight) (or (plist-get run :cancelled) (and (null queue) (null remaining))))
+             ;; `(not finished)' here, not just on entry: a `settle' that
+             ;; fires synchronously re-enters `pump' from inside the
+             ;; `while' loop above, and that reentrant call can itself
+             ;; reach and pass this same check first.  Without repeating
+             ;; the guard here, this (the outer, now-stale) call would
+             ;; fire ON-COLLECTION-DONE a second time once it unwinds --
+             ;; reproduced live: a synchronously-settling stub called
+             ;; this branch 7 times for one 8-source collection.
+             (when (and (not finished) (zerop in-flight)
+                        (or (plist-get run :cancelled) (and (null queue) (null remaining))))
                (setq finished t)
-               (funcall on-collection-done (nreverse kept))))))
+               ;; `reverse', not the destructive `nreverse': KEPT must
+               ;; not be mutated in place in case this branch is ever
+               ;; reached more than once despite the guard above (belt
+               ;; and suspenders -- `nreverse' on an already-reversed
+               ;; list is exactly the kind of corruption that turned
+               ;; the reentrancy bug above into an 8-source index
+               ;; mangled down to 1).
+               (funcall on-collection-done (reverse kept) failed-chunks
+                        (hash-table-count failed-sources))))))
       (pump))))
 
 (defun arc--reindex-async-next-cell (run cells)
@@ -529,7 +620,17 @@ a time, then finish RUN.  See `arc--reindex-all-async'."
       (progn
         (when (plist-get run :cancelled)
           (message "arc: reindex cancelled"))
-        (setq arc--reindex-async-active nil)
+        ;; Only clear this RUN's own claim on the variable: `eq', not a
+        ;; blind (setq ... nil).  `arc-reindex-cancel' already cleared
+        ;; `arc--reindex-async-active' itself as an escape hatch the
+        ;; moment it was called (see its own commentary) so a new run
+        ;; can start immediately even if this one is somehow still
+        ;; unwinding its last in-flight requests; if that already
+        ;; happened, a second run may be active in this variable by the
+        ;; time this stale RUN finally gets here; blindly nil-ing it out
+        ;; would clobber that unrelated, still-running run's flag.
+        (when (eq arc--reindex-async-active run)
+          (setq arc--reindex-async-active nil))
         (message "arc: %S" (arc-index-stats)))
     (let* ((cell (car cells))
            (name (car cell))
@@ -541,11 +642,28 @@ a time, then finish RUN.  See `arc--reindex-all-async'."
           (message "arc: %s: %d source(s) to index" name (length sources))
           (arc--reindex-async-collection
            run name cid sources (length sources)
-           (lambda (kept)
-             (message "arc: %s: %d source(s) indexed" name (length kept))
-             (let ((removed (arc--prune-collection cid kept)))
-               (when (> removed 0)
-                 (message "arc: %s: removed %d stale source(s)" name removed)))
+           (lambda (kept failed-chunks failed-sources)
+             (message "arc: %s: %d source(s) indexed%s" name (length kept)
+                      (if (> failed-chunks 0)
+                          (format " -- %d chunk failure(s) across %d source(s), see messages above"
+                                  failed-chunks failed-sources)
+                        ""))
+             (if (plist-get run :cancelled)
+                 ;; C1: a cancelled run must NOT prune.  KEPT here is only
+                 ;; the sources THIS run happened to start before it was
+                 ;; told to stop -- every other source this collection
+                 ;; already had, reached or not, is simply absent from it,
+                 ;; and pruning against an incomplete KEPT would delete
+                 ;; every one of them.  Reproduced live: 10 good sources
+                 ;; indexed, cancel after 5, unconditional prune deleted
+                 ;; the other 5 -- on the real corpus (`info' alone is
+                 ;; 7,748 sources) that is thousands of fine rows gone
+                 ;; for cancelling two minutes into a long run.
+                 (message "arc: %s: reindex cancelled; leaving existing rows untouched (no prune)"
+                          name)
+               (let ((removed (arc--prune-collection cid kept)))
+                 (when (> removed 0)
+                   (message "arc: %s: removed %d stale source(s)" name removed))))
              (arc--reindex-async-next-cell run (cdr cells)))))))))
 
 (defun arc--reindex-all-async (&optional collections)
@@ -553,9 +671,17 @@ a time, then finish RUN.  See `arc--reindex-all-async'."
 Signals a `user-error' if an asynchronous reindex is already running --
 `arc-index-source''s per-chunk transaction makes a single writer safe
 against `C-g', not against a second whole run's sources and prune
-racing the first's."
+racing the first's.  Also signals if `arc-index-max-in-flight' is not
+a positive integer: 0 (its `:type' widget alone does not actually
+forbid this -- see its docstring) would issue no requests at all and
+leave `arc--reindex-async-active' set with nothing ever going to clear
+it, wedging every later `M-x arc-reindex-all' for the rest of the
+session."
   (when arc--reindex-async-active
     (user-error "arc: an asynchronous reindex is already running (M-x arc-reindex-cancel to stop it)"))
+  (unless (and (integerp arc-index-max-in-flight) (> arc-index-max-in-flight 0))
+    (user-error "arc: `arc-index-max-in-flight' must be a positive integer, got %S"
+                arc-index-max-in-flight))
   (let ((run (list :cancelled nil))
         (cells (if collections
                    (seq-filter (lambda (c) (member (car c) collections)) arc-index-plan)
@@ -572,13 +698,30 @@ possible.  Any embedding request already in flight is still written
 when its response arrives -- it was already paid for, and writing a
 complete chunk is never the corruption this is guarding against -- but
 no *new* request is issued after this is called, and no further
-collection is started.  Sources not yet reached are simply left
-unindexed until the next run.  Does nothing (beyond a `message') if no
-asynchronous reindex is active."
+collection is started.  When the collection in progress is cancelled
+partway, it is NOT pruned -- only a run that reaches the end of a
+collection on its own prunes it; see `arc--reindex-async-next-cell'.
+Sources not yet reached are simply left unindexed until the next run.
+
+Also clears `arc--reindex-async-active' immediately, as an escape
+hatch: ordinarily the run itself clears it once every in-flight
+request has actually settled (see `arc--reindex-async-next-cell'), but
+if something upstream of that ever leaks a slot the way the bug fixed
+in `arc--reindex-async-embed-chunk' did -- `in-flight' never reaching
+0, nothing left to converge on -- cancelling could never recover the
+session; a stuck run's now-orphaned callbacks, if any ever do still
+arrive, still see `:cancelled' on their own RUN object (unaffected by
+this) and still stop issuing new work, they just no longer hold the
+one flag a fresh `M-x arc-reindex-all' checks.
+
+Does nothing (beyond a `message') if no asynchronous reindex is
+active."
   (interactive)
   (if arc--reindex-async-active
-      (progn (plist-put arc--reindex-async-active :cancelled t)
-             (message "arc: cancelling reindex once in-flight request(s) finish..."))
+      (let ((run arc--reindex-async-active))
+        (plist-put run :cancelled t)
+        (setq arc--reindex-async-active nil)
+        (message "arc: cancelling reindex; any request already in flight will still be written"))
     (message "arc: no asynchronous reindex is running")))
 
 (provide 'arc-index)

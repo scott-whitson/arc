@@ -5,9 +5,9 @@
   (expand-file-name ".." (file-name-directory
                           (or load-file-name buffer-file-name))))
 (add-to-list 'load-path es-repo-root)
-(setenv "ARC_VEC0_PATH"
-        (or (getenv "ARC_VEC0_PATH")
-            "/nix/store/77440dch8lnph95xaj5fs634iwvgvmja-sqlite-vec-0.1.6/lib/vec0.so"))
+(add-to-list 'load-path (file-name-directory (or load-file-name buffer-file-name)))
+(require 'arc-test-vec0)
+(arc-test-ensure-vec0-or-skip!)
 (require 'arc)
 
 (ert-deftest es-vector-literal ()
