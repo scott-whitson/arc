@@ -29,6 +29,8 @@
 (require 'org)
 (require 'arc-source)
 
+(declare-function arc-index-stats "arc-index")
+
 (defconst arc-ui-buffer-name "*arc*"
   "Name of the buffer arc renders answers into.")
 
@@ -46,7 +48,8 @@ prefix instead.")
   "Major mode for arc's answers.
 Derived from `org-mode' so that citations are ordinary org links."
   (setq-local org-startup-folded nil)
-  (setq-local org-hide-leading-stars t))
+  (setq-local org-hide-leading-stars t)
+  (setq-local header-line-format '(:eval (arc-ui-header-line))))
 
 (defvar-local arc-ui--stream-end nil
   "Marker at the current end of the answer body being streamed.
@@ -63,6 +66,24 @@ never reach far enough to delete it.")
       (unless (derived-mode-p 'arc-answer-mode)
         (arc-answer-mode)))
     buf))
+
+(defun arc-ui-header-line ()
+  "Return a one-line corpus summary for the answer buffer's header.
+Reports size only.  Staleness needs the freshness tracking that phase 5
+adds; until then this must not imply the corpus is current.  An index
+that cannot be read reports that rather than signalling, because a
+header line must never break the buffer it heads."
+  (condition-case err
+      (let* ((stats (arc-index-stats))
+             (total (apply #'+ (mapcar #'cdr stats))))
+        (if (null stats)
+            "arc · corpus empty — run M-x arc-reindex-all"
+          (format "arc · %d chunks · %s"
+                  total
+                  (mapconcat (lambda (c) (format "%s %d" (car c) (cdr c)))
+                             stats " · "))))
+    (error (format "arc · corpus unavailable (%s)"
+                   (error-message-string err)))))
 
 (defun arc-ui-begin-answer (question)
   "Insert QUESTION as a heading and return a marker for the answer body.

@@ -168,3 +168,20 @@
                 (lambda (&rest _) (setq called t))))
        (arc-ui-quit))
      (should called))))
+
+(ert-deftest aui-header-line-summarises-the-corpus ()
+  (cl-letf (((symbol-function 'arc-index-stats)
+             (lambda () '(("file" . 6427) ("org-node" . 428)))))
+    (let ((h (arc-ui-header-line)))
+      (should (string-match-p "6855" h))
+      (should (string-match-p "file" h))
+      (should (string-match-p "org-node" h)))))
+
+(ert-deftest aui-header-line-survives-an-empty-corpus ()
+  (cl-letf (((symbol-function 'arc-index-stats) (lambda () nil)))
+    (should (stringp (arc-ui-header-line)))))
+
+(ert-deftest aui-header-line-survives-an-unreadable-index ()
+  (cl-letf (((symbol-function 'arc-index-stats)
+             (lambda () (error "no database"))))
+    (should (stringp (arc-ui-header-line)))))
