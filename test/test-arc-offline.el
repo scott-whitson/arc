@@ -8,7 +8,8 @@
   '("arc-tika-url" "arc-searxng-url" "arc-pandoc-executable"
     "arc-web-search-function" "arc-webpage-extraction-function"
     "arc-complex-file-extraction-function" "arc-web-pages-limit"
-    "arc-supported-complex-document" "duckduckgo" "searxng")
+    "arc-supported-complex-document" "duckduckgo" "searxng"
+    "ellama" "arc-retrieve-ask" "arc--add-context-row")
   "Identifiers that must not survive in arc's code.
 
 Scanned only from `;;; Code:' onward: the `;;; Changes:' block above it

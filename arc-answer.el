@@ -4,8 +4,9 @@
 ;;; Commentary:
 ;;
 ;; arc renders its own answer buffer, so it assembles its own prompt and
-;; streams the reply itself rather than handing both to ellama.  This file
-;; knows nothing about buffers; `arc-ui.el' owns presentation.
+;; streams the reply itself rather than handing both off to a separate chat
+;; package.  This file knows nothing about buffers; `arc-ui.el' owns
+;; presentation.
 ;;; Code:
 
 (require 'llm)

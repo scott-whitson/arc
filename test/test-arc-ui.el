@@ -185,3 +185,52 @@
   (cl-letf (((symbol-function 'arc-index-stats)
              (lambda () (error "no database"))))
     (should (stringp (arc-ui-header-line)))))
+
+(ert-deftest aui-arc-ask-is-an-interactive-command ()
+  (require 'arc)
+  (should (commandp 'arc-ask)))
+
+(ert-deftest aui-arc-ask-renders-question-answer-and-sources ()
+  (require 'arc)
+  (aui-with-fresh-buffer
+   (cl-letf (((symbol-function 'arc-find-similar)
+              (lambda (_text _cols on-done) (funcall on-done 'QUERY)))
+             ((symbol-function 'arc--retrieve-ids)
+              (lambda (_query _prompt) '(1)))
+             ((symbol-function 'arc--retrieve-rows)
+              (lambda (_ids)
+                '(("file" "/tmp/x.nix" nil nil nil "chunk body" 12 20 nil))))
+             ((symbol-function 'arc-answer-request)
+              (lambda (_q _s on-partial on-done _on-error)
+                (funcall on-partial "Because")
+                (funcall on-done "Because 8385."))))
+     (arc-ask "why 8385?"))
+   (goto-char (point-min))
+   (should (re-search-forward "^\\*\\* why 8385\\?$" nil t))
+   (goto-char (point-min))
+   (should (search-forward "Because 8385." nil t))
+   (goto-char (point-min))
+   (should (search-forward "[[file:/tmp/x.nix::12]]" nil t))))
+
+(ert-deftest aui-arc-ask-sets-buffer-local-last-question-and-sources ()
+  ;; Task 8 reads `arc-ui--last-question' and `arc-ui--last-sources' for
+  ;; its `r' (re-ask) and `f' (follow-up) keys.  If `arc-ask' does not set
+  ;; them, those keys would only ever work in tests that seed the
+  ;; variables by hand -- this proves the real entry point sets them.
+  (require 'arc)
+  (aui-with-fresh-buffer
+   (cl-letf (((symbol-function 'arc-find-similar)
+              (lambda (_text _cols on-done) (funcall on-done 'QUERY)))
+             ((symbol-function 'arc--retrieve-ids)
+              (lambda (_query _prompt) '(1)))
+             ((symbol-function 'arc--retrieve-rows)
+              (lambda (_ids)
+                '(("file" "/tmp/x.nix" nil nil nil "chunk body" 12 20 nil))))
+             ((symbol-function 'arc-answer-request)
+              (lambda (_q _s on-partial on-done _on-error)
+                (funcall on-partial "Because")
+                (funcall on-done "Because 8385."))))
+     (arc-ask "why 8385?"))
+   (should (equal arc-ui--last-question "why 8385?"))
+   (should (= (length arc-ui--last-sources) 1))
+   (should (equal (plist-get (car arc-ui--last-sources) :path) "/tmp/x.nix"))))

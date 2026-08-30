@@ -59,6 +59,18 @@ deletes only back to this marker (never past it), and
 it -- so once a Sources subtree is rendered, a later stream call can
 never reach far enough to delete it.")
 
+(defvar-local arc-ui--last-question nil
+  "The question most recently rendered into this answer buffer.
+Set by `arc-ask' as it renders.  Task 8's re-ask (`r') and follow-up
+(`f') keys read this rather than the last heading's text, so it must
+be kept current by anything that begins a new answer.")
+
+(defvar-local arc-ui--last-sources nil
+  "The sources most recently retrieved for this answer buffer.
+Set by `arc-ask' as it renders, alongside `arc-ui--last-question'.
+Task 8's follow-up key reads this to ground its next question in the
+same retrieval without asking the index again.")
+
 (defun arc-ui-buffer ()
   "Return the arc answer buffer, creating it in `arc-answer-mode' if needed."
   (let ((buf (get-buffer-create arc-ui-buffer-name)))

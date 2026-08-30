@@ -7,7 +7,7 @@
 ;; Maintainer: Scott Whitson
 ;; URL: http://github.com/scott-whitson/arc
 ;; Keywords: help local tools
-;; Package-Requires: ((emacs "29.2") (ellama "0.11.2") (llm "0.18.1") (async "1.9.8") (plz "0.9"))
+;; Package-Requires: ((emacs "29.2") (llm "0.18.1") (async "1.9.8") (plz "0.9") (transient "0.13.5"))
 ;; Version: 0.1.0
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -31,7 +31,11 @@
 ;; backend was ported from sqlite-vss to sqlite-vec; the schema gained a
 ;; `sources' table carrying per-chunk source identity; web search, Apache
 ;; Tika and pandoc extraction were removed; org-roam node, NixOS option and
-;; Home-Manager option source kinds were added; the answer UI was replaced.
+;; Home-Manager option source kinds were added; the answer UI was replaced;
+;; the ellama-based chat/context path (its buffer, its session-aware prompt
+;; rewriting, and the query that fed its context) was removed once arc
+;; gained `arc-ask' and its own answer buffer, and the `ellama' dependency
+;; was dropped entirely.
 
 ;;; Commentary:
 ;;
@@ -40,7 +44,6 @@
 ;; configuration, and cites sources you can jump to.
 
 ;;; Code:
-(require 'ellama)
 (require 'llm)
 (require 'llm-provider-utils)
 (require 'info)
@@ -61,9 +64,11 @@
 (require 'arc-source)
 (require 'arc-source-file) ; arc--file-list, for arc-parse-directory below
 (require 'arc-source-info) ; arc-find-executable, injected into async workers
+(require 'arc-ui)
+(require 'arc-answer)
 
 (defgroup arc nil
-  "RAG implementation for `ellama'."
+  "Local, offline, config-aware RAG oracle."
   :group 'tools)
 
 (defconst arc--unmigrated-functions
@@ -77,10 +82,13 @@ Task 4 replaced `data(path, hash, data)' and dropped the `files' table;
 these have not been rewritten yet.  Task 11 owns that work and deletes
 each guard as it goes.  `arc-parse-info-manual' was here too, until
 Task 10 rewrote it as a pure function (see `arc-source-info.el') and
-removed its guard.  `arc-retrieve-ask' was here too, until Task 11
-rewrote its query across `data' and `sources' (see `arc--retrieve-rows'
-and `arc--add-context-row' below) and removed its guard -- it is the
-query path, and arc cannot answer a question while it stays guarded.
+removed its guard.  The old query-and-context function that fed arc's
+former chat buffer was here too, until Task 11 rewrote its query across
+`data' and `sources' (see `arc--retrieve-rows' below) and removed its
+guard -- it was the query path, and arc could not answer a question
+while it stayed guarded; Task 6 later deleted that function and its
+context-feeding helper outright, once `arc-ask' replaced the whole
+answer path they fed and their only remaining purpose went with it.
 The remaining five are collection-management and bulk-reindex
 functions that `arc-index.el''s `arc-index-source' and
 `arc-reindex-all' already supersede; migrating them is not required to
@@ -104,10 +112,6 @@ This list may only shrink.")
   "Function for semantic text split."
   :type 'function)
 
-(defcustom arc-prompt-rewriting-enabled t
-  "Enable prompt rewriting for better retrieving."
-  :type 'boolean)
-
 (defcustom arc-chat-prompt-template
   "Answer user query based on context above. \
 If you can answer it partially do it. \
@@ -120,29 +124,6 @@ Contains instructions to LLM to be more focused on data in
 context, be able to say \"I don't know\" etc. User query will be
 inserted at the end and all this result prompt will be sent to
 LLM together with context."
-  :type 'string)
-
-(defcustom arc-rewrite-prompt-template
-  "<INSTRUCTIONS>
-You are professional search agent. With given context and user
-prompt you need to create new prompt for search **IN THE SAME
-LANGUAGE AS ORIGINAL USER PROMPT**. It should be concise and
-useful without additional context. Response with prompt only. You
-should replace all words like 'this' or 'it' to its values to
-make search successful. If user prompt contains question your
-prompt should also be in form of question.
- </INSTRUCTIONS>
-<EXAMPLE>
- - What is pony?
- - Pony is ...
- - How to buy it?
-
-How to buy a pony?
-</EXAMPLE>
-<USER_PROMPT>
-%s
-</USER_PROMPT>"
-  "Prompt template for prompt rewriting."
   :type 'string)
 
 (defcustom arc-breakpoint-threshold-amount 0.4
@@ -602,26 +583,6 @@ When FORCE parse even if already parsed."
       arc-reranker-limit
     arc-limit))
 
-(defun arc--rewrite-prompt (prompt action)
-  "Rewrite PROMPT if `arc-prompt-rewriting-enabled'.
-Call ACTION with new prompt."
-  (let ((session (and ellama--current-session-id
-		      (with-current-buffer (ellama-get-session-buffer
-					    ellama--current-session-id)
-			ellama--current-session))))
-    (if (and arc-prompt-rewriting-enabled
-	     ellama--current-session-id
-	     (string= (llm-name (ellama-session-provider session))
-		      (llm-name arc-chat-provider)))
-	(with-current-buffer (get-buffer-create (make-temp-name "arc"))
-	  (ellama-stream
-	   (format arc-rewrite-prompt-template prompt)
-	   :session session
-	   :buffer (current-buffer)
-	   :provider arc-chat-provider
-	   :on-done action))
-      (funcall action prompt))))
-
 (defun arc--retrieve-rows (ids)
   "Return a (KIND PATH INFO-NODE ORG-ID OPTION-NAME CHUNK LINE-START
 LINE-END TITLE) row per id in IDS.
@@ -651,41 +612,48 @@ citation can name the line it actually came from."
           :option-name option-name :title title
           :line-start ls :line-end le :chunk chunk)))
 
-(defun arc--add-context-row (row)
-  "Add one ROW from `arc--retrieve-rows' to the ellama context.
-A row with no chunk text (the join found no data, which should not
-happen for a live id, but is not this function's place to signal
-that) is silently skipped.  `file' and `info' get arc's pre-existing,
-jump-to-source-noninteractive quote types; the remaining kinds have no
-such type yet, so they go in as plain labelled text -- a citation you
-can read but not yet jump to."
-  (pcase-let ((`(,kind ,path ,info-node ,org-id ,option-name ,chunk) row))
-    (when chunk
-      (pcase kind
-        ("file"
-         (ellama-context-add-file-quote-noninteractive path chunk))
-        ("info"
-         (ellama-context-add-info-node-quote-noninteractive info-node chunk))
-        ("org-node"
-         (ellama-context-add-text (format "org-roam node %s:\n%s" org-id chunk)))
-        ((or "nix-option" "hm-option")
-         (ellama-context-add-text (format "Option %s:\n%s" option-name chunk)))))))
+(defun arc--retrieve-ids (query prompt)
+  "Return the data ids QUERY selects, reranked against PROMPT if enabled."
+  (let ((raw (flatten-tree (sqlite-select (arc-db) query))))
+    (if arc-reranker-enabled
+        (arc-rerank prompt raw)
+      (take arc-limit raw))))
 
-(defun arc-retrieve-ask (query prompt)
-  "Retrieve data with QUERY and ask arc for PROMPT."
-  (arc--async-do
-   (lambda () (let* ((raw-ids (flatten-tree (sqlite-select (arc-db) query)))
-		     (ids (if arc-reranker-enabled
-			      (arc-rerank prompt raw-ids)
-			    (take arc-limit raw-ids))))
-		(arc--retrieve-rows ids)))
-   (lambda (result)
-     (if result
-         (mapc #'arc--add-context-row result)
-       (ellama-context-add-text "No related documents found."))
-     (ellama-chat
-      (format arc-chat-prompt-template prompt)
-      nil :provider arc-chat-provider))))
+;;;###autoload
+(defun arc-ask (question &optional collections)
+  "Ask arc QUESTION, grounded in COLLECTIONS, rendering into the arc buffer."
+  (interactive "sAsk arc: ")
+  (let ((cols (or collections arc-enabled-collections)))
+    (arc-find-similar
+     question cols
+     (lambda (query)
+       (let* ((ids (arc--retrieve-ids query question))
+              (sources (mapcar #'arc-row-to-source (arc--retrieve-rows ids)))
+              (marker (arc-ui-begin-answer question)))
+         (pop-to-buffer (arc-ui-buffer))
+         (setq arc-ui--last-question question)
+         (setq arc-ui--last-sources sources)
+         (arc-answer-request
+          question sources
+          (lambda (text) (arc-ui-stream-answer marker text))
+          (lambda (text)
+            (arc-ui-stream-answer marker text)
+            (arc-ui-render-sources sources))
+          (lambda (_sym msg)
+            (arc-ui-stream-answer marker (format "arc: request failed: %s" msg)))))))))
+
+;;;###autoload
+(defvar arc-command-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "i") #'arc-ask)
+    (define-key m (kbd "R") #'arc-reindex-all)
+    (define-key m (kbd "c") #'arc-reindex-cancel)
+    m)
+  "Prefix map for arc's entry points; bind it where you like.
+arc is a library and does not claim a global key for you -- bind this
+map to whatever prefix you like, e.g.:
+
+  (keymap-set global-map \"C-c i\" arc-command-map)")
 
 ;; arc--info-valid-p, arc-get-builtin-manuals, arc-get-external-manuals and
 ;; arc-parse-info-manual moved to arc-source-info.el (Task 10).
@@ -714,10 +682,8 @@ Call ON-DONE callback with result as an argument after FUNC evaluation done."
 		    ,(async-inject-variables "arc-db-directory")
 		    ,(async-inject-variables "arc-find-executable")
 		    ,(async-inject-variables "arc-tar-executable")
-		    ,(async-inject-variables "arc-prompt-rewriting-enabled")
 		    ,(async-inject-variables "arc-batch-embeddings-enabled")
 		    ,(async-inject-variables "arc-batch-size")
-		    ,(async-inject-variables "arc-rewrite-prompt-template")
 		    ,(async-inject-variables "arc-semantic-split-function")
 		    ,(async-inject-variables "arc-breakpoint-threshold-amount")
 		    ,(async-inject-variables "arc-reranker-enabled")
@@ -874,22 +840,6 @@ It does nothing if buffer file not inside one of existing collections."
      (format
       "DELETE FROM collections WHERE rowid = %d;"
       collection-id))))
-
-(defun arc--gen-chat (&optional collections)
-  "Generate function for chat with arc based on COLLECTIONS."
-  (let ((cols (or collections arc-enabled-collections)))
-    (lambda (prompt)
-      (arc-find-similar
-       prompt cols
-       (lambda (query) (arc-retrieve-ask query prompt))))))
-
-;;;###autoload
-(defun arc-chat (prompt &optional collections)
-  "Send PROMPT to arc.
-Find similar quotes in COLLECTIONS and add it to context."
-  (interactive "sAsk arc: ")
-  (let ((cols (or collections arc-enabled-collections)))
-    (arc--rewrite-prompt prompt (arc--gen-chat cols))))
 
 (defun arc-recalculate-embeddings ()
   "Recalculate and save new embeddings after embedding provider change."

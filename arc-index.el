@@ -72,7 +72,7 @@
 ;; writer just gets SQLITE_BUSY, it does not corrupt anything), but the
 ;; parent process in `arc--async-do''s own pattern keeps its handle
 ;; open across the whole child run and only closes and reopens it in
-;; the done callback -- so an interactive read in the parent (`arc-chat',
+;; the done callback -- so an interactive read in the parent (`arc-ask',
 ;; say) racing the child's write is a real scenario that pattern has
 ;; never had to prove safe, because nothing before this ever ran a
 ;; write that long while the parent might still be reading.  Keeping

@@ -174,13 +174,13 @@ to know either way.
 
 *** What's built and what isn't
 
-This is a phase 1–2 project: indexing and retrieval work end to end,
-and you talk to it through plain ~M-x~ commands and the ellama chat
-buffers ~arc-chat~ uses under the hood. There is no dedicated
-answer-review UI, no way to scope a single query to a subset of
-collections from a prompt, no hooks that reindex a source
-automatically when it changes on disk, and no automated evaluation
-harness -- those are designed (see ~docs/design/~) but not built.
+This is a phase 1–4 project: indexing, retrieval and answering all work
+end to end, and ~arc-ask~ renders straight into arc's own answer
+buffer, ~*arc*~. There is no way to scope a single query to a subset of
+collections from a prompt (short of the Lisp-level ~COLLECTIONS~
+argument below), no hooks that reindex a source automatically when it
+changes on disk, and no automated evaluation harness -- those are
+designed (see ~docs/design/~) but not built.
 
 *** 1. Pull the Ollama models
 
@@ -231,7 +231,7 @@ NixOS/Home-Manager, drop those two plan entries as well.
 #+end_src
 
 Do this once, from Lisp (~M-:~ or a scratch buffer), before you ever
-try ~arc-chat~ -- there is nothing to retrieve until this has run at
+try ~arc-ask~ -- there is nothing to retrieve until this has run at
 least once. A first full index over real corpora (all of NixOS's and
 Home-Manager's options, plus every configured directory) is genuinely
 slow: 20–40 minutes of sustained CPU/GPU is normal, dominated by
@@ -250,7 +250,7 @@ disappeared from a collection; see "Known limitations" below.
 
 *** 4. Enable the collections you actually want searched
 
-~arc-enabled-collections~ -- what ~arc-chat~ actually searches --
+~arc-enabled-collections~ -- what ~arc-ask~ actually searches --
 defaults to only ~("builtin manuals")~, regardless of what
 ~arc-reindex-all~ just built. Add your own collections to it, e.g.:
 
@@ -258,18 +258,35 @@ defaults to only ~("builtin manuals")~, regardless of what
 (setopt arc-enabled-collections '("builtin manuals" "dotfiles" "vault"))
 #+end_src
 
-*** 5. Ask arc something
+*** 5. Bind arc's commands
 
-#+begin_src
-M-x arc-chat RET How do I enable syncthing in home-manager? RET
+arc is a library and does not bind any key for you. It ships
+~arc-command-map~, a prefix keymap with ~i~ on ~arc-ask~, ~R~ on
+~arc-reindex-all~ and ~c~ on ~arc-reindex-cancel~ -- bind that prefix
+to whatever key you like, e.g.:
+
+#+begin_src elisp
+(keymap-set global-map "C-c i" arc-command-map)
 #+end_src
 
-~arc-chat~ takes a prompt (a plain string; interactively it just
+~arc-transient~ (in ~arc-ui.el~) offers the same three commands as a
+~transient~ menu, for whoever prefers that to a keymap.
+
+*** 6. Ask arc something
+
+#+begin_src
+M-x arc-ask RET How do I enable syncthing in home-manager? RET
+#+end_src
+
+~arc-ask~ takes a question (a plain string; interactively it just
 prompts "Ask arc: "), finds similar quotes in the enabled collections,
-adds them as context, and hands off to ~ellama-chat~, which opens (or
-reuses) an ellama chat buffer with the answer. Call it from Lisp with
-an explicit collections list to search a one-off set instead of
-~arc-enabled-collections~: ~(arc-chat "prompt" '("vault"))~.
+and streams the answer straight into arc's own buffer, ~*arc*~ --
+no ellama, no separate chat package. The question becomes a heading,
+the streamed answer appears under it, and a ~Sources~ subtree lists
+every retrieved citation as an org link; put point on one and press
+~RET~ (~arc-ui-follow-citation~) to jump to it. Call ~arc-ask~ from
+Lisp with an explicit collections list to search a one-off set instead
+of ~arc-enabled-collections~: ~(arc-ask "prompt" '("vault"))~.
 
 ** Known limitations
 
