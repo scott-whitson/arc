@@ -14,6 +14,15 @@
 ;; `arc-mode': that is a built-in Emacs library (archive support), and
 ;; shadowing its feature symbol would make `(require 'arc-mode)' load the
 ;; wrong thing silently.
+;;
+;; Streaming replaces the answer body in place (see `arc-ui-stream-answer'),
+;; and that replacement is bounded by `arc-ui--stream-end', a private
+;; buffer-local marker at the current end of the answer body.
+;; `arc-ui-render-sources' inserts the Sources subtree immediately after
+;; that same marker without moving it, so the marker always separates
+;; "answer text streaming may still rewrite" from "chrome appended after
+;; it" -- a later `arc-ui-stream-answer' call can only ever delete back to
+;; that boundary, never past it into an already-rendered Sources subtree.
 
 ;;; Code:
 
@@ -28,6 +37,14 @@
 Derived from `org-mode' so that citations are ordinary org links."
   (setq-local org-startup-folded nil)
   (setq-local org-hide-leading-stars t))
+
+(defvar-local arc-ui--stream-end nil
+  "Marker at the current end of the answer body being streamed.
+Set fresh by every `arc-ui-begin-answer' call.  `arc-ui-stream-answer'
+deletes only back to this marker (never past it), and
+`arc-ui-render-sources' inserts immediately after it without moving
+it -- so once a Sources subtree is rendered, a later stream call can
+never reach far enough to delete it.")
 
 (defun arc-ui-buffer ()
   "Return the arc answer buffer, creating it in `arc-answer-mode' if needed."
@@ -46,23 +63,35 @@ The marker is where `arc-ui-stream-answer' replaces text as it arrives."
     (insert (format "** %s\n\n" question))
     (let ((m (point-marker)))
       (set-marker-insertion-type m nil)
+      (setq arc-ui--stream-end (copy-marker m nil))
       m)))
 
 (defun arc-ui-stream-answer (marker text)
   "Replace the answer body at MARKER with TEXT.
 Streaming providers hand back the whole accumulated string each time,
 so this replaces rather than appends -- appending would repeat every
-prefix."
+prefix.
+
+The deletion is bounded by `arc-ui--stream-end' rather than
+`point-max', so it can never reach into a Sources subtree a prior
+`arc-ui-render-sources' call already appended below the answer."
   (with-current-buffer (marker-buffer marker)
-    (save-excursion
-      (goto-char marker)
-      (delete-region marker (point-max))
-      (insert text))))
+    (let ((end (or arc-ui--stream-end
+                   (setq arc-ui--stream-end (copy-marker marker nil)))))
+      (save-excursion
+        (delete-region marker end)
+        (goto-char marker)
+        (insert text)
+        (set-marker end (point))))))
 
 (defun arc-ui-render-sources (sources)
-  "Append a `*** Sources' subtree listing SOURCES as org links."
+  "Append a `*** Sources' subtree listing SOURCES as org links.
+Inserted immediately after `arc-ui--stream-end' -- which, having
+insertion type nil, does not advance past this insertion -- so the
+marker keeps pointing at the answer/Sources boundary afterwards, and
+a later `arc-ui-stream-answer' call cannot delete into it."
   (with-current-buffer (arc-ui-buffer)
-    (goto-char (point-max))
+    (goto-char (or arc-ui--stream-end (point-max)))
     (unless (bolp) (insert "\n"))
     (insert (format "\n*** Sources                              [%d retrieved]\n"
                     (length sources)))
