@@ -10,22 +10,24 @@
 (require 'sqlite)
 (require 'json)
 
-;; `make-llm-ollama' is only required lazily, inside the defcustom
-;; default-value forms below, so the byte-compiler never sees a
-;; top-level `require' for `llm-ollama' to resolve it against.
-(declare-function make-llm-ollama "llm-ollama")
+;; The defcustom default-value forms below construct llm-ollama structs
+;; unconditionally at file-load time (defcustom evaluates its default
+;; value on load, not lazily on first access), so this require is not
+;; optional and is not merely a byte-compiler courtesy -- promoting it
+;; to a real top-level form gives the byte-compiler's existing
+;; special-case for top-level `require' something to resolve
+;; `make-llm-ollama' against, with identical runtime behavior.
+(require 'llm-ollama)
 
-(defcustom arc-embeddings-provider (progn (require 'llm-ollama)
-					    (make-llm-ollama
-					     :embedding-model "nomic-embed-text"))
+(defcustom arc-embeddings-provider (make-llm-ollama
+				     :embedding-model "nomic-embed-text")
   "Embeddings provider to generate embeddings."
   :type '(sexp :validate llm-standard-provider-p)
   :group 'arc)
 
-(defcustom arc-chat-provider (progn (require 'llm-ollama)
-				      (make-llm-ollama
-				       :chat-model "qwen2.5-coder:3b"
-				       :embedding-model "nomic-embed-text"))
+(defcustom arc-chat-provider (make-llm-ollama
+			       :chat-model "qwen2.5-coder:3b"
+			       :embedding-model "nomic-embed-text")
   "Chat provider."
   :type '(sexp :validate llm-standard-provider-p)
   :group 'arc)
