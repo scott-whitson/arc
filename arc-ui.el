@@ -32,6 +32,16 @@
 (defconst arc-ui-buffer-name "*arc*"
   "Name of the buffer arc renders answers into.")
 
+(defvar arc-answer-mode-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "RET") #'arc-ui-follow-citation)
+    (define-key m (kbd "TAB") #'org-cycle)
+    (define-key m (kbd "q")   #'arc-ui-quit)
+    m)
+  "Keymap for `arc-answer-mode'.
+Acts on the answer at point.  Entry points live on the global `C-c i'
+prefix instead.")
+
 (define-derived-mode arc-answer-mode org-mode "arc"
   "Major mode for arc's answers.
 Derived from `org-mode' so that citations are ordinary org links."
@@ -102,6 +112,27 @@ a later `arc-ui-stream-answer' call cannot delete into it."
           (setq n (1+ n))
           (insert (format "    %d. %s\n" n
                           (arc-source-link s (plist-get s :line-start)))))))))
+
+(defun arc-ui-follow-citation ()
+  "Follow the citation at point.
+A thin wrapper over `org-open-at-point': citations are org links, so
+org already knows how to open every kind arc renders."
+  (interactive)
+  (org-open-at-point))
+
+(defun arc-ui-quit ()
+  "Bury the arc answer buffer."
+  (interactive)
+  (quit-window))
+
+(require 'transient)
+
+(transient-define-prefix arc-transient ()
+  "arc."
+  ["arc"
+   ("i" "ask" arc-ask)
+   ("r" "reindex" arc-reindex-all)
+   ("c" "cancel reindex" arc-reindex-cancel)])
 
 (provide 'arc-ui)
 ;;; arc-ui.el ends here

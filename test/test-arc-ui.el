@@ -1,5 +1,6 @@
 ;;; test-arc-ui.el --- the answer buffer -*- lexical-binding: t; -*-
 (require 'ert)
+(require 'cl-lib)
 (defvar aui-root (expand-file-name ".." (file-name-directory
                                          (or load-file-name buffer-file-name))))
 (add-to-list 'load-path aui-root)
@@ -92,3 +93,33 @@
      (should (re-search-forward "^\\*\\*\\* Sources" nil t))
      (goto-char (point-min))
      (should (search-forward "[[nixopt:a.b.c]]" nil t)))))
+
+(ert-deftest aui-mode-map-binds-the-documented-keys ()
+  (dolist (cell '(("q" . arc-ui-quit)
+                  ("TAB" . org-cycle)))
+    (should (eq (lookup-key arc-answer-mode-map (kbd (car cell))) (cdr cell)))))
+
+(ert-deftest aui-mode-map-keys-are-all-real-commands ()
+  (map-keymap
+   (lambda (_key def)
+     (when (symbolp def)
+       (should (commandp def))))
+   arc-answer-mode-map))
+
+(ert-deftest aui-transient-is-defined-and-is-a-command ()
+  (should (fboundp 'arc-transient))
+  (should (commandp 'arc-transient)))
+
+(ert-deftest aui-follow-citation-is-org-open-at-point ()
+  (aui-with-fresh-buffer
+   (arc-ui-begin-answer "q")
+   (arc-ui-render-sources
+    (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b")))
+   (goto-char (point-min))
+   (should (re-search-forward org-link-bracket-re nil t))
+   (goto-char (match-beginning 0))
+   (let ((called nil))
+     (cl-letf (((symbol-function 'org-open-at-point)
+                (lambda (&rest _) (setq called t))))
+       (arc-ui-follow-citation))
+     (should called))))
