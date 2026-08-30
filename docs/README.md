@@ -29,6 +29,6 @@ and review packages are diffs of commits already in this history.
 
 ## Status
 
-Phases 1–2 complete: 134 tests across 15 suites, and a working index verified
+Phases 1–2 complete: 163 tests across 16 suites, and a working index verified
 answering real questions with citations confirmed at file and line. Known open
 items are recorded at the end of the execution ledger.

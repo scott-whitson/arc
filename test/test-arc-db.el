@@ -112,6 +112,33 @@ db with no tables, which is exactly how the previous run's confusing
    (let ((arc-sqlite-vec-path (getenv "ARC_VEC0_PATH")))
      (should (= (arc-db-schema-version) 1)))))
 
+(ert-deftest adb-broken-vec0-extension-signals-clear-error-naming-path ()
+  "A file that exists, passes Emacs's own `sqlite-load-extension' \
+basename allow-list, and \"loads\" without Emacs ever signalling --
+but does not actually register a working vec0 module, because SQLite
+resolves its entry point from the (wrong) basename -- must be caught
+immediately by `arc--init-db' checking `sqlite-load-extension's return
+value (nil in exactly this case, measured on Emacs 30.2 by copying a
+real vec0.so to `rtree.so'), not left to surface much later and far
+from its cause as `(sqlite-error \"no such module: vec0\")' from
+`CREATE VIRTUAL TABLE ... USING vec0'."
+  (let* ((real-vec0 (getenv "ARC_VEC0_PATH"))
+         (dir (make-temp-file "arc-vec0-wrongname" t))
+         (wrong-path (expand-file-name "rtree.so" dir)))
+    (unwind-protect
+        (progn
+          (copy-file real-vec0 wrong-path)
+          (arc-test-with-temp-db
+           (let ((arc-sqlite-vec-path wrong-path))
+             (let ((err (should-error (arc-db) :type 'error)))
+               (should (string-match-p (regexp-quote wrong-path) (cadr err)))
+               (should (string-match-p "returned nil" (cadr err)))
+               ;; must not be confused with the "missing path" error --
+               ;; this path DOES exist, so that message would be wrong.
+               (should-not (string-match-p "does not point to an existing" (cadr err)))))
+           (should (null arc--db))))
+      (delete-directory dir t))))
+
 (ert-deftest adb-sqlite-escape-round-trips-backslash-quote-and-apostrophe ()
   "SQLite string literals have no backslash-escape rule -- only a
 doubled single quote means anything.  `arc-sqlite-escape' used to map

@@ -227,7 +227,24 @@ Signal here instead, naming both the variable and the path it tried."
 sqlite-vec vec0 extension: %S" arc-sqlite-vec-path))
   (sqlite-pragma db "journal_mode=WAL")
   (sqlite-pragma db "foreign_keys=ON")
-  (sqlite-load-extension db arc-sqlite-vec-path)
+  (unless (sqlite-load-extension db arc-sqlite-vec-path)
+    ;; `sqlite-load-extension's return value is the *only* place this
+    ;; failure surfaces.  It never signals for a file that exists, is on
+    ;; Emacs's own basename allow-list, and dlopens cleanly, but does not
+    ;; actually register a `vec0' module -- e.g. a real vec0.so copied to
+    ;; a wrong-but-allow-listed name such as `rtree.so' or
+    ;; `libsqlite3_mod_vec0.so', or an unrelated library (zlib, say)
+    ;; copied to a file literally named `vec0.so'.  Left unchecked, that
+    ;; keeps `arc--init-db' running for five more statements before it
+    ;; fails at `CREATE VIRTUAL TABLE ... USING vec0' with a confusing
+    ;; `(sqlite-error "no such module: vec0")' far from its real cause.
+    ;; Catch it here instead, naming the path and the likely cause.
+    (error "arc: `sqlite-load-extension' returned nil loading `arc-sqlite-vec-path' \
+(%S) -- the file exists and its name passed Emacs's allow-list, but it does \
+not actually provide a working vec0 module (wrong basename for its real \
+entry point, or not a sqlite-vec build at all); keep the file named \
+exactly `vec0.so' (or your platform's loadable-module suffix)"
+           arc-sqlite-vec-path))
   (sqlite-execute db (arc-collections-create-table-sql))
   (sqlite-execute db (arc-kinds-create-table-sql))
   (sqlite-execute db (arc-fill-kinds-sql))

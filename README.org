@@ -10,11 +10,26 @@ you can jump to.
 
 arc is a fork of [[http://github.com/s-kostyaev/elisa][ELISA]] by Sergey Kostyaev.
 
-** No network at query time
+** Network access
 
-arc reaches out to Ollama for embeddings and chat completion, and
-nothing else. There is no web search, no remote document-conversion
-service, and no other outbound request anywhere in the package.
+At query time, arc makes no outbound *internet* requests. It talks to
+a local [[https://ollama.com][Ollama]] instance for embeddings and chat completion, and,
+only when ~arc-reranker-enabled~ is non-nil (it is nil, i.e. off, by
+default), to a reranker service at ~arc-reranker-url~. Both are
+loopback by default (Ollama on ~localhost:11434~, the reranker's
+default ~arc-reranker-url~ is ~http://127.0.0.1:8787/~), but
+~arc-reranker-url~ is a plain user-settable string -- arc will POST to
+whatever it is set to, so if you point it at a non-loopback address,
+that stops being a local-only request. There is no web search and no
+remote document-conversion service anywhere in the package.
+
+*Indexing* is a separate matter: building the ~nix-option~ and
+~hm-option~ collections runs ~nix build~ against a flake, and that
+build fetches from ~cache.nixos.org~ (and, if not already cached, a
+Home-Manager revision from GitHub) over the network -- see
+~arc-source-nixopt.el~. This is a one-time-per-revision cache fetch,
+not an evaluation, but it is real outbound traffic, and it is the
+exception to the "no internet" claim above.
 
 ** Data sources
 
@@ -60,9 +75,11 @@ and signals a hard error, ~arc-db~ closes the half-open connection
 rather than leave a broken one to be silently reused, and there is no
 database at all until this is fixed. A path that exists but does not
 actually provide a working ~vec0~ module (see below) fails the same
-way, just later and more confusingly: creating the ~data_embeddings~
-virtual table signals ~(sqlite-error "no such module: vec0")~, which
-propagates out through the same closing-and-re-signalling path.
+way, at the same point: ~arc--init-db~ also checks
+~sqlite-load-extension~'s own return value and signals a hard error
+naming the path when it is nil, rather than letting the real failure
+surface much later and far from its cause when ~CREATE VIRTUAL TABLE
+... USING vec0~ finally hits ~(sqlite-error "no such module: vec0")~.
 
 Keep the file named exactly ~vec0.so~ (or your platform's
 loadable-module suffix, e.g. ~vec0.dylib~) -- a copy under any other
@@ -76,62 +93,183 @@ shows, it essentially never does; the "incident" it needed to catch
 happens one step later.)
 
 The loud gate is Emacs's own: ~sqlite-load-extension~ checks the
-basename you hand it against its own small, hardcoded, case-sensitive
-allow-list of extension names *before* SQLite ever sees the file, and
-refuses anything not on it outright -- a copy at, say,
-~/path/to/my-vec0.so~ fails immediately with =(sqlite-error "Module
-name not on allowlist")=, naming its actual cause plainly.
+basename you hand it against its own small, hardcoded allow-list of
+extension names *before* SQLite ever sees the file, and refuses
+anything not on it outright -- a copy at, say, ~/path/to/my-vec0.so~
+fails immediately with =(sqlite-error "Module name not on
+allowlist")=, naming its actual cause plainly. The check is
+case-sensitive (~VEC0.so~ fails where ~vec0.so~ passes) and it is not
+a simple substring match either: ~vec.so~ fails and ~libvec0.so~
+fails even though both contain "vec0"-ish text -- only a handful of
+exact recognized names pass, and this document can only report which
+ones it measured, not enumerate the list from the outside.
 
-The silent gate sits behind that one and belongs to SQLite, not Emacs:
-~sqlite-load-extension~ never signals a SQLite-level load failure at
-all. Proof: copying =libz.so.1= (zlib -- not a SQLite extension of any
-kind) to a file literally named ~vec0.so~ still "loads" without error.
-What actually determines whether the extension you get behaves like
-~vec0~ is SQLite's own basename-derived entry-point convention: it
-takes the alphabetic characters of the basename up to its first dot
-(eliding a leading ~lib~) and calls =sqlite3_<that>_init= if the shared
-library exports a symbol by that name. ~vec0.so~'s binary exports
-=sqlite3_vec_init= (and two other =sqlite3_vec_*_init= symbols) but no
-generic =sqlite3_extension_init= fallback, so *only* a basename that
-derives to exactly =vec= actually works. A copy named ~rtree.so~,
-~pcre.so~, or even ~libsqlite3_mod_vec0.so~ (Debian's own naming
-convention -- and each of these three happens to also sit on *Emacs's*
-allow-list, which recognizes names, not bytes) passes both the
-allow-list check and the "load" call in total silence, and only fails
-once something actually tries to use the module: =(sqlite-error "no
-such module: vec0")=, exactly what happens when arc's own
-~arc--init-db~ tries to create the ~data_embeddings~ virtual table
-(see above). Measured on Emacs 30.2; the table below is what running
-both stages -- load, then ~CREATE VIRTUAL TABLE ... USING vec0~ --
-against each name actually produced:
+The silent gate sits behind that one and belongs to SQLite, not
+Emacs: ~sqlite-load-extension~ does not *signal* a SQLite-level load
+failure, but it does *report* one -- through its own return value,
+which arc's code did not check until now (see above) and which an
+earlier round of this document mistook for "never fails" because it
+only tested whether the call raised. Proof: copying =libz.so.1=
+(zlib -- not a SQLite extension of any kind) to a file literally
+named ~vec0.so~ passes the allow-list and the load call without
+Emacs raising anything, but the call returns ~nil~. What determines
+whether the extension you get actually behaves like ~vec0~ is
+SQLite's own entry-point resolution, which arc's code cannot see or
+influence: SQLite tries the generic ~sqlite3_extension_init~ symbol
+first, and only if the library does not export it, falls back to a
+symbol derived from the basename -- the alphabetic characters up to
+the first dot, eliding a leading ~lib~ -- calling
+~sqlite3_<that>_init~ if the library exports one by that name.
+~vec0.so~'s binary exports no generic ~sqlite3_extension_init~, but
+does export ~sqlite3_vec_init~ (and two other ~sqlite3_vec_*_init~
+symbols), so *only* a basename that derives to exactly ~vec~ actually
+reaches that symbol. A copy named ~rtree.so~, ~pcre.so~, or
+~libsqlite3_mod_vec0.so~ passes Emacs's allow-list check by name --
+~libsqlite3_mod_vec0.so~ in particular is *not* simply one more
+allow-list entry copied verbatim; it passes the check for some other
+reason this document cannot characterize from the outside, only
+confirm by measurement -- and then "loads" in total silence:
+~sqlite-load-extension~ returns ~nil~. Left unchecked, that used to
+only fail once something actually tried to use the module:
+=(sqlite-error "no such module: vec0")=, exactly what happened when
+arc's own ~arc--init-db~ tried to create the ~data_embeddings~
+virtual table. Now ~arc--init-db~ checks the ~nil~ itself and signals
+immediately, naming the path (see above). Measured on Emacs 30.2; the
+table below is what running both stages -- load, then ~CREATE
+VIRTUAL TABLE ... USING vec0~ -- against each name actually produced:
 
-| basename                   | load result                                | ~USING vec0~                      |
-|----------------------------+---------------------------------------------+------------------------------------|
-| ~vec0.so~ / ~.dylib~ / ~.dll~ | ok                                          | works                              |
-| ~rtree.so~                 | ok (silent)                                | =(sqlite-error "no such module: vec0")= |
-| ~pcre.so~                  | ok (silent)                                | =(sqlite-error "no such module: vec0")= |
-| ~libsqlite3_mod_vec0.so~   | ok (silent)                                | =(sqlite-error "no such module: vec0")= |
-| zlib copied to ~vec0.so~   | ok (silent)                                | =(sqlite-error "no such module: vec0")= |
-| ~my-vec0.so~                | =(sqlite-error "Module name not on allowlist")= | n/a                                |
-| ~VEC0.so~                   | =(sqlite-error "Module name not on allowlist")= | n/a                                |
-| ~banana.so~                 | =(sqlite-error "Module name not on allowlist")= | n/a                                |
+| basename                       | ~sqlite-load-extension~ returns                 | ~USING vec0~                             |
+|---------------------------------+--------------------------------------------------+-------------------------------------------|
+| ~vec0.so~ / ~.dylib~ / ~.dll~   | ~t~                                              | works                                     |
+| ~rtree.so~                     | ~nil~                                            | =(sqlite-error "no such module: vec0")=  |
+| ~pcre.so~                      | ~nil~                                            | =(sqlite-error "no such module: vec0")=  |
+| ~libsqlite3_mod_vec0.so~       | ~nil~                                            | =(sqlite-error "no such module: vec0")=  |
+| zlib copied to ~vec0.so~       | ~nil~                                            | =(sqlite-error "no such module: vec0")=  |
+| ~my-vec0.so~                   | =(sqlite-error "Module name not on allowlist")=  | n/a                                       |
+| ~VEC0.so~                      | =(sqlite-error "Module name not on allowlist")=  | n/a                                       |
+| ~banana.so~                    | =(sqlite-error "Module name not on allowlist")=  | n/a                                       |
+| ~libvec0.so~                   | =(sqlite-error "Module name not on allowlist")=  | n/a                                       |
+| ~vec.so~                       | =(sqlite-error "Module name not on allowlist")=  | n/a                                       |
 
 The upshot: renaming this file is never safe to try-and-see -- a
-rename that happens to sit on Emacs's allow-list will appear to load
-fine and only fail later, confusingly, at first real use.
+rename that happens to sit on Emacs's allow-list will still pass
+~sqlite-load-extension~ (returning ~nil~, not raising), but arc now
+catches that ~nil~ immediately, at database-open time, instead of
+letting it surface later and more confusingly at first real use.
 
 **** A possibly-higher Emacs floor for this extension specifically
 
 This package's own code needs nothing past Emacs 29.2 (see
 ~Package-Requires~). Whether *loading ~vec0~* needs more is a separate
-question this document cannot fully answer: Emacs's sqlite extension
-allow-list did not include ~vec0~ from the start -- it was a later,
-separate addition to that list, landing after Emacs 29.4 had already
-shipped -- so an Emacs 29 install may reject it the same way
-~my-vec0.so~ does above, regardless of the file's name. No Emacs 29
-was available to verify this directly; what's confirmed is that it
-works on Emacs 30.2. If you are on Emacs 29 and ~vec0~ loads (or
-doesn't) for you, we'd like to know either way.
+question this document cannot fully answer. It is commonly said that
+~vec0~ was added to Emacs's sqlite extension allow-list some time
+after Emacs 29.4 shipped, but nothing on this host -- no Emacs 29
+install and no Emacs source tree -- can confirm or date that from the
+outside, so treat it as unverified rather than a citable fact here.
+What is confirmed directly: ~vec0~ loads and works on Emacs 30.2. If
+you are on Emacs 29 and ~vec0~ loads (or doesn't) for you, we'd like
+to know either way.
+
+** Usage
+
+*** What's built and what isn't
+
+This is a phase 1–2 project: indexing and retrieval work end to end,
+and you talk to it through plain ~M-x~ commands and the ellama chat
+buffers ~arc-chat~ uses under the hood. There is no dedicated
+answer-review UI, no way to scope a single query to a subset of
+collections from a prompt, no hooks that reindex a source
+automatically when it changes on disk, and no automated evaluation
+harness -- those are designed (see ~docs/design/~) but not built.
+
+*** 1. Pull the Ollama models
+
+arc expects an already-running local [[https://ollama.com][Ollama]] and these models pulled:
+
+#+begin_src sh
+ollama pull qwen2.5-coder:3b   # or: ollama pull qwen2.5:7b
+ollama pull nomic-embed-text
+#+end_src
+
+~qwen2.5-coder:3b~ is ~arc-chat-provider~'s default chat model,
+~nomic-embed-text~ is both providers' embedding model (see
+~arc-embeddings-provider~ and ~arc-chat-provider~ in ~arc-db.el~); set
+either defcustom to point at a different Ollama model instead.
+
+*** 2. Point arc at your own files, not the author's
+
+~arc-index-plan~ (in ~arc-index.el~) lists the collections a reindex
+builds, and ~arc-collection-directory-alist~ maps the ~file~- and
+~org~-chunked ones among them to a directory on disk. Both defaults
+describe *this* machine, not yours:
+
+#+begin_src elisp
+;; arc-collection-directory-alist defaults to:
+(("dotfiles" . "~/dotfiles")
+ ("eminix"   . "~/projects/eminix")
+ ("vault"    . "~/docs/org"))
+
+;; arc-index-plan defaults to:
+(("dotfiles" . file) ("eminix" . file) ("vault" . org)
+ ("nix options" . nixopt) ("hm options" . hmopt)
+ ("builtin manuals" . info))
+#+end_src
+
+Before indexing anything, either edit these two variables (in your
+init file, with ~setopt~ or ~customize-set-variable~) to name your own
+directories and collections, or remove the ~"dotfiles"~/~"eminix"~/
+~"vault"~ entries entirely if you have no equivalent of them. The
+~"nix options"~ and ~"hm options"~ entries also need a real flake:
+see ~arc-nixopt-flake~ and ~arc-hm-flake~ (both default to
+~~/dotfiles~ too) in ~arc-source-nixopt.el~ -- if you are not on
+NixOS/Home-Manager, drop those two plan entries as well.
+
+*** 3. Build the index
+
+#+begin_src elisp
+(arc-reindex-all)          ; synchronous: blocks Emacs until done
+#+end_src
+
+Do this once, from Lisp (~M-:~ or a scratch buffer), before you ever
+try ~arc-chat~ -- there is nothing to retrieve until this has run at
+least once. A first full index over real corpora (all of NixOS's and
+Home-Manager's options, plus every configured directory) is genuinely
+slow: 20–40 minutes of sustained CPU/GPU is normal, dominated by
+computing one embedding per chunk. ~arc-index-nixopt-cap~ and
+~arc-index-hmopt-cap~ can shrink this drastically for a quick first
+try -- set either to a small number like 300 before reindexing.
+
+Calling ~M-x arc-reindex-all~ *interactively* instead runs the
+asynchronous path: it returns immediately and reports progress via
+~message~, so Emacs is never frozen for the full run. Cancel an
+in-progress asynchronous reindex with ~M-x arc-reindex-cancel~ --
+work already committed for a source stays committed, nothing is left
+half-written. Only a *synchronous* call (the Lisp form above, or
+~(arc-reindex-all COLLECTIONS)~) prunes sources that have genuinely
+disappeared from a collection; see "Known limitations" below.
+
+*** 4. Enable the collections you actually want searched
+
+~arc-enabled-collections~ -- what ~arc-chat~ actually searches --
+defaults to only ~("builtin manuals")~, regardless of what
+~arc-reindex-all~ just built. Add your own collections to it, e.g.:
+
+#+begin_src elisp
+(setopt arc-enabled-collections '("builtin manuals" "dotfiles" "vault"))
+#+end_src
+
+*** 5. Ask arc something
+
+#+begin_src
+M-x arc-chat RET How do I enable syncthing in home-manager? RET
+#+end_src
+
+~arc-chat~ takes a prompt (a plain string; interactively it just
+prompts "Ask arc: "), finds similar quotes in the enabled collections,
+adds them as context, and hands off to ~ellama-chat~, which opens (or
+reuses) an ellama chat buffer with the answer. Call it from Lisp with
+an explicit collections list to search a one-off set instead of
+~arc-enabled-collections~: ~(arc-chat "prompt" '("vault"))~.
 
 ** Known limitations
 
