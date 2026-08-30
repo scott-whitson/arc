@@ -52,13 +52,25 @@
 (require 'json)
 (require 'sqlite)
 (require 'arc-db)
+;; `arc-index' is required unconditionally here, not left for some external
+;; setup function (`eminix/arc--setup', say) to require separately: nothing
+;; in this file called into it before, so `arc-index-stats' -- which
+;; `arc-ui-header-line' calls on every header-line redisplay -- was void
+;; the moment anyone required only `arc' and never happened to call
+;; `arc-reindex-all' (which lives in `arc-index.el') first.  The header
+;; line's own `condition-case' turned that into a message
+;; ("corpus unavailable (Symbol's function definition is void:
+;; arc-index-stats)") instead of a crash, which is exactly why it went
+;; unnoticed: nothing about that message looks like a missing require
+;; unless you already suspect one.  It is acyclic: `arc-index' requires
+;; `arc-db' and the chunkers, never `arc'.
+(require 'arc-index)
 ;; arc-source's job -- rendering a citation as an org link, and (as of the
 ;; whole-branch fix round) registering the `nixopt:'/`hmopt:' link types as
 ;; a side effect of being loaded at all -- belongs to this file, which is
-;; required unconditionally before any entry point (`eminix/arc--setup')
-;; goes on to require `arc-index'.  `arc-index.el' used to require
-;; `arc-source' too, despite calling nothing in it; that accidentally made
-;; it the ONLY thing in the real load path that registered the link
+;; required unconditionally too.  `arc-index.el' used to require
+;; `arc-source' as well, despite calling nothing in it; that accidentally
+;; made it the ONLY thing in the real load path that registered the link
 ;; types, which would have silently broken the moment that unrelated
 ;; require was ever cleaned up.
 (require 'arc-source)
