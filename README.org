@@ -40,7 +40,9 @@ pulled already:
 
 ** Installation
 
-You need Emacs 29.2 or newer.
+You need Emacs 29.2 or newer to run arc at all. Loading the ~vec0~
+vector-search extension below may need more: see the note at the end
+of this section.
 
 *** Vector search extension
 
@@ -56,13 +58,32 @@ If ~ARC_VEC0_PATH~ is unset or the file does not exist, arc warns
 instead of failing to load, and the database will not have a working
 vector table.
 
-The file must actually be *named* ~vec0.so~ (or your platform's
-equivalent, e.g. ~vec0.dylib~) -- SQLite's extension loader derives the
-entry-point symbol it looks for from the file's own basename, so a
-renamed or relocated copy at, say, ~/path/to/my-vec0.so~ is still a
-perfectly valid extension file, still passes the ~file-exists-p~ check
-above, and still fails to load -- obscurely, with no clear error
-pointing at the filename as the cause.
+Keep the file named ~vec0.so~ (or your platform's loadable-module
+suffix, e.g. ~vec0.dylib~) -- a copy under any other name is liable to
+fail to load. This is *not* SQLite deriving an entry-point symbol from
+the file's basename, as this document used to claim: a byte-identical
+copy of the same extension, renamed to a basename SQLite itself
+recognizes, loaded without incident on Emacs 30.2. The real gate is
+Emacs's own ~sqlite-load-extension~, which checks the name you hand it
+against its own small, hardcoded, case-sensitive allow-list of
+extension names *before* SQLite ever sees the file, and refuses
+everything else outright -- a copy at, say, ~/path/to/my-vec0.so~
+fails with =(sqlite-error "Module name not on allowlist")=, naming its
+actual cause plainly, not the obscure, causeless failure this document
+used to describe.
+
+**** A possibly-higher Emacs floor for this extension specifically
+
+This package's own code needs nothing past Emacs 29.2 (see
+~Package-Requires~). Whether *loading ~vec0~* needs more is a separate
+question this document cannot fully answer: Emacs's sqlite extension
+allow-list did not include ~vec0~ from the start -- it was a later,
+separate addition to that list, landing after Emacs 29.4 had already
+shipped -- so an Emacs 29 install may reject it the same way
+~my-vec0.so~ does above, regardless of the file's name. No Emacs 29
+was available to verify this directly; what's confirmed is that it
+works on Emacs 30.2. If you are on Emacs 29 and ~vec0~ loads (or
+doesn't) for you, we'd like to know either way.
 
 ** Known limitations
 

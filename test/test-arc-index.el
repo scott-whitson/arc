@@ -310,3 +310,141 @@ left exactly as the baseline run left it."
      (should (= 10 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
      (should (= 10 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_embeddings;"))))
      (should (= 10 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_fts;")))))))
+
+;;; --- Round 5, item 1: an empty (but present) directory must not prune -
+
+(ert-deftest ai-reindex-all-does-not-prune-a-collection-whose-directory-is-empty ()
+  "A collection directory that exists but currently has nothing in it
+-- e.g. mounted but not yet caught up by a sync tool -- must not be
+mistaken for \"every source in this collection was deleted\": an empty
+enumeration is indistinguishable, from `arc--prune-collection', from a
+directory that is merely momentarily empty, and deleting a whole
+collection is never the right answer to that ambiguity.  Reproduced
+against the unfixed version: 2 real sources went to 0 on exactly this
+sequence, because an empty KEPT-IDS dropped the `NOT IN' clause
+entirely and matched every source with data in the collection."
+  (ai-with-temp-db
+   (let ((dir (make-temp-file "arc-empty-tree" t)))
+     (unwind-protect
+         (progn
+           (with-temp-file (expand-file-name "a.txt" dir) (insert "alpha\n"))
+           (with-temp-file (expand-file-name "b.txt" dir) (insert "beta\n"))
+           (let ((arc-index-plan '(("empty-test" . file)))
+                 (arc-collection-directory-alist `(("empty-test" . ,dir))))
+             (arc-reindex-all)
+             (should (= 2 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+             ;; the directory itself survives (unlike the missing-directory
+             ;; case) but is now empty -- Syncthing mid-catch-up, say
+             (delete-file (expand-file-name "a.txt" dir))
+             (delete-file (expand-file-name "b.txt" dir))
+             (should (file-directory-p dir))
+             (arc-reindex-all)
+             ;; nothing was pruned: both sources are still there
+             (should (= 2 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))))
+       (delete-directory dir t)))))
+
+(ert-deftest ai-prune-collection-refuses-an-empty-kept-ids ()
+  "Direct unit test of the guard in `arc--prune-collection' itself:
+called with an empty KEPT-IDS against a collection that has real data
+in it, it must remove nothing and return 0 -- not treat the missing
+`NOT IN' clause as \"no filter, match everything\"."
+  (ai-with-temp-db
+   (arc-index-source '(:kind "file" :path "/tmp/x.txt" :chunks ((:text "a" :line-start 1 :line-end 1)))
+                      "test")
+   (let ((cid (arc--collection-id "test")))
+     (should (= 0 (arc--prune-collection cid nil)))
+     (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;")))))))
+
+;;; --- Round 5, item 2: no eager upsert ahead of a source's real write -
+
+(ert-deftest ai-interrupted-sync-reindex-of-a-new-source-creates-no-phantom-row ()
+  "A source whose embedding fails partway through its very first index
+must leave no `sources' row behind at all.  Reproduced against the
+unfixed version: `arc--index-sources-with-progress' upserted every
+source eagerly, before indexing it, so an embedding failure for a
+brand-new source still left its (chunkless) row sitting in `sources'
+forever -- `arc--prune-collection' joins through `data' and can never
+see, let alone remove, a row with no `data' rows of its own."
+  (ai-with-temp-db
+   (let ((dir (make-temp-file "arc-interrupt-tree" t)))
+     (unwind-protect
+         (let ((ok-path (expand-file-name "ok.txt" dir))
+               (bad-path (expand-file-name "bad.txt" dir)))
+           (with-temp-file ok-path (insert "fine\n"))
+           (let ((arc-index-plan '(("interrupt-test" . file)))
+                 (arc-collection-directory-alist `(("interrupt-test" . ,dir))))
+             (arc-reindex-all)
+             (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+             ;; a brand-new file appears; embedding it fails outright
+             (with-temp-file bad-path (insert "trouble\n"))
+             (cl-letf (((symbol-function 'llm-embedding)
+                        (lambda (_provider text)
+                          (if (string-match-p "trouble" text)
+                              (error "embedding backend unreachable")
+                            (vector 0.1 0.2 0.3)))))
+               (condition-case nil (arc-reindex-all) (error nil)))
+             ;; no phantom row for bad.txt
+             (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+             (should (= 0 (caar (sqlite-select
+                                 (arc-db) "SELECT count(*) FROM sources WHERE path LIKE '%bad.txt';"))))))
+       (delete-directory dir t)))))
+
+(ert-deftest ai-interrupted-sync-reindex-leaves-a-stale-file-reported-as-changed ()
+  "A source whose content changed on disk, then whose re-embedding fails
+partway through, must still be reported by `arc-file-changed-p' as
+changed on the *next* run -- not silently \"unchanged\" because a
+now-stale row's `hash' column was already overwritten with the new
+content's hash before any of that new content was actually written.
+Reproduced against the unfixed version: the eager `arc-source-upsert'
+call wrote SOURCE's (already-new) :hash ahead of indexing, so a file
+that failed to re-embed was, from then on, never reindexed again --
+its stale old chunks kept answering queries under the new hash."
+  (ai-with-temp-db
+   (let ((dir (make-temp-file "arc-stale-hash-tree" t)))
+     (unwind-protect
+         (let ((path (expand-file-name "a.txt" dir)))
+           (with-temp-file path (insert "original\n"))
+           (let ((arc-index-plan '(("stale-test" . file)))
+                 (arc-collection-directory-alist `(("stale-test" . ,dir))))
+             (arc-reindex-all)
+             (should-not (arc-file-changed-p path))
+             ;; the file changes on disk, but re-embedding it fails outright
+             (with-temp-file path (insert "changed content\n"))
+             (cl-letf (((symbol-function 'llm-embedding)
+                        (lambda (&rest _) (error "embedding backend unreachable"))))
+               (condition-case nil (arc-reindex-all) (error nil)))
+             ;; the old chunk is untouched...
+             (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
+             ;; ...and the file must still be reported as changed
+             (should (arc-file-changed-p path))))
+       (delete-directory dir t)))))
+
+;;; --- Round 5, item 3: a source with no chunks gets no `sources' row -
+
+(ert-deftest ai-index-source-with-no-chunks-creates-no-sources-row ()
+  "`arc-index-source' offered a source with zero :chunks (what
+`arc-file-sources' produces for an empty or whitespace-only file) must
+create no `sources' row at all -- one with no `data' rows for
+`arc--prune-collection' to join through, and so never be able to
+remove, is exactly the \"phantom source\" this file's own docstrings
+already promise cannot happen."
+  (ai-with-temp-db
+   (let ((n (arc-index-source '(:kind "file" :path "/tmp/empty.txt" :hash "abc" :chunks nil) "test")))
+     (should (= n 0))
+     (should (= 0 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;")))))))
+
+(ert-deftest ai-reindex-all-of-a-whitespace-only-file-creates-no-sources-row ()
+  "End-to-end version of the above via the real chunker: a file that is
+present, readable and text but entirely blank must not become a
+`sources' row with nothing in `data' -- ordinary input, not a
+contrived plist, reaches this."
+  (ai-with-temp-db
+   (let ((dir (make-temp-file "arc-blank-tree" t)))
+     (unwind-protect
+         (progn
+           (with-temp-file (expand-file-name "blank.txt" dir) (insert "   \n\t\n  \n"))
+           (let ((arc-index-plan '(("blank-test" . file)))
+                 (arc-collection-directory-alist `(("blank-test" . ,dir))))
+             (arc-reindex-all)
+             (should (= 0 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))))
+       (delete-directory dir t)))))

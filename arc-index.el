@@ -145,7 +145,8 @@ shared transaction, since none of that may be partial."
 a list of \(TEXT LINE-START LINE-END VEC\), one already-embedded
 replacement chunk each -- as a single sqlite transaction spanning the
 upsert, the delete of SOURCE's old content, and every new insert
-together.  Return the source id.
+together.  Return the source id, or nil without touching the database
+at all when CHUNKS is empty -- see below.
 
 This is the one place either indexing path (the synchronous
 `arc-index-source', or the asynchronous `arc--reindex-async-
@@ -168,13 +169,45 @@ Upserting here too, not before, also means a `sources' row is never
 created without the `data' rows that go with it -- the \"phantom
 source\" a version of this that upserted eagerly used to allow: a row
 `arc--prune-collection', joining through `data', can never see and so
-can never remove."
-  (with-sqlite-transaction (arc-db)
-    (let ((sid (arc-source-upsert source)))
-      (arc--delete-data-for-source sid)
-      (dolist (c chunks)
-        (arc--insert-chunk-row sid cid (nth 0 c) (nth 1 c) (nth 2 c) (plist-get source :title) (nth 3 c)))
-      sid)))
+can never remove.  CHUNKS being empty (a producer -- `arc-file-sources'
+for an empty or whitespace-only file, say -- can legitimately yield
+zero of them for an otherwise-valid source) is handled the same way,
+for the same reason: a source with no content gets no row and no
+transaction at all here, rather than an upsert immediately followed by
+zero inserts, which is exactly how a phantom row -- one `sources' row
+with nothing in `data' for it to join through -- used to get created
+even after the fix above.  A source that already had real content and
+is reindexed down to zero chunks keeps its old row and old chunks
+here (nothing here decides whether that is now stale); the synchronous
+path's `arc--prune-collection' pass, run once per whole collection with
+a complete kept-ids list, is what actually resolves that -- this source
+simply will not be in it."
+  (if (null chunks)
+      nil
+    (with-sqlite-transaction (arc-db)
+      (let ((sid (arc-source-upsert source)))
+        (arc--delete-data-for-source sid)
+        (dolist (c chunks)
+          (arc--insert-chunk-row sid cid (nth 0 c) (nth 1 c) (nth 2 c) (plist-get source :title) (nth 3 c)))
+        sid))))
+
+(defun arc--index-source-1 (source collection)
+  "Like `arc-index-source' but return (SID . CHUNK-COUNT) instead of
+just CHUNK-COUNT, SID being whatever `arc--replace-source-chunks'
+returned (nil for a zero-chunk SOURCE).  `arc-index-source' is the
+public, documented entry point and keeps its existing chunk-count
+contract; this is the one other caller, `arc--index-sources-with-
+progress', actually needs -- it has to build a trustworthy KEPT-IDS
+list for `arc--prune-collection' out of the source ids indexing
+*actually wrote*, not out of a separate, eager upsert of its own (see
+`arc--index-sources-with-progress')."
+  (let* ((cid (arc--collection-id collection))
+         (embedded (mapcar (lambda (c)
+                              (let ((text (arc--sanitize-text (plist-get c :text))))
+                                (list text (plist-get c :line-start) (plist-get c :line-end)
+                                      (llm-embedding arc-embeddings-provider text))))
+                            (plist-get source :chunks))))
+    (cons (arc--replace-source-chunks source cid embedded) (length embedded))))
 
 (defun arc-index-source (source collection)
   "Index SOURCE into COLLECTION.  Return the number of chunks written.
@@ -187,14 +220,7 @@ synchronous path: each chunk's embedding is fetched with a blocking
 `llm-embedding' call before the next chunk starts.  See
 `arc--reindex-all-async' for the non-blocking counterpart driven by
 `llm-embedding-async'."
-  (let* ((cid (arc--collection-id collection))
-         (embedded (mapcar (lambda (c)
-                              (let ((text (arc--sanitize-text (plist-get c :text))))
-                                (list text (plist-get c :line-start) (plist-get c :line-end)
-                                      (llm-embedding arc-embeddings-provider text))))
-                            (plist-get source :chunks))))
-    (arc--replace-source-chunks source cid embedded)
-    (length embedded)))
+  (cdr (arc--index-source-1 source collection)))
 
 (defun arc-index-stats ()
   "Return an alist of (KIND . CHUNK-COUNT)."
@@ -309,7 +335,9 @@ order.  See `arc-index-info-priority-manuals' for what \"matches\" means."
 (defun arc--prune-collection (cid kept-ids)
   "Delete every source belonging to collection CID that is not in
 KEPT-IDS, cascading its chunks, embeddings and FTS rows via
-`arc-source-delete'.  Return how many sources were removed.
+`arc-source-delete'.  Return how many sources were removed, or 0
+without touching the database at all when KEPT-IDS is empty -- see
+below.
 Upstream's directory walk deleted `data' rows for paths the current
 walk no longer yielded; nothing replaced that when `sources' gained
 its own identity, so anything deleted, newly gitignored, or newly
@@ -331,46 +359,77 @@ run had simply not gotten to yet, not sources that had left the corpus.
 by walking the *entire* source list before writing anything and lets
 any producer error propagate out and abort the whole run rather than
 silently truncate KEPT-IDS, so its list is complete by construction --
-see `arc-reindex-all''s docstring."
-  (let ((stale (flatten-tree
-                (sqlite-select
-                 (arc-db)
-                 (format "SELECT DISTINCT s.id FROM sources s
-                          JOIN data d ON d.source_id = s.id
-                          WHERE d.collection_id = %d%s;"
-                         cid
-                         (if kept-ids
-                             (format " AND s.id NOT IN %s" (arc-sqlite-format-int-list kept-ids))
-                           ""))))))
-    (dolist (sid stale) (arc-source-delete sid))
-    (length stale)))
+see `arc-reindex-all''s docstring.
+
+KEPT-IDS empty is refused outright rather than treated as \"nothing to
+keep, so delete everything this collection has\": a walk that
+genuinely found zero sources is indistinguishable, from here, from one
+whose directory was simply not ready yet -- unmounted, a sync tool
+mid-catch-up, a transient listing error a producer swallowed instead
+of signalling -- and the two cases call for opposite actions.  Since
+`arc--prune-collection' cannot tell them apart and deleting a whole
+collection is never the right answer to that ambiguity, an empty
+KEPT-IDS prunes nothing at all, every time, on purpose; reproduced
+live, this is exactly what turned an org-roam directory Syncthing
+simply had not finished syncing yet into 428 deleted sources on one
+`(arc-reindex-all)' run."
+  (if (null kept-ids)
+      0
+    (let ((stale (flatten-tree
+                  (sqlite-select
+                   (arc-db)
+                   (format "SELECT DISTINCT s.id FROM sources s
+                            JOIN data d ON d.source_id = s.id
+                            WHERE d.collection_id = %d AND s.id NOT IN %s;"
+                           cid
+                           (arc-sqlite-format-int-list kept-ids))))))
+      (dolist (sid stale) (arc-source-delete sid))
+      (length stale))))
 
 (defconst arc--reindex-skipped :arc-reindex-skipped
   "Sentinel `arc--reindex-directory-collection' (and, for the
 asynchronous path, `arc--plan-cell-source-list') returns for a missing
-directory, distinct from an empty list of kept ids (a directory that
-exists but genuinely has nothing left in it -- which IS a reason to
-prune) so callers never mistake \"this collection's directory is not
-on this host\" for \"everything in it was deleted\" and prune rows
-that are still perfectly good.")
+directory, distinct from an empty list of kept ids, so callers never
+mistake \"this collection's directory is not on this host\" for
+\"everything in it was deleted\" and prune rows that are still
+perfectly good.  Note that an empty list of kept ids is not itself
+treated as a reason to prune either -- see `arc--prune-collection' --
+this sentinel exists to keep a third, still different case (no
+directory at all) from being folded into that same empty-list value
+and skipping the \"directory does not exist\" `message' that reports
+it.")
 
 (defun arc--index-sources-with-progress (name sources)
-  "Upsert and index each of SOURCES into collection NAME, in order.
-Return the list of source ids (for `arc--prune-collection').  Reports
+  "Index each of SOURCES into collection NAME, in order.
+Return the list of source ids actually written (for
+`arc--prune-collection'), omitting any SOURCES entry that came back
+with no chunks to write -- `arc--replace-source-chunks' gives such a
+source no row at all, so there is no id to include, and it must not be
+treated as \"kept\" (see `arc--replace-source-chunks').  Reports
 progress via `message' every `arc-index-progress-every' sources (and
 always for the last one) plus an upfront total, since a real full
 ingest can run thousands of sources through here and, before this,
 `arc-reindex-all' said nothing at all between one collection finishing
-and the next -- which is most of why a real run reads as a hang."
+and the next -- which is most of why a real run reads as a hang.
+
+Each source's id comes from `arc--index-source-1', i.e. from whatever
+`arc--replace-source-chunks' actually wrote, not from a separate
+eager `arc-source-upsert' call made before indexing -- an earlier
+version of this function upserted first and indexed second, which left
+two proven holes: a run interrupted between the two steps left a
+`sources' row with no chunks behind it, and the eagerly-written row
+already carried the *new* content's hash before any of that content
+had actually been written, so `arc-file-changed-p' read the file as
+unchanged and it never got re-indexed at all."
   (let ((total (length sources)) (i 0))
     (message "arc: %s: %d source(s) to index" name total)
-    (mapcar (lambda (s)
-              (prog1 (arc-source-upsert s)
-                (arc-index-source s name)
-                (setq i (1+ i))
-                (when (or (= i total) (zerop (mod i arc-index-progress-every)))
-                  (message "arc: %s: %d/%d source(s) indexed" name i total))))
-            sources)))
+    (delq nil
+          (mapcar (lambda (s)
+                    (prog1 (car (arc--index-source-1 s name))
+                      (setq i (1+ i))
+                      (when (or (= i total) (zerop (mod i arc-index-progress-every)))
+                        (message "arc: %s: %d/%d source(s) indexed" name i total))))
+                  sources))))
 
 (defun arc--reindex-directory-collection (name dir producer)
   "Index every source PRODUCER (a function of one DIR argument) returns
@@ -459,13 +518,15 @@ prune against."
                       (arc--prioritize-manuals (arc-get-builtin-manuals)
                                                 arc-index-info-priority-manuals)
                       arc-index-info-cap))))))
-      (if (eq kept arc--reindex-skipped)
-          nil ; already reported by arc--reindex-directory-collection; nothing to prune
-        (progn
-          (message "arc: %s: %d source(s) indexed" name (length kept))
-          (let ((removed (arc--prune-collection cid kept)))
-            (when (> removed 0)
-              (message "arc: %s: removed %d stale source(s)" name removed)))))))
+      (cond
+       ((eq kept arc--reindex-skipped) nil) ; already reported; nothing to prune
+       ((null kept)
+        (message "arc: %s: 0 source(s) found; not pruning (see `arc--prune-collection')" name))
+       (t
+        (message "arc: %s: %d source(s) indexed" name (length kept))
+        (let ((removed (arc--prune-collection cid kept)))
+          (when (> removed 0)
+            (message "arc: %s: removed %d stale source(s)" name removed)))))))
   (message "arc: %S" (arc-index-stats)))
 
 
@@ -623,7 +684,7 @@ the end of that outer call would fire ON-COLLECTION-DONE a second time."
                  (progn
                    (arc--replace-source-chunks source cid (nreverse (gethash source source-chunks)))
                    (cl-incf sources-replaced))
-               (error
+               ((error quit)
                 (puthash source t not-replaced)
                 (message "arc: %s: replacing a source's chunks failed: %s"
                          name (error-message-string err)))))
