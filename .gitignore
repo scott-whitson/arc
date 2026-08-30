@@ -1,0 +1,5 @@
+# Implementation history kept locally; not published.
+.private-history/
+
+# Emacs byte-compiled artifacts
+*.elc
