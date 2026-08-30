@@ -232,7 +232,7 @@ PLIST keys: :kind (required), :path, :org-id, :option-name, :info-node,
   (arc--source-row-to-plist
    (car (sqlite-select
          (arc-db)
-         (format "SELECT id, kind, path, org_id, option_name, info_node, hash, mtime
+         (format "SELECT id, kind, path, org_id, option_name, info_node, hash, mtime, tags
                   FROM sources WHERE id = %d;" id)))))
 
 (defun arc-source-by-path (path)
@@ -240,7 +240,7 @@ PLIST keys: :kind (required), :path, :org-id, :option-name, :info-node,
   (arc--source-row-to-plist
    (car (sqlite-select
          (arc-db)
-         (format "SELECT id, kind, path, org_id, option_name, info_node, hash, mtime
+         (format "SELECT id, kind, path, org_id, option_name, info_node, hash, mtime, tags
                   FROM sources WHERE kind = 'file' AND path = %s;"
                  (arc--sql-quote path))))))
 

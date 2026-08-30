@@ -196,3 +196,17 @@ a real round trip through `arc-db' must reproduce it byte-identical."
                       FROM sources WHERE org_id = 't-1';")))
           (pl (arc--source-row-to-plist row)))
      (should (equal (plist-get pl :tags) '("a" "b"))))))
+
+(ert-deftest ed-getters-carry-tags ()
+  "arc-source-get and arc-source-by-path must not silently drop tags --
+each is a distinct SELECT that has to list `tags' itself; a passing
+`ed-source-row-plist-carries-tags' does not exercise either one."
+  (arc-test-with-temp-db
+   (let ((id (arc-source-upsert
+              (list :kind "org-node" :org-id "get-1" :tags '("a" "b")))))
+     (should (equal (plist-get (arc-source-get id) :tags) '("a" "b")))))
+  (arc-test-with-temp-db
+   (arc-source-upsert
+    (list :kind "file" :path "/tmp/getters.txt" :tags '("c" "d")))
+   (should (equal (plist-get (arc-source-by-path "/tmp/getters.txt") :tags)
+                  '("c" "d")))))
