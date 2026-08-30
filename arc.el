@@ -623,7 +623,8 @@ Call ACTION with new prompt."
       (funcall action prompt))))
 
 (defun arc--retrieve-rows (ids)
-  "Return a (KIND PATH INFO-NODE ORG-ID OPTION-NAME CHUNK) row per id in IDS.
+  "Return a (KIND PATH INFO-NODE ORG-ID OPTION-NAME CHUNK LINE-START
+LINE-END TITLE) row per id in IDS.
 IDS are `data' row ids (the same rowids `data_embeddings' and
 `data_fts' use).  Joins across to `sources' for whichever locator
 column KIND actually uses; the other three come back nil.  Returns
@@ -633,11 +634,22 @@ is invalid syntax."
     (sqlite-select
      (arc-db)
      (format
-      "SELECT s.kind, s.path, s.info_node, s.org_id, s.option_name, d.chunk
+      "SELECT s.kind, s.path, s.info_node, s.org_id, s.option_name, d.chunk,
+       d.line_start, d.line_end, d.title
 FROM data AS d
 JOIN sources AS s ON s.id = d.source_id
 WHERE d.id IN %s;"
       (arc-sqlite-format-int-list ids)))))
+
+(defun arc-row-to-source (row)
+  "Convert an `arc--retrieve-rows' ROW into a source plist.
+The plist is the shape `arc-source-link' and `arc-source-label'
+consume, carrying the chunk text and its line range alongside so a
+citation can name the line it actually came from."
+  (pcase-let ((`(,kind ,path ,info-node ,org-id ,option-name ,chunk ,ls ,le ,title) row))
+    (list :kind kind :path path :info-node info-node :org-id org-id
+          :option-name option-name :title title
+          :line-start ls :line-end le :chunk chunk)))
 
 (defun arc--add-context-row (row)
   "Add one ROW from `arc--retrieve-rows' to the ellama context.
