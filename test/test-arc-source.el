@@ -15,8 +15,36 @@
                  "[[file:/home/u/x.nix::1]]")))
 
 (ert-deftest as-info-link ()
+  ;; Org's `info:' link syntax is FILE#NODE, not Info-mode's own
+  ;; parenthesised (MANUAL)NODE shape -- `info:(emacs)Directory
+  ;; Variables' parses as a literal filename in org and errors.  This
+  ;; used to assert the broken parenthesised form as if it were
+  ;; correct; see `as-info-link-is-followable' below for proof this
+  ;; form actually opens.
   (should (equal (arc-source-link '(:kind "info" :info-node "(emacs)Directory Variables"))
-                 "[[info:(emacs)Directory Variables]]")))
+                 "[[info:emacs#Directory Variables]]")))
+
+(ert-deftest as-info-link-target-leaves-a-malformed-node-unchanged ()
+  (should (equal (arc-source--info-link-target "no-parens-here") "no-parens-here")))
+
+(ert-deftest as-info-link-is-followable ()
+  "Render an info citation and actually follow it through org, rather
+than only comparing strings -- a string comparison alone previously
+missed that the parenthesised form org's `info:' link renders to is
+parsed as a literal filename and errors."
+  (require 'info)
+  (with-temp-buffer
+    (org-mode)
+    (insert (arc-source-link '(:kind "info" :info-node "(info)Top")) "\n")
+    (goto-char (point-min))
+    (should (re-search-forward org-link-bracket-re nil t))
+    (goto-char (match-beginning 0))
+    (unwind-protect
+        (progn
+          (org-open-at-point)
+          (should (eq major-mode 'Info-mode))
+          (should (equal Info-current-node "Top")))
+      (when (get-buffer "*info*") (kill-buffer "*info*")))))
 
 (ert-deftest as-org-node-link-uses-title-as-description ()
   (should (equal (arc-source-link '(:kind "org-node" :org-id "a977180f" :title "elisa"))

@@ -20,13 +20,36 @@
   "Optional home-manager checkout, used to open an HM option's declaration."
   :type '(choice (const nil) directory) :group 'arc)
 
+(defun arc-source--info-link-target (info-node)
+  "Convert INFO-NODE from Info-mode's (MANUAL)NODE shape to org's link form.
+`arc-source-info.el' stores each info source's node the way Info-mode
+writes it, e.g. \"(auth)Top\" -- that is what `Info-current-node'
+paired with the manual name looks like, and it is also the form
+Info-mode's own buffers and completion use, so keeping it as the
+stored value costs nothing there.  But org's `info:' link syntax is
+FILE#NODE, not Info-mode's parenthesised form: org parses
+`info:(auth.info)Top' as a literal filename and errors with
+\"Info file (auth.info)Top does not exist\", rather than opening the
+auth manual's Top node.  Converting here, at render time, rather than
+changing what `arc-source-info.el' stores, fixes every citation
+already sitting in a live index immediately -- no reindex needed --
+since only the rendering step, not the stored identity, was ever
+wrong.
+Returns INFO-NODE unchanged if it does not match the expected shape,
+so a malformed value fails exactly as loudly downstream as it always
+did rather than being silently swallowed here."
+  (if (string-match "\\`(\\([^)]+\\))\\(.*\\)\\'" info-node)
+      (format "%s#%s" (match-string 1 info-node) (match-string 2 info-node))
+    info-node))
+
 (defun arc-source-link (source &optional line)
   "Return an org link string for SOURCE, a source plist.
 LINE, when given, is the line number a file link should target."
   (let ((kind (plist-get source :kind)))
     (pcase kind
       ("file"       (format "[[file:%s::%d]]" (plist-get source :path) (or line 1)))
-      ("info"       (format "[[info:%s]]" (plist-get source :info-node)))
+      ("info"       (format "[[info:%s]]"
+                            (arc-source--info-link-target (plist-get source :info-node))))
       ("org-node"   (format "[[id:%s][%s]]" (plist-get source :org-id)
                             (or (plist-get source :title) "note")))
       ("nix-option" (format "[[nixopt:%s]]" (plist-get source :option-name)))
