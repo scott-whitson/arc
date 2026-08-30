@@ -42,15 +42,16 @@
      (arc-ui-stream-answer m "Syncthing en")
      (arc-ui-stream-answer m "Syncthing enables")
      (arc-ui-stream-answer m "Syncthing enables real-time file sync.")
-     (should (string= (buffer-substring-no-properties m (point-max))
+     (should (string= (buffer-substring-no-properties (car m) (point-max))
                       "Syncthing enables real-time file sync.")))))
 
 (ert-deftest aui-sources-render-as-org-links ()
   (aui-with-fresh-buffer
-   (arc-ui-begin-answer "q")
-   (arc-ui-render-sources
-    (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b")
-          '(:kind "nix-option" :option-name "services.foo.enable" :chunk "b")))
+   (let ((a (arc-ui-begin-answer "q")))
+     (arc-ui-render-sources
+      a
+      (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b")
+            '(:kind "nix-option" :option-name "services.foo.enable" :chunk "b"))))
    (goto-char (point-min))
    (should (re-search-forward "^\\*\\*\\* Sources" nil t))
    (goto-char (point-min))
@@ -60,16 +61,16 @@
 
 (ert-deftest aui-rendered-links-are-parseable-by-org ()
   (aui-with-fresh-buffer
-   (arc-ui-begin-answer "q")
-   (arc-ui-render-sources
-    (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b")))
+   (let ((a (arc-ui-begin-answer "q")))
+     (arc-ui-render-sources
+      a (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b"))))
    (goto-char (point-min))
    (should (re-search-forward org-link-bracket-re nil t))))
 
 (ert-deftest aui-no-sources-says-so-rather-than-rendering-an-empty-subtree ()
   (aui-with-fresh-buffer
-   (arc-ui-begin-answer "q")
-   (arc-ui-render-sources nil)
+   (let ((a (arc-ui-begin-answer "q")))
+     (arc-ui-render-sources a nil))
    (goto-char (point-min))
    (should (re-search-forward "no sources" nil t))))
 
@@ -83,7 +84,7 @@
      (arc-ui-stream-answer m "partial")
      (arc-ui-stream-answer m "partial answer")
      (arc-ui-render-sources
-      (list '(:kind "nix-option" :option-name "a.b.c" :chunk "b")))
+      m (list '(:kind "nix-option" :option-name "a.b.c" :chunk "b")))
      (arc-ui-stream-answer m "final full answer")
      (goto-char (point-min))
      (should (search-forward "final full answer" nil t))
@@ -93,6 +94,55 @@
      (should (re-search-forward "^\\*\\*\\* Sources" nil t))
      (goto-char (point-min))
      (should (search-forward "[[nixopt:a.b.c]]" nil t)))))
+
+(ert-deftest aui-concurrent-answers-do-not-share-a-stream-end-marker ()
+  ;; Critical 1's reproduction: two answers begin in the same buffer while
+  ;; the first is still streaming (arc-ask is fully async and the buffer
+  ;; stays focused and usable throughout, so this is an ordinary sequence
+  ;; of events, not a contrived race).  Before the fix, `arc-ui-begin-
+  ;; answer' reset a single buffer-local `arc-ui--stream-end', so every
+  ;; write keyed off answer 1's marker actually used answer 2's end
+  ;; boundary once answer 2 began -- reproduced live as one destroyed
+  ;; question heading, one destroyed answer body, and two `*** Sources'
+  ;; subtrees left under a single question in reverse order.  This proves
+  ;; each answer's writes stay bounded to that answer alone under
+  ;; exactly that interleaving: a late partial for answer 1 arriving
+  ;; after answer 2 has already begun.
+  (aui-with-fresh-buffer
+   (let ((a1 (arc-ui-begin-answer "question one")))
+     (arc-ui-stream-answer a1 "partial one")
+     (let ((a2 (arc-ui-begin-answer "question two")))
+       (arc-ui-stream-answer a2 "partial two")
+       ;; the late partial: answer 1 is written to again after answer 2
+       ;; has already begun streaming
+       (arc-ui-stream-answer a1 "final answer one")
+       (arc-ui-render-sources
+        a1 (list '(:kind "file" :path "/tmp/a.nix" :line-start 1 :chunk "b")))
+       (arc-ui-stream-answer a2 "final answer two")
+       (arc-ui-render-sources
+        a2 (list '(:kind "file" :path "/tmp/b.nix" :line-start 2 :chunk "b")))))
+   ;; both headings intact, in order
+   (goto-char (point-min))
+   (should (re-search-forward "^\\*\\* question one$" nil t))
+   (should (search-forward "final answer one" nil t))
+   (should (re-search-forward "^\\*\\*\\* Sources" nil t))
+   (should (search-forward "[[file:/tmp/a.nix::1]]" nil t))
+   (should (re-search-forward "^\\*\\* question two$" nil t))
+   (should (search-forward "final answer two" nil t))
+   (should (re-search-forward "^\\*\\*\\* Sources" nil t))
+   (should (search-forward "[[file:/tmp/b.nix::2]]" nil t))
+   ;; exactly one Sources subtree per answer -- not two under one, and
+   ;; not reversed
+   (goto-char (point-min))
+   (let ((count 0))
+     (while (re-search-forward "^\\*\\*\\* Sources" nil t)
+       (setq count (1+ count)))
+     (should (= count 2)))
+   ;; neither answer's stale partial text survived
+   (goto-char (point-min))
+   (should-not (search-forward "partial one" nil t))
+   (goto-char (point-min))
+   (should-not (search-forward "partial two" nil t))))
 
 (ert-deftest aui-mode-map-binds-the-documented-keys ()
   (dolist (cell '(("q" . arc-ui-quit)
@@ -112,9 +162,9 @@
 
 (ert-deftest aui-follow-citation-is-org-open-at-point ()
   (aui-with-fresh-buffer
-   (arc-ui-begin-answer "q")
-   (arc-ui-render-sources
-    (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b")))
+   (let ((a (arc-ui-begin-answer "q")))
+     (arc-ui-render-sources
+      a (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b"))))
    (goto-char (point-min))
    (should (re-search-forward org-link-bracket-re nil t))
    (goto-char (match-beginning 0))
@@ -129,9 +179,9 @@
   ;; elsewhere in the entry (the rendered Sources citation).
   (aui-with-fresh-buffer
    (let ((m (arc-ui-begin-answer "q")))
-     (arc-ui-stream-answer m "plain answer text, no links here"))
-   (arc-ui-render-sources
-    (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b")))
+     (arc-ui-stream-answer m "plain answer text, no links here")
+     (arc-ui-render-sources
+      m (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b"))))
    (goto-char (point-min))
    (should (search-forward "plain answer text" nil t))
    (goto-char (match-beginning 0))
@@ -149,9 +199,9 @@
   ;; `org-offer-links-in-entry' and silently follows that one link even
   ;; though point is nowhere near it.
   (aui-with-fresh-buffer
-   (arc-ui-begin-answer "q")
-   (arc-ui-render-sources
-    (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b")))
+   (let ((a (arc-ui-begin-answer "q")))
+     (arc-ui-render-sources
+      a (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b"))))
    (goto-char (point-min))
    (should (re-search-forward "^\\*\\*\\* Sources" nil t))
    (goto-char (match-beginning 0))
@@ -194,7 +244,7 @@
   (require 'arc)
   (aui-with-fresh-buffer
    (cl-letf (((symbol-function 'arc-find-similar)
-              (lambda (_text _cols on-done) (funcall on-done 'QUERY)))
+              (lambda (_text _cols on-done &optional _on-error) (funcall on-done 'QUERY)))
              ((symbol-function 'arc--retrieve-ids)
               (lambda (_query _prompt) '(1)))
              ((symbol-function 'arc--retrieve-rows)
@@ -220,7 +270,7 @@
   (require 'arc)
   (aui-with-fresh-buffer
    (cl-letf (((symbol-function 'arc-find-similar)
-              (lambda (_text _cols on-done) (funcall on-done 'QUERY)))
+              (lambda (_text _cols on-done &optional _on-error) (funcall on-done 'QUERY)))
              ((symbol-function 'arc--retrieve-ids)
               (lambda (_query _prompt) '(1)))
              ((symbol-function 'arc--retrieve-rows)
@@ -241,11 +291,10 @@
 
 (ert-deftest aui-capture-passes-the-answer-subtree-to-the-configured-function ()
   (aui-with-fresh-buffer
-   (arc-ui-begin-answer "why 8385?")
-   (let ((m (point-marker)))
-     (arc-ui-stream-answer m "Because 8385."))
-   (arc-ui-render-sources
-    (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b")))
+   (let ((a (arc-ui-begin-answer "why 8385?")))
+     (arc-ui-stream-answer a "Because 8385.")
+     (arc-ui-render-sources
+      a (list '(:kind "file" :path "/tmp/x.nix" :line-start 12 :chunk "b"))))
    (let ((got nil))
      (let ((arc-ui-capture-function (lambda (text) (setq got text))))
        (goto-char (point-min))
@@ -268,17 +317,17 @@
   ;; only that answer's subtree, not the whole buffer and not a neighbour.
   (aui-with-fresh-buffer
    (let ((m1 (arc-ui-begin-answer "q1")))
-     (arc-ui-stream-answer m1 "answer one"))
-   (arc-ui-render-sources
-    (list '(:kind "file" :path "/tmp/a.nix" :line-start 1 :chunk "b")))
+     (arc-ui-stream-answer m1 "answer one")
+     (arc-ui-render-sources
+      m1 (list '(:kind "file" :path "/tmp/a.nix" :line-start 1 :chunk "b"))))
    (let ((m2 (arc-ui-begin-answer "q2")))
-     (arc-ui-stream-answer m2 "answer two"))
-   (arc-ui-render-sources
-    (list '(:kind "file" :path "/tmp/b.nix" :line-start 2 :chunk "b")))
+     (arc-ui-stream-answer m2 "answer two")
+     (arc-ui-render-sources
+      m2 (list '(:kind "file" :path "/tmp/b.nix" :line-start 2 :chunk "b"))))
    (let ((m3 (arc-ui-begin-answer "q3")))
-     (arc-ui-stream-answer m3 "answer three"))
-   (arc-ui-render-sources
-    (list '(:kind "file" :path "/tmp/c.nix" :line-start 3 :chunk "b")))
+     (arc-ui-stream-answer m3 "answer three")
+     (arc-ui-render-sources
+      m3 (list '(:kind "file" :path "/tmp/c.nix" :line-start 3 :chunk "b"))))
    (goto-char (point-min))
    (should (search-forward "answer two" nil t))
    (should (re-search-forward "^\\*\\*\\* Sources" nil t))
@@ -316,8 +365,8 @@
   (require 'arc)
   (aui-with-fresh-buffer
    (setq arc-ui--last-question "why 8385?")
-   (arc-ui-begin-answer "why 8385?")
-   (let ((m (point-marker))) (arc-ui-stream-answer m "Because the WSL profile sets it."))
+   (let ((a (arc-ui-begin-answer "why 8385?")))
+     (arc-ui-stream-answer a "Because the WSL profile sets it."))
    (let ((prompt nil))
      (cl-letf (((symbol-function 'arc-ask)
                 (lambda (q &rest _) (setq prompt q))))
@@ -326,7 +375,6 @@
      (should (string-match-p "and the listen port\\?" prompt))
      (should (string-match-p "why 8385\\?" prompt))
      (should (string-match-p "Because the WSL profile sets it\\." prompt)))))
-
 
 (ert-deftest aui-follow-up-quotes-the-answer-at-point-not-the-last-asked-question ()
   ;; Regression: `arc-ui--last-question' tracks the most recently *asked*
@@ -340,14 +388,14 @@
   (require 'arc)
   (aui-with-fresh-buffer
    (let ((m1 (arc-ui-begin-answer "q1?")))
-     (arc-ui-stream-answer m1 "answer one text"))
-   (arc-ui-render-sources nil)
+     (arc-ui-stream-answer m1 "answer one text")
+     (arc-ui-render-sources m1 nil))
    (let ((m2 (arc-ui-begin-answer "q2?")))
-     (arc-ui-stream-answer m2 "answer two text"))
-   (arc-ui-render-sources nil)
+     (arc-ui-stream-answer m2 "answer two text")
+     (arc-ui-render-sources m2 nil))
    (let ((m3 (arc-ui-begin-answer "q3?")))
-     (arc-ui-stream-answer m3 "answer three text"))
-   (arc-ui-render-sources nil)
+     (arc-ui-stream-answer m3 "answer three text")
+     (arc-ui-render-sources m3 nil))
    (setq arc-ui--last-question "q3?")
    (goto-char (point-min))
    (should (search-forward "answer one text" nil t))

@@ -641,18 +641,18 @@ citation can name the line it actually came from."
      (lambda (query)
        (let* ((ids (arc--retrieve-ids query question))
               (sources (mapcar #'arc-row-to-source (arc--retrieve-rows ids)))
-              (marker (arc-ui-begin-answer question)))
+              (answer (arc-ui-begin-answer question)))
          (pop-to-buffer (arc-ui-buffer))
          (setq arc-ui--last-question question)
          (setq arc-ui--last-sources sources)
          (arc-answer-request
           question sources
-          (lambda (text) (arc-ui-stream-answer marker text))
+          (lambda (text) (arc-ui-stream-answer answer text))
           (lambda (text)
-            (arc-ui-stream-answer marker text)
-            (arc-ui-render-sources sources))
+            (arc-ui-stream-answer answer text)
+            (arc-ui-render-sources answer sources))
           (lambda (_sym msg)
-            (arc-ui-stream-answer marker (format "arc: request failed: %s" msg)))))))))
+            (arc-ui-stream-answer answer (format "arc: request failed: %s" msg)))))))))
 
 ;;;###autoload
 (defvar arc-command-map

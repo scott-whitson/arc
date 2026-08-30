@@ -16,13 +16,20 @@
 ;; wrong thing silently.
 ;;
 ;; Streaming replaces the answer body in place (see `arc-ui-stream-answer'),
-;; and that replacement is bounded by `arc-ui--stream-end', a private
-;; buffer-local marker at the current end of the answer body.
-;; `arc-ui-render-sources' inserts the Sources subtree immediately after
-;; that same marker without moving it, so the marker always separates
-;; "answer text streaming may still rewrite" from "chrome appended after
-;; it" -- a later `arc-ui-stream-answer' call can only ever delete back to
-;; that boundary, never past it into an already-rendered Sources subtree.
+;; and that replacement is bounded by an end marker private to the one
+;; answer it belongs to.  `arc-ui-begin-answer' returns a (START . END)
+;; pair -- an opaque "answer handle" -- rather than setting a single
+;; buffer-local marker: a buffer can (and does; `arc-ask' is fully async)
+;; hold several answers streaming at once, and a shared buffer-local
+;; marker meant every `arc-ui-begin-answer' call silently redirected every
+;; earlier answer's in-flight writes into whichever answer began most
+;; recently.  `arc-ui-render-sources' inserts the Sources subtree
+;; immediately after its handle's END marker without moving it, so END
+;; always separates "answer text streaming may still rewrite" from
+;; "chrome appended after it" for that one answer -- a later
+;; `arc-ui-stream-answer' call on the same handle can only ever delete
+;; back to that boundary, never past it into an already-rendered Sources
+;; subtree, and never anywhere near a different answer's boundary.
 
 ;;; Code:
 
@@ -55,25 +62,24 @@ Derived from `org-mode' so that citations are ordinary org links."
   (setq-local org-hide-leading-stars t)
   (setq-local header-line-format '(:eval (arc-ui-header-line))))
 
-(defvar-local arc-ui--stream-end nil
-  "Marker at the current end of the answer body being streamed.
-Set fresh by every `arc-ui-begin-answer' call.  `arc-ui-stream-answer'
-deletes only back to this marker (never past it), and
-`arc-ui-render-sources' inserts immediately after it without moving
-it -- so once a Sources subtree is rendered, a later stream call can
-never reach far enough to delete it.")
-
 (defvar-local arc-ui--last-question nil
   "The question most recently rendered into this answer buffer.
-Set by `arc-ask' as it renders.  Task 8's re-ask (`r') and follow-up
-(`f') keys read this rather than the last heading's text, so it must
-be kept current by anything that begins a new answer.")
+This is always the plain, one-line text that was actually rendered as
+a heading -- for a follow-up, that is the follow-up line itself, never
+the larger prompt `arc-ask' sends to the model on its behalf (see
+`arc-ask''s HEADING argument).  Set by `arc-ask' as it renders.  The
+re-ask (`r') and follow-up (`f') keys read this rather than the last
+heading's text, so it must be kept current by anything that begins a
+new answer.")
 
 (defvar-local arc-ui--last-sources nil
   "The sources most recently retrieved for this answer buffer.
 Set by `arc-ask' as it renders, alongside `arc-ui--last-question'.
-Task 8's follow-up key reads this to ground its next question in the
-same retrieval without asking the index again.")
+Currently write-only: nothing yet reads it back.  It exists as a hook
+for a later phase that grounds a follow-up in the same retrieval
+without asking the index again, rather than (as today) always
+retrieving afresh against the quoted answer-plus-follow-up text; that
+is not phase 4, so treat this as reserved rather than dead.")
 
 (defun arc-ui-buffer ()
   "Return the arc answer buffer, creating it in `arc-answer-mode' if needed."
@@ -102,53 +108,68 @@ header line must never break the buffer it heads."
                    (error-message-string err)))))
 
 (defun arc-ui-begin-answer (question)
-  "Insert QUESTION as a heading and return a marker for the answer body.
-The marker is where `arc-ui-stream-answer' replaces text as it arrives."
+  "Insert QUESTION as a heading and return a handle for the answer body.
+The handle is a (START . END) marker pair private to this one answer;
+`arc-ui-stream-answer' and `arc-ui-render-sources' take it as their
+first argument.  Two answers begun in the same buffer -- `arc-ask' is
+fully async, so the buffer stays focused and usable while an earlier
+answer is still streaming -- each get their own pair, so writes to one
+can never be misdirected into the other the way a single shared
+buffer-local marker used to allow."
   (with-current-buffer (arc-ui-buffer)
     (goto-char (point-max))
     (unless (bolp) (insert "\n"))
     (insert (format "** %s\n\n" question))
-    (let ((m (point-marker)))
-      (set-marker-insertion-type m nil)
-      (setq arc-ui--stream-end (copy-marker m nil))
-      m)))
+    (let ((start (point-marker)))
+      (set-marker-insertion-type start nil)
+      (cons start (copy-marker start nil)))))
 
-(defun arc-ui-stream-answer (marker text)
-  "Replace the answer body at MARKER with TEXT.
-Streaming providers hand back the whole accumulated string each time,
-so this replaces rather than appends -- appending would repeat every
-prefix.
+(defun arc-ui-stream-answer (answer text)
+  "Replace the answer body belonging to ANSWER with TEXT.
+ANSWER is the (START . END) handle `arc-ui-begin-answer' returned for
+this one answer.  Streaming providers hand back the whole accumulated
+string each time, so this replaces rather than appends -- appending
+would repeat every prefix.
 
-The deletion is bounded by `arc-ui--stream-end' rather than
+The deletion is bounded by ANSWER's own END marker rather than
 `point-max', so it can never reach into a Sources subtree a prior
-`arc-ui-render-sources' call already appended below the answer."
-  (with-current-buffer (marker-buffer marker)
-    (let ((end (or arc-ui--stream-end
-                   (setq arc-ui--stream-end (copy-marker marker nil)))))
+`arc-ui-render-sources' call already appended below the answer, and --
+since END belongs to this ANSWER alone, not to the buffer as a whole --
+it can never reach into a different answer's text either, no matter
+how many other answers have begun or completed in this buffer since."
+  (let ((start (car answer)) (end (cdr answer)))
+    (with-current-buffer (marker-buffer start)
       (save-excursion
-        (delete-region marker end)
-        (goto-char marker)
+        (delete-region start end)
+        (goto-char start)
         (insert text)
         (set-marker end (point))))))
 
-(defun arc-ui-render-sources (sources)
+(defun arc-ui-render-sources (answer sources)
   "Append a `*** Sources' subtree listing SOURCES as org links.
-Inserted immediately after `arc-ui--stream-end' -- which, having
-insertion type nil, does not advance past this insertion -- so the
-marker keeps pointing at the answer/Sources boundary afterwards, and
-a later `arc-ui-stream-answer' call cannot delete into it."
-  (with-current-buffer (arc-ui-buffer)
-    (goto-char (or arc-ui--stream-end (point-max)))
-    (unless (bolp) (insert "\n"))
-    (insert (format "\n*** Sources                              [%d retrieved]\n"
-                    (length sources)))
-    (if (null sources)
-        (insert "    (no sources retrieved)\n")
-      (let ((n 0))
-        (dolist (s sources)
-          (setq n (1+ n))
-          (insert (format "    %d. %s\n" n
-                          (arc-source-link s (plist-get s :line-start)))))))))
+ANSWER is the handle `arc-ui-begin-answer' returned for the answer this
+subtree belongs to; the subtree is inserted immediately after ANSWER's
+own END marker.  Operates on ANSWER's buffer via `marker-buffer', the
+same way `arc-ui-stream-answer' does, rather than `arc-ui-buffer' by
+name, so the two can never target different buffers from each other.
+
+END, having insertion type nil, does not advance past this insertion,
+so it keeps pointing at the answer/Sources boundary afterwards, and a
+later `arc-ui-stream-answer' call on this same ANSWER cannot delete
+into it."
+  (let ((end (cdr answer)))
+    (with-current-buffer (marker-buffer end)
+      (goto-char end)
+      (unless (bolp) (insert "\n"))
+      (insert (format "\n*** Sources                              [%d retrieved]\n"
+                      (length sources)))
+      (if (null sources)
+          (insert "    (no sources retrieved)\n")
+        (let ((n 0))
+          (dolist (s sources)
+            (setq n (1+ n))
+            (insert (format "    %d. %s\n" n
+                            (arc-source-link s (plist-get s :line-start))))))))))
 
 (defun arc-ui-follow-citation ()
   "Follow the citation link at point, if point is genuinely on one.
