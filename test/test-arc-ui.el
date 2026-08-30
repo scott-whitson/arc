@@ -285,6 +285,48 @@
    (should (= (length arc-ui--last-sources) 1))
    (should (equal (plist-get (car arc-ui--last-sources) :path) "/tmp/x.nix"))))
 
+(ert-deftest aui-arc-ask-model-failure-renders-into-the-buffer ()
+  ;; The on-error callback `arc-ask' hands to `arc-answer-request' had no
+  ;; test at all covering it -- a mutation reducing it to a no-op
+  ;; survived.  This calls that callback directly, the way a real model
+  ;; failure would, and checks the buffer says so.
+  (require 'arc)
+  (aui-with-fresh-buffer
+   (cl-letf (((symbol-function 'arc-find-similar)
+              (lambda (_text _cols on-done &optional _on-error) (funcall on-done 'QUERY)))
+             ((symbol-function 'arc--retrieve-ids)
+              (lambda (_query _prompt) '(1)))
+             ((symbol-function 'arc--retrieve-rows)
+              (lambda (_ids)
+                '(("file" "/tmp/x.nix" nil nil nil "chunk body" 12 20 nil))))
+             ((symbol-function 'arc-answer-request)
+              (lambda (_q _s _on-partial _on-done on-error)
+                (funcall on-error 'error "connection refused"))))
+     (arc-ask "why 8385?"))
+   (goto-char (point-min))
+   (should (re-search-forward "^\\*\\* why 8385\\?$" nil t))
+   (goto-char (point-min))
+   (should (search-forward "arc: request failed: connection refused" nil t))))
+
+(ert-deftest aui-arc-ask-renders-a-buffer-when-retrieval-fails ()
+  ;; Important 5: an unreachable embedding endpoint (or any retrieval
+  ;; failure) previously produced no `*arc*' buffer at all -- the only
+  ;; signal was an unhandled process-sentinel error.  Retrieval failure
+  ;; now gets the same treatment as model failure: a buffer, and a
+  ;; message in it saying what failed.
+  (require 'arc)
+  (aui-with-fresh-buffer
+   (cl-letf (((symbol-function 'arc-find-similar)
+              (lambda (_text _cols _on-done on-error)
+                (funcall on-error 'error "connection refused"))))
+     (arc-ask "why 8385?"))
+   (goto-char (point-min))
+   (should (re-search-forward "^\\*\\* why 8385\\?$" nil t))
+   (goto-char (point-min))
+   (should (search-forward "arc: retrieval failed: connection refused" nil t))
+   (should (equal arc-ui--last-question "why 8385?"))
+   (should (null arc-ui--last-sources))))
+
 (ert-deftest aui-capture-is-bound-and-a-command ()
   (should (eq (lookup-key arc-answer-mode-map (kbd "w")) 'arc-ui-capture))
   (should (commandp 'arc-ui-capture)))

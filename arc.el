@@ -284,13 +284,15 @@ FROM hybrid_search
 			(arc-get-limit))))
     query))
 
-(defun arc-find-similar (text collections on-done)
+(defun arc-find-similar (text collections on-done &optional on-error)
   "Find similar to TEXT results in COLLECTIONS.
-Evaluate ON-DONE with result."
+Evaluate ON-DONE with result, or ON-ERROR with an error symbol and
+message when retrieval itself fails -- most commonly, an unreachable
+embedding endpoint, since building the query embeds TEXT."
   (message "searching in collected data")
   (arc--async-do
    (lambda () (arc--find-similar text collections))
-   on-done))
+   on-done on-error))
 
 (defun arc--split-by (func)
   "Split buffer content to list by FUNC."
@@ -644,7 +646,13 @@ one-line follow-up text as HEADING, so the buffer heading (and
 anything a later `arc-ui-reask' resends) stays that one line rather
 than the whole quoted exchange QUESTION carries.  `arc-ui-begin-answer'
 enforces that whatever ends up as the heading is a single line, no
-matter which of QUESTION or HEADING that turns out to be."
+matter which of QUESTION or HEADING that turns out to be.
+
+Both retrieval failure (an unreachable embedding endpoint, most
+commonly) and model failure render into the answer buffer rather than
+leaving it invisible -- retrieval failure never even reaches
+`arc-answer-request', which is why it needs an error path of its own
+here rather than reusing that function's."
   (interactive "sAsk arc: ")
   (let* ((cols (or collections arc-enabled-collections))
          (display (or heading question)))
@@ -664,7 +672,13 @@ matter which of QUESTION or HEADING that turns out to be."
             (arc-ui-stream-answer answer text)
             (arc-ui-render-sources answer sources))
           (lambda (_sym msg)
-            (arc-ui-stream-answer answer (format "arc: request failed: %s" msg)))))))))
+            (arc-ui-stream-answer answer (format "arc: request failed: %s" msg))))))
+     (lambda (_sym msg)
+       (let ((answer (arc-ui-begin-answer display)))
+         (pop-to-buffer (arc-ui-buffer))
+         (setq arc-ui--last-question display)
+         (setq arc-ui--last-sources nil)
+         (arc-ui-stream-answer answer (format "arc: retrieval failed: %s" msg)))))))
 
 ;;;###autoload
 (defvar arc-command-map
@@ -693,9 +707,23 @@ map to whatever prefix you like, e.g.:
     (arc--init-db db)
     (setq arc--db db)))
 
-(defun arc--async-do (func &optional on-done)
+(defun arc--async-do (func &optional on-done on-error)
   "Do FUNC asyncronously.
-Call ON-DONE callback with result as an argument after FUNC evaluation done."
+Call ON-DONE with FUNC's return value once it completes successfully.
+
+FUNC runs inside a forked Emacs process (`async-start').  An error FUNC
+signals there does not reach ON-DONE, or this function's own caller, by
+itself: `async-handle-result' (async.el) re-signals it from inside the
+parent's process sentinel before ever calling the finish function
+below, which Emacs reports as an unhandled \"Error in process
+sentinel\" and nothing else -- no callback of any kind runs.  So FUNC
+is wrapped in `condition-case' here, inside the child, turning an
+error into an ordinary tagged return value instead of ever reaching
+that path; when the tag says FUNC failed, ON-ERROR (if given) is
+called with the error symbol and message, exactly like an ordinary
+callback.  With no ON-ERROR given, the failure is reported with
+`message' instead of being silently dropped, matching what every
+caller of this function got before ON-ERROR existed."
   (let* ((command real-this-command)
 	 (reporter (make-progress-reporter (if command
 					       (prin1-to-string command)
@@ -715,14 +743,22 @@ Call ON-DONE callback with result as an argument after FUNC evaluation done."
 		    ,(async-inject-variables "load-path")
 		    ,(async-inject-variables "Info-directory-list")
 		    (require 'arc)
-		    (,func))
+		    (condition-case arc--async-do-err
+			(list :arc-ok (,func))
+		      (error (list :arc-error (car arc--async-do-err)
+				   (error-message-string arc--async-do-err)))))
 		 (lambda (res)
 		   (cancel-timer timer)
 		   (progress-reporter-done reporter)
 		   (arc-close-db)
 		   (arc--reopen-db)
-		   (when on-done
-		     (funcall on-done res))))))
+		   (pcase res
+		     (`(:arc-error ,sym ,msg)
+		      (if on-error
+			  (funcall on-error sym msg)
+			(message "arc: async task failed (%s): %s" sym msg)))
+		     (`(:arc-ok ,value)
+		      (when on-done (funcall on-done value))))))))
 
 ;; arc-async-parse-builtin-manuals, arc-async-parse-external-manuals and
 ;; arc-async-parse-all-manuals are gone along with the sync functions they
