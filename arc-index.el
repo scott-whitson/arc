@@ -178,10 +178,15 @@ zero inserts, which is exactly how a phantom row -- one `sources' row
 with nothing in `data' for it to join through -- used to get created
 even after the fix above.  A source that already had real content and
 is reindexed down to zero chunks keeps its old row and old chunks
-here (nothing here decides whether that is now stale); the synchronous
-path's `arc--prune-collection' pass, run once per whole collection with
-a complete kept-ids list, is what actually resolves that -- this source
-simply will not be in it."
+here (nothing here decides whether that is now stale); ordinarily the
+synchronous path's `arc--prune-collection' pass, run once per whole
+collection with a complete kept-ids list, is what resolves that -- this
+source simply will not be in it.  That does not cover every case,
+though: if the emptied source was the collection's *only* source,
+KEPT-IDS comes back empty and `arc--prune-collection' refuses to prune
+an empty KEPT-IDS at all (by design -- see its docstring), so the
+emptied source's old content stays indexed and citable indefinitely.
+See the README's Known Limitations for this."
   (if (null chunks)
       nil
     (with-sqlite-transaction (arc-db)
@@ -682,8 +687,12 @@ the end of that outer call would fire ON-COLLECTION-DONE a second time."
                         name)
              (condition-case err
                  (progn
-                   (arc--replace-source-chunks source cid (nreverse (gethash source source-chunks)))
-                   (cl-incf sources-replaced))
+                   ;; a zero-chunk source (e.g. a now-empty file) makes
+                   ;; `arc--replace-source-chunks' write nothing and
+                   ;; return nil -- that is not a replacement, so it
+                   ;; must not count as one (see ON-COLLECTION-DONE above)
+                   (when (arc--replace-source-chunks source cid (nreverse (gethash source source-chunks)))
+                     (cl-incf sources-replaced)))
                ((error quit)
                 (puthash source t not-replaced)
                 (message "arc: %s: replacing a source's chunks failed: %s"

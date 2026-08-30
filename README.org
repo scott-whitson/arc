@@ -54,23 +54,71 @@ variable (set this before Emacs starts, e.g. by Nix):
 export ARC_VEC0_PATH=/path/to/vec0.so
 #+end_src
 
-If ~ARC_VEC0_PATH~ is unset or the file does not exist, arc warns
-instead of failing to load, and the database will not have a working
-vector table.
+If ~ARC_VEC0_PATH~ is unset or does not point to an existing file, arc
+does *not* warn and continue: ~arc--init-db~ checks for this explicitly
+and signals a hard error, ~arc-db~ closes the half-open connection
+rather than leave a broken one to be silently reused, and there is no
+database at all until this is fixed. A path that exists but does not
+actually provide a working ~vec0~ module (see below) fails the same
+way, just later and more confusingly: creating the ~data_embeddings~
+virtual table signals ~(sqlite-error "no such module: vec0")~, which
+propagates out through the same closing-and-re-signalling path.
 
-Keep the file named ~vec0.so~ (or your platform's loadable-module
-suffix, e.g. ~vec0.dylib~) -- a copy under any other name is liable to
-fail to load. This is *not* SQLite deriving an entry-point symbol from
-the file's basename, as this document used to claim: a byte-identical
-copy of the same extension, renamed to a basename SQLite itself
-recognizes, loaded without incident on Emacs 30.2. The real gate is
-Emacs's own ~sqlite-load-extension~, which checks the name you hand it
-against its own small, hardcoded, case-sensitive allow-list of
-extension names *before* SQLite ever sees the file, and refuses
-everything else outright -- a copy at, say, ~/path/to/my-vec0.so~
-fails with =(sqlite-error "Module name not on allowlist")=, naming its
-actual cause plainly, not the obscure, causeless failure this document
-used to describe.
+Keep the file named exactly ~vec0.so~ (or your platform's
+loadable-module suffix, e.g. ~vec0.dylib~) -- a copy under any other
+name is liable to fail, through either of two quite different gates,
+one loud and one silent. (An earlier version of this document
+described only the silent one, but as SQLite's, not Emacs's, and
+offered a "renamed copy loaded without incident" as proof it wasn't a
+naming problem at all -- that measurement only checked whether
+~sqlite-load-extension~ raised an error, and, as the next paragraph
+shows, it essentially never does; the "incident" it needed to catch
+happens one step later.)
+
+The loud gate is Emacs's own: ~sqlite-load-extension~ checks the
+basename you hand it against its own small, hardcoded, case-sensitive
+allow-list of extension names *before* SQLite ever sees the file, and
+refuses anything not on it outright -- a copy at, say,
+~/path/to/my-vec0.so~ fails immediately with =(sqlite-error "Module
+name not on allowlist")=, naming its actual cause plainly.
+
+The silent gate sits behind that one and belongs to SQLite, not Emacs:
+~sqlite-load-extension~ never signals a SQLite-level load failure at
+all. Proof: copying =libz.so.1= (zlib -- not a SQLite extension of any
+kind) to a file literally named ~vec0.so~ still "loads" without error.
+What actually determines whether the extension you get behaves like
+~vec0~ is SQLite's own basename-derived entry-point convention: it
+takes the alphabetic characters of the basename up to its first dot
+(eliding a leading ~lib~) and calls =sqlite3_<that>_init= if the shared
+library exports a symbol by that name. ~vec0.so~'s binary exports
+=sqlite3_vec_init= (and two other =sqlite3_vec_*_init= symbols) but no
+generic =sqlite3_extension_init= fallback, so *only* a basename that
+derives to exactly =vec= actually works. A copy named ~rtree.so~,
+~pcre.so~, or even ~libsqlite3_mod_vec0.so~ (Debian's own naming
+convention -- and each of these three happens to also sit on *Emacs's*
+allow-list, which recognizes names, not bytes) passes both the
+allow-list check and the "load" call in total silence, and only fails
+once something actually tries to use the module: =(sqlite-error "no
+such module: vec0")=, exactly what happens when arc's own
+~arc--init-db~ tries to create the ~data_embeddings~ virtual table
+(see above). Measured on Emacs 30.2; the table below is what running
+both stages -- load, then ~CREATE VIRTUAL TABLE ... USING vec0~ --
+against each name actually produced:
+
+| basename                   | load result                                | ~USING vec0~                      |
+|----------------------------+---------------------------------------------+------------------------------------|
+| ~vec0.so~ / ~.dylib~ / ~.dll~ | ok                                          | works                              |
+| ~rtree.so~                 | ok (silent)                                | =(sqlite-error "no such module: vec0")= |
+| ~pcre.so~                  | ok (silent)                                | =(sqlite-error "no such module: vec0")= |
+| ~libsqlite3_mod_vec0.so~   | ok (silent)                                | =(sqlite-error "no such module: vec0")= |
+| zlib copied to ~vec0.so~   | ok (silent)                                | =(sqlite-error "no such module: vec0")= |
+| ~my-vec0.so~                | =(sqlite-error "Module name not on allowlist")= | n/a                                |
+| ~VEC0.so~                   | =(sqlite-error "Module name not on allowlist")= | n/a                                |
+| ~banana.so~                 | =(sqlite-error "Module name not on allowlist")= | n/a                                |
+
+The upshot: renaming this file is never safe to try-and-see -- a
+rename that happens to sit on Emacs's allow-list will appear to load
+fine and only fail later, confusingly, at first real use.
 
 **** A possibly-higher Emacs floor for this extension specifically
 
@@ -106,6 +154,25 @@ remove departed sources:
 (arc-reindex-all)                  ; every collection in `arc-index-plan'
 (arc-reindex-all '("dotfiles"))     ; just one collection
 #+end_src
+
+*** Emptying a collection's only source leaves it indexed
+
+The synchronous prune above refuses to prune anything when a
+collection's walk comes back with zero sources, on purpose -- see
+~arc--prune-collection~'s docstring -- because an empty result is
+indistinguishable from a directory that is merely momentarily empty
+(unmounted, a sync tool mid-catch-up), and deleting a whole collection
+is never the right answer to that ambiguity. One consequence: if a
+collection has exactly one source and that source is edited down to
+zero chunks (an emptied or now-whitespace-only file, say), the walk
+that reindexes it also comes back with zero kept ids, the same refusal
+applies, and that now-empty source's *old* content stays indexed and
+citable indefinitely -- reindexing never removes it, because from
+here a genuinely-emptied sole source and a not-yet-ready directory
+look identical. Adding an unrelated second source to the same
+collection is enough to make the emptied one prunable again on the
+next synchronous reindex, since the walk then yields a non-empty
+kept-ids list to check it against.
 
 ** Running the tests
 
