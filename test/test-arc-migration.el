@@ -9,15 +9,16 @@
 (require 'arc)
 
 (ert-deftest am-unmigrated-list-has-exactly-five-entries ()
-  "This list may only shrink as Tasks 10/11 migrate each function.
-If it grows, or a migrated entry is left in it, this test should be
-the thing that says so -- update the expected count deliberately.
-Task 10 migrated `arc-parse-info-manual' (it is now a pure function
-returning an alist, with its SQL moved to Task 11's indexer), so the
-count dropped from 7 to 6.  Task 11 migrated `arc-retrieve-ask' (its
-query now joins `data' to `sources' via `arc--retrieve-rows', and
-`arc--add-context-row' replaces its old kind dispatch), dropping the
-count from 6 to 5."
+  "This list may only shrink as functions are migrated off the
+pre-`sources' schema.  If it grows, or a migrated entry is left in
+it, this test should be the thing that says so -- update the expected
+count deliberately.  Task 10 migrated the info-manual parser (it is
+now a pure function returning an alist, with its SQL moved to Task
+11's indexer), dropping the count from 7 to 6.  Task 11 then migrated
+the query-and-context path that fed arc's former chat buffer (its
+query now joins `data' to `sources' via `arc--retrieve-rows'),
+dropping the count from 6 to 5 -- before Task 6 deleted that whole
+path outright, functions and all, once `arc-ask' replaced it."
   (should (= (length arc--unmigrated-functions) 5)))
 
 (ert-deftest am-unmigrated-functions-still-exist ()

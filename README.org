@@ -288,6 +288,12 @@ every retrieved citation as an org link; put point on one and press
 Lisp with an explicit collections list to search a one-off set instead
 of ~arc-enabled-collections~: ~(arc-ask "prompt" '("vault"))~.
 
+The ~*arc*~ buffer's header line reports the corpus's size -- a chunk
+count per kind, e.g. "arc · 6855 chunks · file 6427 · org-node 428" --
+so you can see at a glance whether an index exists at all. It does
+not report /freshness/ (whether the corpus is still up to date with
+what is on disk); that tracking is phase 5.
+
 *** 7. Capture an answer to your vault
 
 arc does not guess where your notes live -- that is exactly the kind
