@@ -420,10 +420,15 @@ the two."
           (captured nil))
      (aia-capturing-messages captured
        (cl-letf (((symbol-function 'arc--insert-chunk-row)
-                  (lambda (sid cid text ls le title vec)
+                  ;; &rest, not a fixed arity: this stub wraps a production
+                  ;; primitive, and pinning its argument list here means any
+                  ;; future argument turns "the write failed" into a test
+                  ;; failure that looks like a logic bug. That is exactly what
+                  ;; happened when `arc--insert-chunk-row' gained LOCATOR.
+                  (lambda (sid cid text &rest rest)
                     (if (member text poison-texts)
                         (error "aia: induced write failure for %s" text)
-                      (funcall real-insert sid cid text ls le title vec))))
+                      (apply real-insert sid cid text rest))))
                  ((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
                  ((symbol-function 'arc-info-sources) (lambda (&rest _) fake)))
          (arc-reindex-all nil t)

@@ -118,7 +118,52 @@ outright, and does so audibly via `message', not silently."
       (message "arc: replaced undecodable byte(s) in a chunk (%d chars)" (length text)))
     cleaned))
 
-(defun arc--insert-chunk-row (sid cid text line-start line-end title vec)
+(defconst arc--fts-locator-sql
+  "COALESCE(s.path,'') || ' ' || COALESCE(s.option_name,'') || ' ' || \
+COALESCE(s.info_node,'') || ' ' || COALESCE(s.org_id,'') || ' ' || \
+COALESCE(d.title,'')"
+  "SQL form of `arc--fts-locator', for `arc-index-rebuild-fts'.
+Kept beside the elisp so the two cannot drift unnoticed;
+`test/test-arc-fts-locator.el' builds an index each way and compares.")
+
+(defun arc--fts-locator (source title)
+  "Return SOURCE's identifying text, for the keyword index.
+The vector arm searches meaning; the keyword arm should search
+IDENTIFIERS, and it could not, because `data_fts' held the chunk text
+alone. Measured on a 63k-chunk corpus: 0 of 8548 file chunks contained
+their own path. So \"where is the disk layout for rafik defined\" had no
+way to match `hi-hardware/disko/rafik.nix' -- the answer is the
+FILENAME, and the filename was invisible to search. Option chunks
+happened to embed their own name already, which is why options fared
+better than files.
+
+FTS5's default tokenizer splits on non-alphanumerics, so a path needs no
+transformation: /home/scott/dotfiles/ioshi/i-intelligence/syncthing.nix
+tokenizes to home, scott, dotfiles, ioshi, i, intelligence, syncthing,
+nix.
+
+Deliberately NOT added to the embedded text: that would need a full
+re-embed of the corpus, and the free half is worth measuring first."
+  ;; Every field, empty where absent, rather than dropping nils: the SQL in
+  ;; `arc--fts-locator-sql' concatenates five COALESCEd columns and cannot
+  ;; cheaply skip blanks, so the elisp matches ITS shape rather than the other
+  ;; way round. The stray spaces are irrelevant to FTS5's tokenizer, and
+  ;; `afl-rebuild-agrees-with-the-insert-path' caught this exact mismatch the
+  ;; first time it ran.
+  (string-join
+   (mapcar (lambda (x) (or x ""))
+           (list (plist-get source :path)
+                 (plist-get source :option-name)
+                 (plist-get source :info-node)
+                 (plist-get source :org-id)
+                 title))
+   " "))
+
+(defun arc--fts-text (locator chunk)
+  "Combine LOCATOR and CHUNK into the text stored in `data_fts'."
+  (concat locator "\n" chunk))
+
+(defun arc--insert-chunk-row (sid cid text line-start line-end title vec &optional locator)
   "Insert one chunk row for source SID/collection CID plus its
 `data_embeddings' and `data_fts' rows.  Does NOT wrap this in a
 transaction of its own: `arc--replace-source-chunks' is the only
@@ -137,7 +182,8 @@ shared transaction, since none of that may be partial."
                             rowid (arc-vector-to-sqlite vec)))
     (sqlite-execute (arc-db)
                     (format "INSERT INTO data_fts (rowid, data) VALUES (%d, %s);"
-                            rowid (arc--sql-quote text)))))
+                            rowid (arc--sql-quote
+                                   (arc--fts-text (or locator "") text))))))
 
 (defun arc--replace-source-chunks (source cid chunks)
   "Upsert SOURCE into collection CID and atomically replace every
@@ -193,7 +239,9 @@ See the README's Known Limitations for this."
       (let ((sid (arc-source-upsert source)))
         (arc--delete-data-for-source sid)
         (dolist (c chunks)
-          (arc--insert-chunk-row sid cid (nth 0 c) (nth 1 c) (nth 2 c) (plist-get source :title) (nth 3 c)))
+          (arc--insert-chunk-row sid cid (nth 0 c) (nth 1 c) (nth 2 c)
+                                 (plist-get source :title) (nth 3 c)
+                                 (arc--fts-locator source (plist-get source :title))))
         (arc-index--bump-write-generation)
         sid))))
 
@@ -227,6 +275,26 @@ synchronous path: each chunk's embedding is fetched with a blocking
 `arc--reindex-all-async' for the non-blocking counterpart driven by
 `llm-embedding-async'."
   (cdr (arc--index-source-1 source collection)))
+
+(defun arc-index-rebuild-fts ()
+  "Rebuild `data_fts' from `data' and `sources'.  Returns the row count.
+Embeddings are NOT touched, so this is seconds rather than the 40
+minutes a reindex costs on a real corpus -- the keyword index is pure
+derived data. Run it after changing `arc--fts-locator', or to pick up
+locator indexing on an index built before it existed."
+  (interactive)
+  (with-sqlite-transaction (arc-db)
+    (sqlite-execute (arc-db) "DELETE FROM data_fts;")
+    (sqlite-execute
+     (arc-db)
+     (format "INSERT INTO data_fts (rowid, data)
+              SELECT d.id, %s || char(10) || d.chunk
+              FROM data d JOIN sources s ON s.id = d.source_id;"
+             arc--fts-locator-sql)))
+  (arc-index--bump-write-generation)
+  (let ((n (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_fts;"))))
+    (message "arc: rebuilt the keyword index over %d chunk(s)" n)
+    n))
 
 (defun arc-index-stats ()
   "Return an alist of (KIND . CHUNK-COUNT).

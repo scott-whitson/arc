@@ -96,6 +96,65 @@ question set would otherwise read as a retrieval failure forever."
            for i from 1
            when (arc-eval--source-matches-p s expect) return i))
 
+(defun arc-eval--expect-sql (expect)
+  "Return a SQL WHERE fragment matching sources satisfying EXPECT."
+  (string-join
+   (cl-loop for (key want) on expect by #'cddr
+            collect (pcase key
+                      (:kind        (format "kind = %s" (arc--sql-quote want)))
+                      (:option-name (format "option_name = %s" (arc--sql-quote want)))
+                      (:org-id      (format "org_id = %s" (arc--sql-quote want)))
+                      (:info-node   (format "info_node = %s" (arc--sql-quote want)))
+                      (:path        (format "path = %s" (arc--sql-quote want)))
+                      (:path-suffix (format "path LIKE %s"
+                                            (arc--sql-quote (concat "%" want))))
+                      (_ (error "arc-eval: unknown :expect key %S" key))))
+   " AND "))
+
+(defun arc-eval-validate (&optional set)
+  "Check every :expect clause in SET names a source that EXISTS.
+Returns a list of (QUESTION . EXPECT) for the clauses that resolve to
+nothing.
+
+This is not optional rigour, it is the difference between a benchmark
+and a wish. An expectation naming a source the corpus does not contain
+is indistinguishable, in a recall number, from retrieval failing to
+find one -- and it is unfixable by any amount of tuning. This set
+shipped with `programs.git.userEmail', which does not exist in
+Home-Manager's options at all, and a whole round of analysis was spent
+treating that as a retrieval problem.
+
+An empty return is the only result worth optimising against."
+  (let ((set (or set (arc-eval-read-set arc-eval-set-file)))
+        bad)
+    (dolist (q set)
+      (dolist (e (plist-get q :expect))
+        (let ((n (caar (sqlite-select
+                        (arc-db)
+                        (format "SELECT count(*) FROM sources WHERE %s;"
+                                (arc-eval--expect-sql e))))))
+          (when (zerop n)
+            (push (cons (plist-get q :question) e) bad)))))
+    (nreverse bad)))
+
+;;;###autoload
+(defun arc-eval-check ()
+  "Report any eval expectation that names a source the corpus lacks."
+  (interactive)
+  (let ((bad (arc-eval-validate)))
+    (if (null bad)
+        (message "arc-eval: every expectation resolves to a real source")
+      (with-current-buffer (get-buffer-create "*arc-eval-check*")
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert (format "%d unresolvable expectation(s) -- fix the SET, not arc:\n\n"
+                          (length bad)))
+          (dolist (cell bad)
+            (insert (format "  %s\n      %S\n" (car cell) (cdr cell)))))
+        (goto-char (point-min))
+        (special-mode)
+        (pop-to-buffer (current-buffer))))))
+
 ;;; Retrieval ---------------------------------------------------------------
 
 (defun arc-eval--retrieve (question scope k &optional arm)
