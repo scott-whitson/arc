@@ -235,70 +235,96 @@ Return list of vectors."
 				batches)))
       (mapcar (lambda (chunk) (llm-embedding provider chunk)) chunks))))
 
-(defun arc--find-similar (text collections)
-  "Find similar to TEXT results in COLLECTIONS.
-Return sqlite query.  For asyncronous execution."
-  (let* ((rowids (flatten-tree
-		  (sqlite-select
-		   (arc-db)
-		   (format "SELECT rowid FROM data WHERE collection_id IN
- (
-SELECT rowid FROM collections WHERE name IN %s
-);"
-			   (arc-sqlite-format-string-list collections)))))
-	 (query (format "WITH
-vector_search AS (
-  SELECT rowid, distance
+(defun arc-scope-from-collections (collections)
+  "Return a scope restricting to COLLECTIONS, or an empty scope for nil.
+Callers that hold a plain list of collection names -- `arc-ask' with
+its documented list argument, `arc-enabled-collections' -- go through
+here rather than building a plist inline."
+  (if collections (arc-scope :collections collections) (arc-scope)))
+
+(defun arc--scoped-cte (scope)
+  "Return the `scoped' CTE restricting `data' rows to SCOPE."
+  (format "scoped AS (
+  SELECT d.id AS id
+  FROM data d JOIN sources s ON s.id = d.source_id
+  WHERE %s
+)" (arc-scope-predicate scope)))
+
+(defun arc--semantic-cte (scope vec)
+  "Return the semantic-search CTE for SCOPE against embedding VEC.
+Which of the two shapes this returns is `arc-scope-vector-plan's
+decision; see its docstring for why either can be the correct one."
+  (pcase-let ((`(,strategy . ,k) (arc-scope-vector-plan scope)))
+    (if (eq strategy 'brute)
+        ;; Exact within the scope, cost proportional to the scope: SQLite
+        ;; only evaluates the distance on rows the join admits.
+        (format "semantic_search AS (
+  SELECT e.rowid AS id,
+         RANK () OVER (ORDER BY vec_distance_cosine(e.embedding, %s) ASC) AS rank
+  FROM data_embeddings e JOIN scoped ON scoped.id = e.rowid
+  ORDER BY vec_distance_cosine(e.embedding, %s) ASC
+  LIMIT %d
+)" vec vec arc-knn-candidates)
+      (format "vector_search AS (
+  SELECT rowid AS id, distance
   FROM data_embeddings
-  WHERE embedding MATCH %s
-    AND k = 40
+  WHERE embedding MATCH %s AND k = %d
   ORDER BY distance ASC
 ),
 semantic_search AS (
-  SELECT rowid, RANK () OVER (ORDER BY distance ASC) AS rank
-  FROM vector_search
-  WHERE rowid IN %s
-  ORDER BY distance ASC
-  LIMIT 20
-),
+  SELECT v.id, RANK () OVER (ORDER BY v.distance ASC) AS rank
+  FROM vector_search v JOIN scoped ON scoped.id = v.id
+  ORDER BY v.distance ASC
+  LIMIT %d
+)" vec k arc-knn-candidates))))
+
+(defun arc--find-similar (text scope)
+  "Return the SQL selecting chunks in SCOPE similar to TEXT.
+SCOPE is a scope plist (see `arc-scope'); nil means the whole corpus.
+The scope reaches the search rather than filtering its results: both
+the vector side and the FTS side join against the `scoped' CTE.  That
+is the whole point of this function -- the previous version ran a
+fixed k=40 KNN across the entire corpus and filtered afterwards, so a
+narrow scope whose rows were not among the global top 40 came back
+with no semantic candidates whatsoever."
+  (let ((vec (arc-vector-to-sqlite
+              (llm-embedding arc-embeddings-provider text))))
+    (format "WITH
+%s,
+%s,
 keyword_search AS (
-  SELECT rowid, RANK () OVER (ORDER BY bm25(data_fts) ASC) AS rank
-  FROM data_fts
-  WHERE rowid in %s and data_fts MATCH '%s'
+  SELECT f.rowid AS id, RANK () OVER (ORDER BY bm25(data_fts) ASC) AS rank
+  FROM data_fts f JOIN scoped ON scoped.id = f.rowid
+  WHERE data_fts MATCH '%s'
   ORDER BY bm25(data_fts) ASC
-  LIMIT 20
+  LIMIT %d
 ),
 hybrid_search AS (
-SELECT
-  COALESCE(semantic_search.rowid, keyword_search.rowid) AS rowid,
-  COALESCE(1.0 / (60 + semantic_search.rank), 0.0) +
-  COALESCE(1.0 / (60 + keyword_search.rank), 0.0) AS score
-FROM semantic_search
-FULL OUTER JOIN keyword_search ON semantic_search.rowid = keyword_search.rowid
-ORDER BY score DESC
-LIMIT %d
+  SELECT
+    COALESCE(semantic_search.id, keyword_search.id) AS id,
+    COALESCE(1.0 / (60 + semantic_search.rank), 0.0) +
+    COALESCE(1.0 / (60 + keyword_search.rank), 0.0) AS score
+  FROM semantic_search
+  FULL OUTER JOIN keyword_search ON semantic_search.id = keyword_search.id
+  ORDER BY score DESC
+  LIMIT %d
 )
-SELECT
-  hybrid_search.rowid
-FROM hybrid_search
-;
-"
-			(arc-vector-to-sqlite
-			 (llm-embedding arc-embeddings-provider text))
-			(arc-sqlite-format-int-list rowids)
-			(arc-sqlite-format-int-list rowids)
-			(arc-fts-query text)
-			(arc-get-limit))))
-    query))
+SELECT hybrid_search.id FROM hybrid_search;"
+            (arc--scoped-cte scope)
+            (arc--semantic-cte scope vec)
+            (arc-fts-query text)
+            arc-knn-candidates
+            (arc-get-limit))))
 
-(defun arc-find-similar (text collections on-done &optional on-error)
-  "Find similar to TEXT results in COLLECTIONS.
-Evaluate ON-DONE with result, or ON-ERROR with an error symbol and
-message when retrieval itself fails -- most commonly, an unreachable
-embedding endpoint, since building the query embeds TEXT."
+(defun arc-find-similar (text scope on-done &optional on-error)
+  "Find chunks in SCOPE similar to TEXT, asynchronously.
+SCOPE is a scope plist; nil searches everything.  Evaluate ON-DONE
+with the resulting SQL, or ON-ERROR with an error symbol and message
+when retrieval itself fails -- most commonly an unreachable embedding
+endpoint, since building the query embeds TEXT."
   (message "searching in collected data")
   (arc--async-do
-   (lambda () (arc--find-similar text collections))
+   (lambda () (arc--find-similar text scope))
    on-done on-error))
 
 (defun arc--split-by (func)
@@ -664,7 +690,7 @@ here rather than reusing that function's."
   (let* ((cols (or collections arc-enabled-collections))
          (display (or heading question)))
     (arc-find-similar
-     question cols
+     question (arc-scope-from-collections cols)
      (lambda (query)
        (let* ((ids (arc--retrieve-ids query question))
               (sources (mapcar #'arc-row-to-source (arc--retrieve-rows ids)))
