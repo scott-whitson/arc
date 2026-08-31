@@ -852,7 +852,23 @@ that path; when the tag says FUNC failed, ON-ERROR (if given) is
 called with the error symbol and message, exactly like an ordinary
 callback.  With no ON-ERROR given, the failure is reported with
 `message' instead of being silently dropped, matching what every
-caller of this function got before ON-ERROR existed."
+caller of this function got before ON-ERROR existed.
+
+The child never loads the user's init file (`async-start' forks a
+plain `emacs -Q'), so any `defcustom' it or a function it calls reads
+gets that variable's compiled-in default unless the current value is
+explicitly captured here with `async-inject-variables' and handed
+across.  `arc-knn-candidates', `arc-scope-bruteforce-max', `arc-limit',
+`arc-reranker-limit' and `arc-embedding-size' belong on this list for
+exactly that reason -- each is read somewhere in the call graph
+`arc-find-similar' runs in the child (`arc--find-similar' itself, or
+`arc-scope-vector-plan', `arc-get-limit', or `arc-db' opening a fresh
+connection there, which always happens in the child since it starts
+with no cached `arc--db') -- and `test/test-arc-async-injection.el'
+guards this list structurally: it discovers what the child's call
+graph actually reads by walking live function definitions, rather than
+asserting a fixed list, so a future callee reading a new tunable fails
+that test instead of shipping silently uninjected."
   (let* ((command real-this-command)
 	 (reporter (make-progress-reporter (if command
 					       (prin1-to-string command)
@@ -869,6 +885,11 @@ caller of this function got before ON-ERROR existed."
 		    ,(async-inject-variables "arc-breakpoint-threshold-amount")
 		    ,(async-inject-variables "arc-reranker-enabled")
 		    ,(async-inject-variables "arc-sqlite-vec-path")
+		    ,(async-inject-variables "arc-knn-candidates")
+		    ,(async-inject-variables "arc-scope-bruteforce-max")
+		    ,(async-inject-variables "arc-limit")
+		    ,(async-inject-variables "arc-reranker-limit")
+		    ,(async-inject-variables "arc-embedding-size")
 		    ,(async-inject-variables "load-path")
 		    ,(async-inject-variables "Info-directory-list")
 		    (require 'arc)
