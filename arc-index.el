@@ -118,6 +118,35 @@ outright, and does so audibly via `message', not silently."
       (message "arc: replaced undecodable byte(s) in a chunk (%d chars)" (length text)))
     cleaned))
 
+(defcustom arc-embed-locator nil
+  "Whether a chunk's locator is included in the text that gets EMBEDDED.
+The stored chunk is unaffected either way -- only the vector changes, so
+what the model is shown and what citations quote never move.
+
+MEASURED, controlled: the dotfiles collection was reindexed twice from an
+identical starting state, so the only difference was the embedding input.
+Over the eight dotfiles-scoped eval questions:
+
+  text only          recall@3 0.12  @5 0.25  @10 0.75  6/8 found
+  locator embedded   recall@3 0.38  @5 0.38  @10 0.75  6/8 found
+
+So it improves RANKING and not FINDING -- the same candidates, better
+ordered -- which is exactly what an embedding change should look like.
+And that is why it is off: `arc-limit' is 10, the model already receives
+all ten chunks, and the gain sits entirely below the cutoff arc uses. A
+40-minute re-embed of the corpus buys nothing measurable at k=10.
+
+Turn it on if `arc-limit' ever drops to 5 or 3, where the ranking gain
+lands inside the cutoff. And note what the number cannot say: recall@k
+measures retrieval, not answer quality, so better ordering WITHIN the
+context window may help a model that attends more to early content.
+This instrument cannot see that, which is a limit of the measurement
+rather than evidence of no effect.
+
+Changing this requires re-embedding; `arc-index-rebuild-fts' will not do
+it, because embeddings are not derived data."
+  :type 'boolean :group 'arc)
+
 (defconst arc--fts-locator-sql
   "COALESCE(s.path,'') || ' ' || COALESCE(s.option_name,'') || ' ' || \
 COALESCE(s.info_node,'') || ' ' || COALESCE(s.org_id,'') || ' ' || \
@@ -256,10 +285,18 @@ list for `arc--prune-collection' out of the source ids indexing
 *actually wrote*, not out of a separate, eager upsert of its own (see
 `arc--index-sources-with-progress')."
   (let* ((cid (arc--collection-id collection))
+         (locator (and arc-embed-locator
+                       (arc--fts-locator source (plist-get source :title))))
          (embedded (mapcar (lambda (c)
                               (let ((text (arc--sanitize-text (plist-get c :text))))
                                 (list text (plist-get c :line-start) (plist-get c :line-end)
-                                      (llm-embedding arc-embeddings-provider text))))
+                                      ;; The STORED chunk is always TEXT; only the
+                                      ;; embedded input may carry the locator. What
+                                      ;; the model is shown and what citations quote
+                                      ;; must not change.
+                                      (llm-embedding
+                                       arc-embeddings-provider
+                                       (if locator (arc--fts-text locator text) text)))))
                             (plist-get source :chunks))))
     (cons (arc--replace-source-chunks source cid embedded) (length embedded))))
 

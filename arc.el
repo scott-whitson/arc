@@ -1048,6 +1048,7 @@ that test instead of shipping silently uninjected."
 		    ,(async-inject-variables "arc-embedding-size")
 		    ,(async-inject-variables "arc-rrf-k")
 		    ,(async-inject-variables "arc-rrf-semantic-weight")
+		    ,(async-inject-variables "arc-embed-locator")
 		    ,(async-inject-variables "load-path")
 		    ,(async-inject-variables "Info-directory-list")
 		    (require 'arc)
