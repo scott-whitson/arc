@@ -459,6 +459,26 @@
        (arc-ui-reask))
      (should (equal asked "why 8385?")))))
 
+(ert-deftest aui-reask-passes-the-buffers-current-scope-not-nil ()
+  ;; Regression: `arc-ui-reask' used to pass a bare nil as `arc-ask''s
+  ;; SCOPE, which `arc-ask-normalize-scope' silently rewrites to
+  ;; `arc-enabled-collections' -- so re-asking after a question at some
+  ;; other scope (the vault, or a scope set via `s') would silently jump
+  ;; back to the default collections instead of staying put.  This binds
+  ;; `arc-ui--last-scope' to a scope that could not arise by accident and
+  ;; asserts `arc-ask' actually receives it as its SECOND argument -- the
+  ;; existing "reuses the last question" test discards that argument
+  ;; entirely (`(lambda (q &rest _) ...)'), so it cannot catch this.
+  (require 'arc)
+  (aui-with-fresh-buffer
+   (setq arc-ui--last-question "why 8385?")
+   (setq arc-ui--last-scope '(:collections ("distinctive-scope-marker")))
+   (let ((asked-scope 'not-set))
+     (cl-letf (((symbol-function 'arc-ask)
+                (lambda (_q scope &rest _) (setq asked-scope scope))))
+       (arc-ui-reask))
+     (should (equal asked-scope '(:collections ("distinctive-scope-marker")))))))
+
 (ert-deftest aui-reask-without-a-previous-question-says-so ()
   (aui-with-fresh-buffer
    (setq arc-ui--last-question nil)
@@ -574,6 +594,26 @@
      (should (string-match-p "answer one text" prompt))
      (should-not (string-match-p "q3\\?" prompt))
      (should-not (string-match-p "answer three text" prompt)))))
+
+(ert-deftest aui-follow-up-passes-the-buffers-current-scope-not-nil ()
+  ;; Same regression as `aui-reask-passes-the-buffers-current-scope-not-nil'
+  ;; but for `arc-ui-follow-up': it used to pass a bare nil as `arc-ask''s
+  ;; SCOPE too, which `arc-ask-normalize-scope' silently rewrites to
+  ;; `arc-enabled-collections'.  The existing follow-up tests either
+  ;; discard the scope argument (`&rest _') or bind it as `_cols' without
+  ;; asserting anything about it, so neither would catch this.
+  (require 'arc)
+  (aui-with-fresh-buffer
+   (setq arc-ui--last-question "why 8385?")
+   (setq arc-ui--last-scope '(:collections ("distinctive-scope-marker")))
+   (let ((a (arc-ui-begin-answer "why 8385?")))
+     (arc-ui-stream-answer a "Because the WSL profile sets it."))
+   (let ((asked-scope 'not-set))
+     (cl-letf (((symbol-function 'arc-ask)
+                (lambda (_q scope &rest _) (setq asked-scope scope)))
+               ((symbol-function 'read-string) (lambda (&rest _) "and the listen port?")))
+       (arc-ui-follow-up))
+     (should (equal asked-scope '(:collections ("distinctive-scope-marker")))))))
 
 (ert-deftest aui-follow-up-without-a-previous-question-says-so ()
   (aui-with-fresh-buffer
