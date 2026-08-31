@@ -734,8 +734,27 @@ was never returned once."
 		  :as #'json-read))
      'list)))
 
+(defcustom arc-reranker-function nil
+  "Function reranking candidates, or nil for the HTTP service.
+Called with the question and the candidate ids, and must return at most
+`arc-limit' ids.  nil keeps the original behaviour: POST to
+`arc-reranker-url', which expects a cross-encoder service exposing
+/api/v1/rerank.
+
+The seam exists because no such service is packaged: nixpkgs has none,
+Ollama serves no rerank endpoint, and running a cross-encoder means a
+second resident model.  `arc-rerank-llm' in arc-rerank-llm.el reranks
+with the chat model already installed instead."
+  :type '(choice (const nil) function) :group 'arc)
+
 (defun arc-rerank (prompt ids)
   "Rerank IDS according to PROMPT and return top `arc-limit' IDS."
+  (if arc-reranker-function
+      (funcall arc-reranker-function prompt ids)
+    (arc-rerank-http prompt ids)))
+
+(defun arc-rerank-http (prompt ids)
+  "Rerank IDS via the service at `arc-reranker-url'."
   (let ((data (arc--do-rerank-request prompt ids)))
     (mapcar (lambda (elt)
 	      (alist-get 'id elt))
