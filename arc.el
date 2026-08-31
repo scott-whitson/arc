@@ -618,14 +618,15 @@ When FORCE parse even if already parsed."
 (defun arc--do-rerank-request (prompt ids)
   "Call rerank service for PROMPT and IDS."
   (when ids
-    (seq--into-list
+    (seq-into
      (alist-get 'data
 		(plz 'post (format "%s/api/v1/rerank"
 				   (string-remove-suffix "/" arc-reranker-url))
 		  :headers `(("Content-Type" . "application/json"))
 		  :body-type 'text
 		  :body (arc--rerank-request prompt ids)
-		  :as #'json-read)))))
+		  :as #'json-read))
+     'list)))
 
 (defun arc-rerank (prompt ids)
   "Rerank IDS according to PROMPT and return top `arc-limit' IDS."

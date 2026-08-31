@@ -54,3 +54,10 @@ because the feature defaults to off."
     (cl-letf (((symbol-function 'plz) (lambda (&rest _) (setq called t) nil)))
       (should (null (arc--do-rerank-request "q" nil)))
       (should-not called))))
+
+(ert-deftest ar-threshold-defaults-to-nil-not-zero ()
+  "`0' reads as \"off\" but is not: it silently discards every
+negatively-scored chunk.  `nil' is the value that means no filtering.
+This test exists because every other test in this file `let'-binds the
+threshold and so cannot notice the default regressing."
+  (should (null (default-value 'arc-reranker-similarity-threshold))))
