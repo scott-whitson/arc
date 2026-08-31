@@ -607,5 +607,25 @@
   (dolist (name '("everything" "vault" "options" "dotfiles"))
     (should (assoc name arc-scope-presets))))
 
-(ert-deftest eu-everything-preset-is-an-empty-scope ()
-  (should (arc-scope-empty-p (alist-get "everything" arc-scope-presets nil nil #'equal))))
+(ert-deftest eu-everything-preset-actually-searches-the-whole-corpus ()
+  "The old version of this test asserted a datum, not a behaviour: it
+checked that the \"everything\" preset's plist satisfies
+`arc-scope-empty-p', which passes just as well if the preset entry is
+deleted outright -- a missing alist key returns nil, and
+`arc-scope-empty-p' of nil is t.  That is exactly how finding #1
+(the \"everything\" preset mapping to nil, which `arc-ask-normalize-
+scope' then silently rewrites to `arc-enabled-collections') slipped
+past ten reviews: no test ever went through `arc-ask-normalize-scope',
+the function `arc-ui-change-scope' actually calls on its way to
+`arc-ask', to ask what \"everything\" really retrieves.
+
+This version does: it normalises the preset the same way `arc-ask'
+would, and asserts the result is NOT `arc-enabled-collections' --
+bound here to a distinctive value so the two are visibly different --
+as well as still being an empty (unrestricted) scope."
+  (require 'arc)
+  (let* ((arc-enabled-collections '("distinctive-marker-collection"))
+         (preset (alist-get "everything" arc-scope-presets nil nil #'equal))
+         (normalized (arc-ask-normalize-scope preset)))
+    (should (arc-scope-empty-p normalized))
+    (should-not (equal normalized (arc-scope-from-collections arc-enabled-collections)))))

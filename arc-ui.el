@@ -38,7 +38,7 @@
 (require 'arc-scope)
 
 (declare-function arc-index-stats "arc-index")
-(declare-function arc-ask "arc" (question &optional collections heading))
+(declare-function arc-ask "arc" (question &optional scope heading))
 (declare-function arc-ask-vault "arc" (question))
 (declare-function arc-ask-options "arc" (question))
 (declare-function arc-toggle-chat-model "arc")
@@ -85,18 +85,6 @@ for a later phase that grounds a follow-up in the same retrieval
 without asking the index again, rather than (as today) always
 retrieving afresh against the quoted answer-plus-follow-up text; that
 is not phase 4, so treat this as reserved rather than dead.")
-
-(defcustom arc-scope-presets
-  '(("everything" . nil)
-    ("vault"      . (:collections ("vault")))
-    ("options"    . (:collections ("nix options" "hm options")))
-    ("dotfiles"   . (:collections ("dotfiles"))))
-  "Named scopes offered by `arc-ui-change-scope'.
-Each entry is (NAME . SCOPE-PLIST); a nil plist means the whole
-corpus.  These are the scopes a reader can reach from inside an
-answer; `arc-ask' itself accepts any scope plist."
-  :type '(alist :key-type string :value-type sexp)
-  :group 'arc)
 
 (defvar-local arc-ui--last-scope nil
   "The scope the most recent answer in this buffer was retrieved at.

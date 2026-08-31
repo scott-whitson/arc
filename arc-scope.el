@@ -46,9 +46,24 @@
 
 (defun arc-scope (&rest keys)
   "Return a scope plist built from KEYS.
-Recognized keys: :collections, :kinds, :tags (each a list of strings)
-and :path-prefix (a string).  A scope with none of them -- like nil
-itself -- means the whole corpus."
+Recognized keys: :collections, :kinds, :tags (each a list of strings),
+:path-prefix (a string), and :all (any non-nil value).  A scope with
+none of :collections, :kinds, :tags or :path-prefix restricts
+nothing -- nil itself is exactly this, the empty plist, and means the
+whole corpus.
+
+:all exists because nil is ambiguous to some callers even though it
+is unambiguous here: `arc-ask-normalize-scope' treats a bare nil
+SECOND ARGUMENT to `arc-ask' as \"caller specified no scope, use
+`arc-enabled-collections'\" -- a different meaning than this
+function's own \"restricts nothing\". `(arc-scope :all t)' is a
+non-nil plist whose first element is a keyword, so it passes straight
+through `arc-ask-normalize-scope' unchanged, while still restricting
+nothing: `arc-scope-empty-p' still reports it empty, because :all
+names no actual restriction for `arc-scope-predicate' to compile. It
+is the one value a caller of `arc-ask' can pass to unambiguously mean
+\"the whole corpus\", which is what `arc-scope-presets''s
+\"everything\" entry uses."
   keys)
 
 (defun arc-scope-empty-p (scope)
@@ -123,6 +138,19 @@ silently pick a wrong retrieval strategy rather than error."
                  (when-let ((p (plist-get scope :path-prefix))) (concat "under " p))))
      "; ")))
 
+(defcustom arc-scope-presets
+  '(("everything" . (:all t))
+    ("vault"      . (:collections ("vault")))
+    ("options"    . (:collections ("nix options" "hm options")))
+    ("dotfiles"   . (:collections ("dotfiles"))))
+  "Named scopes offered by `arc-ui-change-scope'.
+Each entry is (NAME . SCOPE-PLIST).  \"everything\" is `(:all t)'
+rather than nil: see `arc-scope''s docstring for why a bare nil here
+would not survive `arc-ask-normalize-scope' as \"the whole corpus\".
+These are the scopes a reader can reach from inside an answer;
+`arc-ask' itself accepts any scope plist."
+  :type '(alist :key-type string :value-type sexp)
+  :group 'arc)
 
 (defconst arc-vec0-k-ceiling 4096
   "The largest `k' sqlite-vec's KNN operator accepts.
