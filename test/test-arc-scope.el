@@ -96,3 +96,82 @@ what they each count would silently pick a wrong retrieval strategy."
    (as--seed (arc-db))
    (sqlite-execute (arc-db) "INSERT INTO data (source_id, chunk) VALUES (NULL, 'orphan');")
    (should (= (arc-scope-total) (arc-scope-count nil)))))
+
+(ert-deftest as-plan-unscoped-uses-plain-knn ()
+  (arc-test-with-temp-db
+   (as--seed (arc-db))
+   (should (equal (arc-scope-vector-plan nil) (cons 'knn arc-knn-candidates)))))
+
+(ert-deftest as-plan-small-scope-uses-brute-force ()
+  (arc-test-with-temp-db
+   (as--seed (arc-db))
+   ;; 3 rows is far under `arc-scope-bruteforce-max'.
+   (should (equal (arc-scope-vector-plan (arc-scope :collections '("vault")))
+                  '(brute . nil)))))
+
+(ert-deftest as-plan-large-scope-raises-k-proportionally ()
+  "A scope too big to brute-force gets a k scaled by how much of the
+corpus it excludes, so roughly `arc-knn-candidates' land in scope."
+  (arc-test-with-temp-db
+   (as--seed (arc-db))
+   (let ((arc-scope-bruteforce-max 1)      ; force the knn branch
+         (arc-knn-candidates 40))
+     ;; vault is 3 of 8 rows; 40 * 8/3 = 106.67 -> 107
+     (should (equal (arc-scope-vector-plan (arc-scope :collections '("vault")))
+                    '(knn . 107))))))
+
+(ert-deftest as-plan-falls-back-to-brute-force-past-the-k-ceiling ()
+  "vec0 refuses k > 4096.  Correctness of the scope wins over speed."
+  (arc-test-with-temp-db
+   (as--seed (arc-db))
+   (let ((arc-scope-bruteforce-max 1)
+         (arc-knn-candidates 40000))       ; forces a k far past the ceiling
+     (should (equal (arc-scope-vector-plan (arc-scope :collections '("vault")))
+                    '(brute . nil))))))
+
+(ert-deftest as-plan-empty-scope-does-not-divide-by-zero ()
+  (arc-test-with-temp-db
+   (as--seed (arc-db))
+   (let ((arc-scope-bruteforce-max 0))
+     (should (equal (arc-scope-vector-plan (arc-scope :collections '("nope")))
+                    '(brute . nil))))))
+
+(ert-deftest as-k-ceiling-matches-what-vec0-actually-enforces ()
+  "Measured, not assumed: k = 4097 must be refused and k = 4096 accepted.
+
+vec0 itself enforces this at the C level -- confirmed independently
+via Python's `sqlite3' binding against this exact table, which raises
+\"k value in knn query too large, provided 4097 and the limit is 4096\"
+for k = 4097.  But Emacs 30.2's `sqlite-select' does not propagate that
+particular vtab `xFilter' error as a Lisp signal when it is the very
+first row fetched: in list mode (the default, `RETURN-TYPE' nil) it
+silently returns nil, as if the query had matched zero rows, instead
+of raising `sqlite-error'.  A plain SQL syntax error on the same
+connection still signals normally -- `(sqlite-select db \"SLECT ...\")'
+does raise -- so this is specific to an error surfaced from a virtual
+table's `xFilter' on the first `sqlite3_step', not a general breakage
+of error propagation.  `RETURN-TYPE' `set' plus `sqlite-next' does
+propagate it correctly, and is what this test uses.
+
+This matters beyond the test itself: it means `arc-scope-vector-plan'
+must never depend on vec0 refusing an oversized `k' as a catchable
+error.  In this Emacs, that failure mode is not an exception to catch
+-- it is a silent, wrong, empty result set from ordinary list-mode
+`sqlite-select'.  Whichever later task issues the real KNN query
+against a computed `k' should use `set' plus `sqlite-next' (or
+otherwise avoid ever asking for `k' > `arc-vec0-k-ceiling') for exactly
+this reason."
+  (let ((db (sqlite-open)))
+    (sqlite-load-extension db arc-sqlite-vec-path)
+    (sqlite-execute db "CREATE VIRTUAL TABLE data_embeddings USING vec0(embedding float[3]);")
+    (sqlite-execute db (format "INSERT INTO data_embeddings(rowid, embedding) VALUES (1, %s);"
+                               (arc-vector-to-sqlite [1.0 0.0 0.0])))
+    (let ((q (arc-vector-to-sqlite [1.0 0.0 0.0])))
+      (should (sqlite-next
+               (sqlite-select db (format "SELECT rowid FROM data_embeddings WHERE embedding MATCH %s AND k = %d;"
+                                        q arc-vec0-k-ceiling)
+                              nil 'set)))
+      (should-error (sqlite-next
+                     (sqlite-select db (format "SELECT rowid FROM data_embeddings WHERE embedding MATCH %s AND k = %d;"
+                                              q (1+ arc-vec0-k-ceiling))
+                                    nil 'set))))))

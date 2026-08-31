@@ -107,5 +107,62 @@ silently pick a wrong retrieval strategy rather than error."
                  (when-let ((p (plist-get scope :path-prefix))) (concat "under " p))))
      "; ")))
 
+
+(defconst arc-vec0-k-ceiling 4096
+  "The largest `k' sqlite-vec's KNN operator accepts.
+Measured against sqlite-vec 0.1.6: `k = 4097' fails with \"k value in
+knn query too large\".  This is why a sufficiently narrow scope cannot
+simply raise `k' until enough in-scope rows appear, and why
+`arc-scope-vector-plan' has a brute-force branch at all.")
+
+(defcustom arc-knn-candidates 40
+  "How many nearest neighbours retrieval wants to consider.
+For an unscoped query this is `k' directly.  For a scoped one it is
+the number of neighbours wanted *within the scope*, which is what
+`arc-scope-vector-plan' scales `k' up to approximate."
+  :type 'integer
+  :group 'arc)
+
+(defcustom arc-scope-bruteforce-max 2000
+  "Largest scope, in chunks, searched by brute-force distance.
+Brute force is exact -- it considers every row in scope and no row
+outside it -- and its cost tracks the size of the scope rather than
+the size of the corpus, because SQLite evaluates the distance function
+only on the joined rows.  Measured on this corpus at roughly 0.2 ms per
+row in scope: a 428-row scope took 54 ms, all 7,405 rows took 1.59 s.
+2000 keeps the worst case near 400 ms."
+  :type 'integer
+  :group 'arc)
+
+(defun arc-scope-vector-plan (scope)
+  "Decide how to run vector search for SCOPE.
+Return a cons (STRATEGY . K): either (knn . K), meaning run vec0's KNN
+operator asking for K neighbours and keep the ones in scope, or
+(brute . nil), meaning compute the distance directly over the scoped
+rows.
+
+An unscoped query always takes the KNN operator: there is nothing to
+filter afterwards, so its result is already exact, and it is two
+orders of magnitude faster than brute force across a whole corpus.
+
+A scoped query has to get `arc-knn-candidates' rows *from inside the
+scope*.  Brute force does that exactly, at a cost proportional to the
+scope, so a scope up to `arc-scope-bruteforce-max' takes it.  A larger
+scope asks the KNN operator for proportionally more neighbours --
+enough that roughly `arc-knn-candidates' of them should land in scope
+-- unless that number exceeds `arc-vec0-k-ceiling', in which case
+there is no k that can work and brute force is the only correct
+option, whatever it costs."
+  (if (arc-scope-empty-p scope)
+      (cons 'knn arc-knn-candidates)
+    (let ((n (arc-scope-count scope)))
+      (if (or (zerop n) (<= n arc-scope-bruteforce-max))
+          (cons 'brute nil)
+        (let* ((total (arc-scope-total))
+               (k (ceiling (* arc-knn-candidates (/ (float total) n)))))
+          (if (<= k arc-vec0-k-ceiling)
+              (cons 'knn k)
+            (cons 'brute nil)))))))
+
 (provide 'arc-scope)
 ;;; arc-scope.el ends here
