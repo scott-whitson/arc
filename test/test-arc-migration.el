@@ -81,7 +81,11 @@ different error, or none, and this test would catch that instead."
      (arc--migrate-db db)
      (should (arc--column-exists-p db "sources" "tags"))
      (should (= 1 (caar (sqlite-select db "SELECT count(*) FROM sources;"))))
-     (should (= 2 (caar (sqlite-select db "PRAGMA user_version;")))))))
+     ;; The constant, not a literal: a migration lands with its own test,
+     ;; and pinning the number here means every future one also fails a
+     ;; test about tags, which reads like an unrelated regression.
+     (should (= arc-db-schema-version
+                (caar (sqlite-select db "PRAGMA user_version;")))))))
 
 (ert-deftest am-migration-is-idempotent ()
   (arc-test-with-temp-db

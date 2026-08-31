@@ -636,6 +636,11 @@ prune against."
                       (arc--prioritize-manuals (arc-get-builtin-manuals)
                                                 arc-index-info-priority-manuals)
                       arc-index-info-cap))))))
+      ;; Record what this collection was built FROM, when that is the
+      ;; freshness signal. Cheap, and it is what lets `arc-freshness-report'
+      ;; answer for 37,780 derived sources with one string comparison.
+      (when-let ((prov (arc-collection-provenance-now (cdr cell))))
+        (arc-set-collection-provenance name prov))
       (cond
        ((eq kept arc--reindex-skipped) nil) ; already reported; nothing to prune
        ((null kept)
@@ -986,6 +991,170 @@ active."
         (setq arc--reindex-async-active nil)
         (message "arc: cancelling reindex; sources already fully embedded keep their new content, sources caught mid-embedding keep their old content"))
     (message "arc: no asynchronous reindex is running")))
+
+(defconst arc-freshness-per-source-kinds '("file" "org-node")
+  "Kinds whose freshness is a per-source content hash.
+Everything else is derived from immutable inputs -- Info manuals from a
+Nix store path, options from a flake.lock revision -- and cannot change
+without that input changing. Measured on this corpus: 656 sources are
+mutable and 37,780 are not, so hashing everything would be sixty times
+the work to learn one bit per collection.")
+
+(defun arc--flake-provenance (dir)
+  "Return a provenance string for the flake at DIR, or nil."
+  (let ((lock (expand-file-name "flake.lock" dir)))
+    (when (file-readable-p lock)
+      (concat "flake.lock:" (arc-file-hash lock)))))
+
+(defun arc--info-provenance ()
+  "Return a provenance string for the Info manuals arc can see.
+Info files live in the Nix store, so the resolved directory list changes
+exactly when the Emacs closure does -- which is the only way a manual's
+content can change."
+  (concat "info-dirs:"
+          (secure-hash 'sha1 (mapconcat #'identity
+                                        (sort (copy-sequence
+                                               (or (bound-and-true-p Info-directory-list)
+                                                   (bound-and-true-p Info-default-directory-list)
+                                                   '()))
+                                              #'string<)
+                                        ":"))))
+
+(defun arc-collection-provenance-now (chunker)
+  "Return the CURRENT provenance for a collection built by CHUNKER.
+nil means this collection's freshness is per-source instead."
+  (pcase chunker
+    ('info (arc--info-provenance))
+    ('nixopt (arc--flake-provenance arc-nixopt-flake))
+    ('hmopt (arc--flake-provenance arc-hm-flake))
+    (_ nil)))
+
+(defun arc-freshness-report ()
+  "Return a per-collection freshness list of (NAME KIND STATE DETAIL).
+STATE is `fresh', `stale', `unknown' or `absent'.
+
+Two mechanisms, because the corpus holds two kinds of source. For
+collections built from files or org nodes, recorded hashes are compared
+against the files on disk. For collections derived from a flake.lock or
+a Nix store path, the recorded provenance is compared against the
+current one -- one string, not 37,780 hashes.
+
+`unknown' is reported wherever there is no evidence: a collection
+indexed before provenance recording, or sources indexed before hashing.
+It is deliberately not folded into `stale'. They are different claims,
+and an index predating hashing would otherwise read as \"everything just
+changed\", which is noise a reader learns to ignore -- and a freshness
+report nobody reads is the thing this replaces."
+  (mapcar
+   (lambda (cell)
+     (let* ((name (car cell))
+            (chunker (cdr cell))
+            (indexed (caar (sqlite-select
+                            (arc-db)
+                            (format "SELECT count(*) FROM sources s
+                                     JOIN data d ON d.source_id = s.id
+                                     WHERE d.collection_id =
+                                       (SELECT id FROM collections WHERE name = %s);"
+                                    (arc--sql-quote name)))))
+            (want (arc-collection-provenance-now chunker)))
+       (cond
+        ((or (null indexed) (zerop indexed))
+         (list name chunker 'absent "never indexed"))
+        (want
+         (let ((have (arc-collection-provenance name)))
+           (cond ((null have) (list name chunker 'unknown "no provenance recorded"))
+                 ((equal have want) (list name chunker 'fresh nil))
+                 (t (list name chunker 'stale "input changed")))))
+        (t
+         (let ((rows (sqlite-select
+                      (arc-db)
+                      (format "SELECT DISTINCT s.path, s.hash FROM sources s
+                               JOIN data d ON d.source_id = s.id
+                               WHERE s.path IS NOT NULL AND d.collection_id =
+                                 (SELECT id FROM collections WHERE name = %s);"
+                              (arc--sql-quote name))))
+               (gone 0) (changed 0) (unhashed 0))
+           (dolist (row rows)
+             (let ((path (nth 0 row)) (hash (nth 1 row)))
+               (cond ((not (file-readable-p path)) (setq gone (1+ gone)))
+                     ((null hash) (setq unhashed (1+ unhashed)))
+                     ((not (equal hash (arc-file-hash path)))
+                      (setq changed (1+ changed))))))
+           (cond
+            ((and (zerop gone) (zerop changed) (zerop unhashed))
+             (list name chunker 'fresh nil))
+            ((and (zerop gone) (zerop changed))
+             (list name chunker 'unknown
+                   (format "%d source(s) indexed before hashing" unhashed)))
+            (t (list name chunker 'stale
+                     (string-join
+                      (delq nil
+                            (list (and (> changed 0) (format "%d changed" changed))
+                                  (and (> gone 0) (format "%d gone" gone))
+                                  (and (> unhashed 0) (format "%d unhashed" unhashed))))
+                      ", ")))))))))
+   arc-index-plan))
+
+(defun arc-freshness-summary ()
+  "Return a compact summary of `arc-freshness-report', or nil if all fresh.
+Counts rather than names: the header line already carries a per-kind
+chunk count, and appending six collection names made it unreadable.
+`M-x arc-freshness' has the detail."
+  (let* ((report (arc-freshness-report))
+         (n (lambda (state) (cl-count-if (lambda (r) (eq (nth 2 r) state)) report)))
+         (stale (funcall n 'stale))
+         (unknown (funcall n 'unknown))
+         (absent (funcall n 'absent)))
+    (when (> (+ stale unknown absent) 0)
+      (string-join
+       (delq nil (list (and (> stale 0) (format "%d stale" stale))
+                       (and (> unknown 0) (format "%d unknown" unknown))
+                       (and (> absent 0) (format "%d unindexed" absent))))
+       " · "))))
+
+;;;###autoload
+(defun arc-freshness ()
+  "Report which collections are stale, and why."
+  (interactive)
+  (let ((report (arc-freshness-report)))
+    (with-current-buffer (get-buffer-create "*arc-freshness*")
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "arc freshness\n\n")
+        (dolist (r report)
+          (insert (format "  %-9s %-18s %s%s\n"
+                          (nth 2 r) (nth 0 r) (or (nth 3 r) "")
+                          (if (member (format "%s" (nth 1 r)) '("file" "org"))
+                              "  (per-source hash)" "  (input provenance)")))))
+      (goto-char (point-min))
+      (special-mode)
+      (pop-to-buffer (current-buffer)))))
+
+(defcustom arc-freshness-cache-ttl 30
+  "Seconds `arc-freshness-summary-cached' may reuse an answer.
+Longer than `arc-index-stats-cache-ttl' because the per-source half
+re-hashes every mutable source -- 656 files on this corpus -- and the
+header line asks on every redisplay. Staleness that is 30 seconds out of
+date is still staleness you can see."
+  :type 'number :group 'arc)
+
+(defvar arc--freshness-cache nil
+  "Cached summary as (GENERATION TIMESTAMP SUMMARY), or nil.")
+
+(defun arc-freshness-summary-cached ()
+  "Like `arc-freshness-summary', but reuse a recent answer.
+Invalidated by `arc-index--write-generation' or the TTL, exactly as
+`arc-index-stats-cached' is."
+  (unless (pcase arc--freshness-cache
+            (`(,gen ,ts ,_)
+             (and (eq gen arc-index--write-generation)
+                  (> arc-freshness-cache-ttl 0)
+                  (< (float-time (time-since ts)) arc-freshness-cache-ttl)))
+            (_ nil))
+    (setq arc--freshness-cache
+          (list arc-index--write-generation (current-time)
+                (condition-case nil (arc-freshness-summary) (error "unknown")))))
+  (nth 2 arc--freshness-cache))
 
 (provide 'arc-index)
 ;;; arc-index.el ends here

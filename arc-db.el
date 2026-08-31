@@ -75,7 +75,19 @@ Defaults to the ARC_VEC0_PATH environment variable (set by Nix)."
 
 (defun arc-collections-create-table-sql ()
   "Generate sql for create collections table."
-  "CREATE TABLE IF NOT EXISTS collections (id INTEGER PRIMARY KEY, name TEXT UNIQUE);")
+  "CREATE TABLE IF NOT EXISTS collections (id INTEGER PRIMARY KEY, name TEXT UNIQUE, provenance TEXT);")
+
+(defun arc-collection-provenance (name)
+  "Return the recorded provenance of collection NAME, or nil."
+  (caar (sqlite-select (arc-db)
+                       (format "SELECT provenance FROM collections WHERE name = %s;"
+                               (arc--sql-quote name)))))
+
+(defun arc-set-collection-provenance (name value)
+  "Record VALUE as collection NAME's provenance."
+  (sqlite-execute (arc-db)
+                  (format "UPDATE collections SET provenance = %s WHERE name = %s;"
+                          (arc--sql-quote value) (arc--sql-quote name))))
 
 (defun arc-kinds-create-table-sql ()
   "Generate sql for create kinds table."
@@ -93,8 +105,12 @@ Defaults to the ARC_VEC0_PATH environment variable (set by Nix)."
   (format "INSERT INTO kinds (name) VALUES %s ON CONFLICT DO NOTHING;"
           (mapconcat (lambda (k) (format "('%s')" k)) arc-kind-list ", ")))
 
-(defconst arc-db-schema-version 2
+(defconst arc-db-schema-version 3
   "Current schema version.  Bump when adding a migration.
+3 added `collections.provenance': freshness for the kinds whose content
+cannot change without an underlying store path or flake.lock changing.
+Per-source hashing would be 37,780 hashes to learn one bit -- see
+`arc-freshness-report'.
 2 added `sources.tags' -- org tags, colon-delimited -- so a query can
 be scoped to a tag without arc having to load org-roam's own database.")
 
@@ -178,6 +194,7 @@ number claims otherwise."
 Idempotent: safe to run on a fresh database, on a current one, and on
 one interrupted midway through an earlier migration."
   (arc--ensure-column db "sources" "tags" "TEXT")
+  (arc--ensure-column db "collections" "provenance" "TEXT")
   (sqlite-execute db (format "PRAGMA user_version = %d;" arc-db-schema-version)))
 
 (defun arc-source-upsert (plist)

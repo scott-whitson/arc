@@ -28,6 +28,7 @@
 (require 'org-element)
 (require 'subr-x)
 (require 'arc-chunk) ; arc-chunk-text, for oversized nodes -- see arc--org-node-chunks
+(require 'arc-source-file) ; arc-file-hash, so a node carries its file's hash
 
 (defun arc--org-file-keyword (key)
   "Return the value of #+KEY in the current buffer, or nil."
@@ -63,6 +64,10 @@ a vector describing only a couple of percent of its actual content."
                 :title (or (arc--org-file-keyword "title")
                            (file-name-base path))
                 :tags (arc--org-filetags)
+                :hash (arc-file-hash path)
+                :mtime (truncate (float-time
+                                  (file-attribute-modification-time
+                                   (file-attributes path))))
                 :text text
                 :chunks (arc--org-node-chunks text)))))))
 
@@ -79,6 +84,15 @@ a vector describing only a couple of percent of its actual content."
              (push (list :kind "org-node" :org-id id :path path
                          :title (org-get-heading t t t t)
                          :tags (org-get-tags)
+                         ;; The FILE's hash, deliberately, not the node's:
+                         ;; `arc-file-changed-p' then works identically for
+                         ;; org nodes and plain files, and one staleness rule
+                         ;; beats two. A file edit marks all its nodes stale,
+                         ;; which is correct -- any of them may have moved.
+                         :hash (arc-file-hash path)
+                         :mtime (truncate (float-time
+                                           (file-attribute-modification-time
+                                            (file-attributes path))))
                          :text text
                          :chunks (arc--org-node-chunks text))
                    nodes)))))

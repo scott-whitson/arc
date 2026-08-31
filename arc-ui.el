@@ -38,6 +38,7 @@
 (require 'arc-scope)
 
 (declare-function arc-index-stats-cached "arc-index")
+(declare-function arc-freshness-summary-cached "arc-index")
 (declare-function arc-ask "arc" (question &optional scope heading))
 (declare-function arc-ask-vault "arc" (question))
 (declare-function arc-ask-options "arc" (question))
@@ -112,21 +113,36 @@ unimplemented.")
         (arc-answer-mode)))
     buf))
 
+(defcustom arc-ui-header-freshness t
+  "Whether the answer buffer's header line reports staleness.
+On by default because invisible staleness is the failure this project
+was built out of: the previous assistant indexed nothing for six weeks
+and went on answering fluently from the Emacs manuals alone. A corpus
+summary that cannot say \"stale\" is a summary that lies by omission."
+  :type 'boolean :group 'arc)
+
 (defun arc-ui-header-line ()
   "Return a one-line corpus summary for the answer buffer's header.
-Reports size only.  Staleness needs the freshness tracking that phase 5
-adds; until then this must not imply the corpus is current.  An index
-that cannot be read reports that rather than signalling, because a
-header line must never break the buffer it heads."
+Reports size, and staleness when `arc-ui-header-freshness' is on.  An
+index that cannot be read reports that rather than signalling, because a
+header line must never break the buffer it heads.
+
+Both halves come from cached accessors: this runs on every redisplay,
+and the underlying queries are not cheap on a real corpus."
   (condition-case err
       (let* ((stats (arc-index-stats-cached))
              (total (apply #'+ (mapcar #'cdr stats))))
         (if (null stats)
             "arc · corpus empty — run M-x arc-reindex-all"
-          (format "arc · %d chunks · %s"
-                  total
-                  (mapconcat (lambda (c) (format "%s %d" (car c) (cdr c)))
-                             stats " · "))))
+          (concat
+           (format "arc · %d chunks · %s"
+                   total
+                   (mapconcat (lambda (c) (format "%s %d" (car c) (cdr c)))
+                              stats " · "))
+           (when arc-ui-header-freshness
+             (if-let ((stale (arc-freshness-summary-cached)))
+                 (format "  ⚠ %s" stale)
+               "  ✓ fresh")))))
     (error (format "arc · corpus unavailable (%s)"
                    (error-message-string err)))))
 

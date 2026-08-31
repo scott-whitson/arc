@@ -11,7 +11,7 @@
 
 (ert-deftest adb-schema-version-is-set ()
   (arc-test-with-temp-db
-   (should (= (arc-db-schema-version) 2))))
+   (should (= (arc-db-schema-version) arc-db-schema-version))))
 
 (ert-deftest adb-sources-table-exists ()
   (arc-test-with-temp-db
@@ -110,7 +110,7 @@ db with no tables, which is exactly how the previous run's confusing
    ;; fresh, fully-initialized database rather than a table-less one.
    (should (null arc--db))
    (let ((arc-sqlite-vec-path (getenv "ARC_VEC0_PATH")))
-     (should (= (arc-db-schema-version) 2)))))
+     (should (= (arc-db-schema-version) arc-db-schema-version)))))
 
 (ert-deftest adb-broken-vec0-extension-signals-clear-error-naming-path ()
   "A file that exists, passes Emacs's own `sqlite-load-extension' \
