@@ -15,15 +15,35 @@
 (defun ass--seed ()
   "Seed a corpus where the global nearest neighbours are ALL out of scope.
 This is the shape measured on the live index: a vault-scoped question
-whose 40 nearest global neighbours were 40 dotfiles chunks.  20 near
-`decoy' rows in `dotfiles' crowd out the 2 `vault' rows entirely at any
-small k."
+whose 40 nearest global neighbours were 40 dotfiles chunks.  60 `decoy'
+rows in `dotfiles' -- all closer to the query vector than either vault
+row -- crowd the 2 `vault' rows out of a k=40 global top-k entirely.
+60 is deliberate: the pre-scope code hardcoded `k = 40' and never read
+`arc-knn-candidates', so the fixture has to beat that literal 40 to
+reproduce the defect against the old code, not just against whatever
+this task's `arc-knn-candidates' happens to be set to.
+
+The vault rows' text deliberately omits the literal word `syncthing'.
+The pre-scope code already scoped its *keyword* search correctly (it
+inlined the same in-scope rowid list into both the semantic filter and
+the keyword filter -- see the `arc--find-similar' docstring on the
+double inlining); only the *vector* side ran an unscoped k=40 KNN and
+filtered afterwards.  A fixture where every chunk literally contains
+the query word lets a correctly-scoped keyword match paper over a
+broken vector match, so the old code would still find the vault rows
+via BM25 regardless of decoy count -- measured, not assumed: probed
+directly against the pre-task keyword_search shape and it matches both
+vault rows before any vector logic runs at all.  Keeping the query word
+out of the vault text isolates the vector path, which is the actual
+subject of this regression."
   (let ((db (arc-db)))
     (sqlite-execute db "INSERT INTO collections (name) VALUES ('vault'), ('dotfiles');")
     (let ((vault (caar (sqlite-select db "SELECT id FROM collections WHERE name='vault'")))
           (dots (caar (sqlite-select db "SELECT id FROM collections WHERE name='dotfiles'"))))
-      ;; 20 dotfiles rows very close to the query vector [1 0 0]
-      (dotimes (i 20)
+      ;; 60 dotfiles rows very close to the query vector [1 0 0] -- more
+      ;; than the old code's hardcoded k=40, so its global top-40 is all
+      ;; decoys and contains neither vault row.
+      (dotimes (i 60)
         (let ((sid (arc-source-upsert (list :kind "file" :path (format "/dots/f%d.nix" i)))))
           (sqlite-execute db (format "INSERT INTO data (source_id, collection_id, chunk) VALUES (%d, %d, 'syncthing decoy %d');"
                                      sid dots i))
@@ -38,12 +58,12 @@ small k."
         (let ((sid (arc-source-upsert (list :kind "org-node" :org-id (format "v%d" i)
                                             :path (format "/vault/v%d.org" i)
                                             :tags '("infra")))))
-          (sqlite-execute db (format "INSERT INTO data (source_id, collection_id, chunk) VALUES (%d, %d, 'syncthing vault note %d');"
+          (sqlite-execute db (format "INSERT INTO data (source_id, collection_id, chunk) VALUES (%d, %d, 'vault infra runbook %d');"
                                      sid vault i))
           (let ((rid (caar (sqlite-select db "SELECT last_insert_rowid();"))))
             (sqlite-execute db (format "INSERT INTO data_embeddings(rowid, embedding) VALUES (%d, %s);"
                                        rid (arc-vector-to-sqlite (vector 0.6 0.8 0.0))))
-            (sqlite-execute db (format "INSERT INTO data_fts(rowid, data) VALUES (%d, 'syncthing vault note %d');"
+            (sqlite-execute db (format "INSERT INTO data_fts(rowid, data) VALUES (%d, 'vault infra runbook %d');"
                                        rid i))))))))
 
 (defun ass--collections-of (ids)

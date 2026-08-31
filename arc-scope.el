@@ -164,5 +164,12 @@ option, whatever it costs."
               (cons 'knn k)
             (cons 'brute nil)))))))
 
+(defun arc-scope-from-collections (collections)
+  "Return a scope restricting to COLLECTIONS, or an empty scope for nil.
+Callers that hold a plain list of collection names -- `arc-ask' with
+its documented list argument, `arc-enabled-collections' -- go through
+here rather than building a plist inline."
+  (if collections (arc-scope :collections collections) (arc-scope)))
+
 (provide 'arc-scope)
 ;;; arc-scope.el ends here
