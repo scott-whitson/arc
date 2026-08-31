@@ -13,29 +13,32 @@
 (defconst ass-dim 3)
 
 (defun ass--seed ()
-  "Seed a corpus where the global nearest neighbours are ALL out of scope.
-This is the shape measured on the live index: a vault-scoped question
-whose 40 nearest global neighbours were 40 dotfiles chunks.  60 `decoy'
-rows in `dotfiles' -- all closer to the query vector than either vault
-row -- crowd the 2 `vault' rows out of a k=40 global top-k entirely.
-60 is deliberate: the pre-scope code hardcoded `k = 40' and never read
-`arc-knn-candidates', so the fixture has to beat that literal 40 to
-reproduce the defect against the old code, not just against whatever
-this task's `arc-knn-candidates' happens to be set to.
+  "Seed a corpus exercising scoped retrieval across all four scope kinds.
+60 `decoy' rows sit in `dotfiles', very close to the query vector; 2
+`vault' rows, further away, are the only rows any of this file's
+scopes admit -- by collection, by kind (`org-node'), and by tag
+(`infra').  A fifth scope, an empty/no-match collection name, proves
+retrieval fails closed rather than erroring.
 
-The vault rows' text deliberately omits the literal word `syncthing'.
-The pre-scope code already scoped its *keyword* search correctly (it
-inlined the same in-scope rowid list into both the semantic filter and
-the keyword filter -- see the `arc--find-similar' docstring on the
-double inlining); only the *vector* side ran an unscoped k=40 KNN and
-filtered afterwards.  A fixture where every chunk literally contains
-the query word lets a correctly-scoped keyword match paper over a
-broken vector match, so the old code would still find the vault rows
-via BM25 regardless of decoy count -- measured, not assumed: probed
-directly against the pre-task keyword_search shape and it matches both
-vault rows before any vector logic runs at all.  Keeping the query word
-out of the vault text isolates the vector path, which is the actual
-subject of this regression."
+This fixture does NOT reproduce a \"the old code returns zero ids\"
+failure, and no claim here should be read as saying it does. The
+pre-task code inlined one rowid list into both the semantic filter and
+the keyword filter, so the keyword side was already correctly scoped
+(vault rows below deliberately omit the literal query word `syncthing'
+so that correct-but-irrelevant keyword path can't paper over the
+vector side). On the vector side, measured against both this fixture
+and a copy of the live 6,855-row index: SQLite inlines a CTE referenced
+exactly once and pushes the resulting `rowid IN (...)' constraint into
+vec0's scan, so the pre-task query already restricted the KNN to the
+scoped rowids in practice -- it could not be made to fail on the
+ids-survive question at any scope size tried (2 through 6,000
+elements). Forcing that same CTE to `MATERIALIZED' (defeating the
+inlining) reproduces the intended defect, confirming the old query's
+correctness depended on an optimizer choice, not on its own text. That
+is the actual justification for this task: scoping that no longer
+depends on SQLite choosing to flatten a once-referenced CTE, plus
+`:kinds'/`:tags'/`:path-prefix' scoping the old collection-only rowid
+list could not express at all."
   (let ((db (arc-db)))
     (sqlite-execute db "INSERT INTO collections (name) VALUES ('vault'), ('dotfiles');")
     (let ((vault (caar (sqlite-select db "SELECT id FROM collections WHERE name='vault'")))

@@ -275,11 +275,21 @@ semantic_search AS (
   "Return the SQL selecting chunks in SCOPE similar to TEXT.
 SCOPE is a scope plist (see `arc-scope'); nil means the whole corpus.
 The scope reaches the search rather than filtering its results: both
-the vector side and the FTS side join against the `scoped' CTE.  That
-is the whole point of this function -- the previous version ran a
-fixed k=40 KNN across the entire corpus and filtered afterwards, so a
-narrow scope whose rows were not among the global top 40 came back
-with no semantic candidates whatsoever."
+the vector side and the FTS side join against the `scoped' CTE."
+  ;; For collection scoping specifically, the previous version's inlined
+  ;; `rowid IN (...)' filter was already effective in practice: SQLite
+  ;; inlines a CTE referenced exactly once and pushes that IN-list into
+  ;; vec0's scan, so the old "unscoped k=40 KNN, filter after" query text
+  ;; ran as an already-scoped one.  Confirmed by forcing that CTE to
+  ;; MATERIALIZED, which defeats the inlining and reproduces the
+  ;; "no semantic candidates" failure the flattening was quietly avoiding.
+  ;; That correctness was an accident of query shape, not a designed
+  ;; property -- a single future edit referencing the CTE a second time
+  ;; would have silently unscoped the search with no error -- and it only
+  ;; ever covered collections: a rowid IN-list has no way to express
+  ;; `:kinds', `:tags' or `:path-prefix', which did not exist in any form
+  ;; before this task.  The `scoped' CTE joined explicitly into both arms
+  ;; is what makes scoping true regardless of what the planner chooses.
   (let ((vec (arc-vector-to-sqlite
               (llm-embedding arc-embeddings-provider text))))
     (format "WITH
