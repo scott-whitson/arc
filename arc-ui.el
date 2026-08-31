@@ -37,7 +37,7 @@
 (require 'arc-source)
 (require 'arc-scope)
 
-(declare-function arc-index-stats "arc-index")
+(declare-function arc-index-stats-cached "arc-index")
 (declare-function arc-ask "arc" (question &optional scope heading))
 (declare-function arc-ask-vault "arc" (question))
 (declare-function arc-ask-options "arc" (question))
@@ -119,7 +119,7 @@ adds; until then this must not imply the corpus is current.  An index
 that cannot be read reports that rather than signalling, because a
 header line must never break the buffer it heads."
   (condition-case err
-      (let* ((stats (arc-index-stats))
+      (let* ((stats (arc-index-stats-cached))
              (total (apply #'+ (mapcar #'cdr stats))))
         (if (null stats)
             "arc · corpus empty — run M-x arc-reindex-all"

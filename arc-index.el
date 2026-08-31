@@ -194,6 +194,7 @@ See the README's Known Limitations for this."
         (arc--delete-data-for-source sid)
         (dolist (c chunks)
           (arc--insert-chunk-row sid cid (nth 0 c) (nth 1 c) (nth 2 c) (plist-get source :title) (nth 3 c)))
+        (arc-index--bump-write-generation)
         sid))))
 
 (defun arc--index-source-1 (source collection)
@@ -228,12 +229,55 @@ synchronous path: each chunk's embedding is fetched with a blocking
   (cdr (arc--index-source-1 source collection)))
 
 (defun arc-index-stats ()
-  "Return an alist of (KIND . CHUNK-COUNT)."
+  "Return an alist of (KIND . CHUNK-COUNT).
+Always queries.  `arc-index-stats-cached' is the one to call from
+anything that runs often."
   (mapcar (lambda (row) (cons (nth 0 row) (nth 1 row)))
           (sqlite-select (arc-db)
                          "SELECT s.kind, count(d.id) FROM sources s
                           LEFT JOIN data d ON d.source_id = s.id
                           GROUP BY s.kind;")))
+
+(defvar arc-index--write-generation 0
+  "Incremented by every function in arc that writes or deletes chunks.
+`arc-index-stats-cached' compares against it to know its cached answer
+is stale.  A counter rather than a timestamp because two writes inside
+the same second must still invalidate.")
+
+(defun arc-index--bump-write-generation ()
+  "Record that the corpus changed."
+  (setq arc-index--write-generation (1+ arc-index--write-generation)))
+
+(defcustom arc-index-stats-cache-ttl 5
+  "Seconds `arc-index-stats-cached' may reuse an answer.
+The write-generation counter catches every change THIS Emacs makes, so
+the TTL exists only for changes it cannot see: a reindex run from a
+second Emacs, or a batch job.  Set to 0 to disable caching entirely."
+  :type 'number :group 'arc)
+
+(defvar arc-index--stats-cache nil
+  "Cached `arc-index-stats' answer as (GENERATION TIMESTAMP STATS), or nil.")
+
+(defun arc-index-stats-cached ()
+  "Like `arc-index-stats', but reuse a recent answer.
+The header line calls this on every redisplay, and the underlying
+GROUP BY is not cheap once the corpus is real: measured on a
+63,302-chunk / 327 MB index it took about 30 ms warm and 810 ms cold,
+against 3.5 ms on the 7,405-chunk index it was written for.  At that
+size an uncached `:eval' header line makes the buffer feel broken.
+
+Invalidated by `arc-index--write-generation' (every write this Emacs
+makes) or by `arc-index-stats-cache-ttl' elapsing (writes it cannot
+see)."
+  (unless (pcase arc-index--stats-cache
+            (`(,gen ,ts ,_)
+             (and (eq gen arc-index--write-generation)
+                  (> arc-index-stats-cache-ttl 0)
+                  (< (float-time (time-since ts)) arc-index-stats-cache-ttl)))
+            (_ nil))
+    (setq arc-index--stats-cache
+          (list arc-index--write-generation (current-time) (arc-index-stats))))
+  (nth 2 arc-index--stats-cache))
 
 (defcustom arc-collection-directory-alist
   `(("dotfiles" . ,(expand-file-name "dotfiles" (getenv "HOME")))
@@ -389,6 +433,7 @@ simply had not finished syncing yet into 428 deleted sources on one
                            cid
                            (arc-sqlite-format-int-list kept-ids))))))
       (dolist (sid stale) (arc-source-delete sid))
+      (when stale (arc-index--bump-write-generation))
       (length stale))))
 
 (defconst arc--reindex-skipped :arc-reindex-skipped

@@ -564,7 +564,8 @@ When FORCE parse even if already parsed."
   "Delete data with IDS."
   (arc--delete-from-table "data_fts" ids)
   (arc--delete-from-table "data_embeddings" ids)
-  (arc--delete-from-table "data" ids))
+  (arc--delete-from-table "data" ids)
+  (when ids (arc-index--bump-write-generation)))
 
 (defun arc-parse-directory (dir)
   "Parse DIR as new collection syncronously."
