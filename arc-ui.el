@@ -35,9 +35,13 @@
 
 (require 'org)
 (require 'arc-source)
+(require 'arc-scope)
 
 (declare-function arc-index-stats "arc-index")
 (declare-function arc-ask "arc" (question &optional collections heading))
+(declare-function arc-ask-vault "arc" (question))
+(declare-function arc-ask-options "arc" (question))
+(declare-function arc-toggle-chat-model "arc")
 
 (defconst arc-ui-buffer-name "*arc*"
   "Name of the buffer arc renders answers into.")
@@ -50,6 +54,7 @@
     (define-key m (kbd "w")   #'arc-ui-capture)
     (define-key m (kbd "f")   #'arc-ui-follow-up)
     (define-key m (kbd "r")   #'arc-ui-reask)
+    (define-key m (kbd "s")   #'arc-ui-change-scope)
     m)
   "Keymap for `arc-answer-mode'.
 Acts on the answer at point.  Entry points live on the global `C-c i'
@@ -80,6 +85,24 @@ for a later phase that grounds a follow-up in the same retrieval
 without asking the index again, rather than (as today) always
 retrieving afresh against the quoted answer-plus-follow-up text; that
 is not phase 4, so treat this as reserved rather than dead.")
+
+(defcustom arc-scope-presets
+  '(("everything" . nil)
+    ("vault"      . (:collections ("vault")))
+    ("options"    . (:collections ("nix options" "hm options")))
+    ("dotfiles"   . (:collections ("dotfiles"))))
+  "Named scopes offered by `arc-ui-change-scope'.
+Each entry is (NAME . SCOPE-PLIST); a nil plist means the whole
+corpus.  These are the scopes a reader can reach from inside an
+answer; `arc-ask' itself accepts any scope plist."
+  :type '(alist :key-type string :value-type sexp)
+  :group 'arc)
+
+(defvar-local arc-ui--last-scope nil
+  "The scope the most recent answer in this buffer was retrieved at.
+Set by `arc-ask' as it renders, alongside `arc-ui--last-question'.
+`arc-ui-change-scope' reads it only to offer a sensible default; the
+scope it asks at is whatever the reader picks.")
 
 (defun arc-ui-buffer ()
   "Return the arc answer buffer, creating it in `arc-answer-mode' if needed."
@@ -244,6 +267,22 @@ Recovers from a bad sampling or a model swap without retyping."
     (user-error "arc: no previous question to re-ask"))
   (arc-ask arc-ui--last-question))
 
+(defun arc-ui-change-scope ()
+  "Re-ask this buffer's last question at a different scope.
+Deliberately re-asks `arc-ui--last-question' rather than the answer at
+point: changing scope is a question about the same question, and
+pairing one answer's text with a different scope's retrieval is the
+confusion `f' and `r' already had to be kept apart to avoid."
+  (interactive)
+  (unless arc-ui--last-question
+    (user-error "arc: no question asked in this buffer yet"))
+  (let* ((name (completing-read
+                (format "Re-ask %S at scope: "
+                        (truncate-string-to-width arc-ui--last-question 40 nil nil t))
+                (mapcar #'car arc-scope-presets) nil t))
+         (scope (alist-get name arc-scope-presets nil nil #'equal)))
+    (arc-ask arc-ui--last-question scope)))
+
 (defun arc-ui-follow-up ()
   "Ask a follow-up, carrying the answer at point as context.
 Reads the answer subtree at point (not necessarily the most recently
@@ -276,6 +315,9 @@ own."
   "arc."
   ["arc"
    ("i" "ask" arc-ask)
+   ("n" "ask the vault" arc-ask-vault)
+   ("o" "ask the options" arc-ask-options)
+   ("m" "toggle chat model" arc-toggle-chat-model)
    ("r" "reindex" arc-reindex-all)
    ("c" "cancel reindex" arc-reindex-cancel)])
 

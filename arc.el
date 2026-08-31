@@ -701,11 +701,6 @@ citation can name the line it actually came from."
         (arc-rerank prompt raw)
       (take arc-limit raw))))
 
-;; `arc-ui--last-scope' is defined with `defvar-local' in arc-ui.el as of
-;; Task 9.  This forward declaration lets this task's `arc-ask' set it and
-;; byte-compile clean on its own; remove it once Task 9 lands the real one.
-(defvar arc-ui--last-scope)
-
 (defun arc-ask-normalize-scope (scope)
   "Return SCOPE as a scope plist.
 Accepts three shapes, because `arc-ask' is public and its documented

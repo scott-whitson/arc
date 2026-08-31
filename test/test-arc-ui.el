@@ -579,3 +579,33 @@
   (aui-with-fresh-buffer
    (setq arc-ui--last-question nil)
    (should-error (arc-ui-follow-up) :type 'user-error)))
+
+(ert-deftest eu-s-is-bound-to-change-scope ()
+  (should (eq (keymap-lookup arc-answer-mode-map "s") #'arc-ui-change-scope)))
+
+(ert-deftest eu-change-scope-requires-a-previous-question ()
+  (with-temp-buffer
+    (arc-answer-mode)
+    (setq arc-ui--last-question nil)
+    (should-error (arc-ui-change-scope) :type 'user-error)))
+
+(ert-deftest eu-change-scope-reasks-the-last-question-at-the-new-scope ()
+  (let (asked-question asked-scope)
+    (with-temp-buffer
+      (arc-answer-mode)
+      (setq arc-ui--last-question "how do I enable syncthing")
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) "vault"))
+                ((symbol-function 'arc-ask)
+                 (lambda (q &optional s &rest _)
+                   (setq asked-question q asked-scope s))))
+        (arc-ui-change-scope)))
+    (should (equal asked-question "how do I enable syncthing"))
+    (should (equal asked-scope (alist-get "vault" arc-scope-presets nil nil #'equal)))))
+
+(ert-deftest eu-presets-cover-the-documented-scopes ()
+  (dolist (name '("everything" "vault" "options" "dotfiles"))
+    (should (assoc name arc-scope-presets))))
+
+(ert-deftest eu-everything-preset-is-an-empty-scope ()
+  (should (arc-scope-empty-p (alist-get "everything" arc-scope-presets nil nil #'equal))))
