@@ -691,7 +691,18 @@ more about term weighting than a hand-written stopword list does.
 Filtering oversized documents by hand is the same mistake. BM25's length
 normalisation already penalises them: this corpus contains a
 594,549-character Info index node, and across 330 retrieved results it
-was never returned once."
+was never returned once.
+
+Nor prefix queries (`term*'). The motivating case was exact and real: a
+question about the \"disk layout\" cannot match `disko/rafik.nix', because
+FTS5 does not stem and `disk' and `disko' are different tokens. Prefix
+matching closes that gap and makes everything worse anyway -- swept at
+floors of 3, 4, 5 and 6 characters it cost recall at every cutoff
+(0.70 to 0.67 at k=5, 0.91 to 0.85 at k=10) and took the miss count from
+three to five, because `disk*' also matches `disk', `disks' and
+`diskLayout' and the extra matches drown the signal. It did not even fix
+its motivating case. Three hand-tuned interventions have now lost to
+BM25's own weighting; treat that as the prior."
   (thread-last
     prompt
     (string-trim)
