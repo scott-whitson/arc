@@ -89,14 +89,20 @@ is not phase 4, so treat this as reserved rather than dead.")
 (defvar-local arc-ui--last-scope nil
   "The scope the most recent answer in this buffer was retrieved at.
 Set by `arc-ask' as it renders, alongside `arc-ui--last-question'.
-Currently write-only: nothing yet reads it back. A `rassoc' lookup
-against `arc-scope-presets' to offer a sensible default to
-`completing-read' would need exact structural equality against a
-preset's plist, and would silently fall through -- with no default
-offered rather than an error -- for a scope built by `arc-ask-vault',
-`arc-ask-options', or from a plain collection list, none of which
-build a plist `equal' to any preset's. Reserved rather than dead, the
-same way `arc-ui--last-sources' is.")
+Read by `arc-ui-reask' and `arc-ui-follow-up', which pass it straight
+back to `arc-ask' so re-asking or following up stays at whatever scope
+the buffer is currently at, rather than silently falling back to
+`arc-enabled-collections' -- passing nil here has never meant \"the
+same scope again\", it means \"use the default\", so the last scope
+this buffer actually used has to be threaded through explicitly.
+
+A `rassoc' lookup against `arc-scope-presets' to offer a sensible
+default to `completing-read' would still need exact structural
+equality against a preset's plist, and would silently fall through --
+with no default offered rather than an error -- for a scope built by
+`arc-ask-vault', `arc-ask-options', or from a plain collection list,
+none of which build a plist `equal' to any preset's; that use remains
+unimplemented.")
 
 (defun arc-ui-buffer ()
   "Return the arc answer buffer, creating it in `arc-answer-mode' if needed."
@@ -255,11 +261,15 @@ is unconfigured -- arc does not guess where your notes live."
 
 (defun arc-ui-reask ()
   "Ask the last question again, retrieving afresh.
-Recovers from a bad sampling or a model swap without retyping."
+Recovers from a bad sampling or a model swap without retyping.  Reasks
+at `arc-ui--last-scope' -- the scope the buffer is currently at --
+rather than `arc-ask''s default, so a question asked with `n' (the
+vault) or moved to a different scope with `s' does not silently jump
+back to `arc-enabled-collections' when re-asked."
   (interactive)
   (unless arc-ui--last-question
     (user-error "arc: no previous question to re-ask"))
-  (arc-ask arc-ui--last-question))
+  (arc-ask arc-ui--last-question arc-ui--last-scope))
 
 (defun arc-ui-change-scope ()
   "Re-ask this buffer's last question at a different scope.
@@ -293,7 +303,12 @@ included -- is folded into the text handed to the model as
 heading: the follow-up's own one-line prompt is passed as `arc-ask''s
 HEADING instead, so the buffer heading for this answer stays that one
 line and the quoted structure never becomes live buffer content of its
-own."
+own.
+
+Retrieves at `arc-ui--last-scope', the same scope the buffer's last
+answer used, for the same reason `arc-ui-reask' does: a bare nil here
+would ask `arc-ask' for its default scope instead of staying at
+whatever scope this buffer is actually following up within."
   (interactive)
   (unless arc-ui--last-question
     (user-error "arc: no answer to follow up on"))
@@ -301,7 +316,7 @@ own."
         (previous (arc-ui-answer-at-point)))
     (arc-ask (format "Earlier exchange:\n%s\n\nFollow-up: %s"
                      previous next)
-             nil next)))
+             arc-ui--last-scope next)))
 
 (require 'transient)
 
