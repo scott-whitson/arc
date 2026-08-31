@@ -165,18 +165,33 @@ unconditionally, independent of any ignore file, invisibility, or
     (insert-file-contents-literally path)
     (secure-hash 'sha1 (current-buffer))))
 
+(defun arc-file-source (path)
+  "Return the source plist for the single file PATH.
+Keys: :kind, :path, :hash, :mtime, :chunks.  Factored out of
+`arc-file-sources' so re-indexing one saved file goes through exactly
+the same construction as a full walk -- two spellings of a source plist
+would drift, and the one used by the rarer path would drift unnoticed."
+  (list :kind "file"
+        :path path
+        :hash (arc-file-hash path)
+        :mtime (truncate (float-time (file-attribute-modification-time
+                                      (file-attributes path))))
+        :chunks (arc-chunk-file path)))
+
+(defun arc-indexable-file-p (path)
+  "Return non-nil when PATH is a file arc would index on a directory walk.
+Asks `arc--file-list' about PATH's own directory rather than
+reimplementing the ignore rules and the secret denylist, which is how a
+watcher would otherwise start indexing an SSH key that the walk
+correctly skips."
+  (let ((path (expand-file-name path)))
+    (and (file-readable-p path)
+         (member path (arc--file-list (file-name-directory path))))))
+
 (defun arc-file-sources (directory)
   "Return a source plist for every indexable file under DIRECTORY.
 Each plist has :kind, :path, :hash, :mtime and :chunks."
-  (mapcar
-   (lambda (path)
-     (list :kind "file"
-           :path path
-           :hash (arc-file-hash path)
-           :mtime (truncate (float-time (file-attribute-modification-time
-                                         (file-attributes path))))
-           :chunks (arc-chunk-file path)))
-   (arc--file-list directory)))
+  (mapcar #'arc-file-source (arc--file-list directory)))
 
 (defun arc-file-changed-p (path)
   "Return non-nil when PATH's content differs from what is indexed."

@@ -106,6 +106,17 @@ a tool hides in a dot-directory -- Syncthing's .stversions, .git, and
 anything of that shape -- is never walked into, whatever its name is."
   (not (string-prefix-p "." (file-name-nondirectory (directory-file-name dir)))))
 
+(defun arc-org-nodes-in-file (path)
+  "Return node plists for the single org file PATH.
+Factored out of `arc-org-nodes' so re-indexing one saved file parses it
+exactly as a full walk does."
+  (with-temp-buffer
+    (insert-file-contents path)
+    (let ((org-inhibit-startup t))
+      (org-mode))
+    (append (delq nil (list (arc--org-file-node path)))
+            (arc--org-heading-nodes path))))
+
 (defun arc-org-nodes (directory)
   "Return node plists for every org file under DIRECTORY.
 Dot-directories (.git, .stversions, and the like) are never descended
@@ -114,13 +125,7 @@ its live :org-id."
   (let (out)
     (dolist (path (directory-files-recursively
                    directory "\\.org\\'" nil #'arc--org-not-dotdir-p))
-      (with-temp-buffer
-        (insert-file-contents path)
-        (let ((org-inhibit-startup t))
-          (org-mode))
-        (setq out (nconc out
-                         (delq nil (list (arc--org-file-node path)))
-                         (arc--org-heading-nodes path)))))
+      (setq out (nconc out (arc-org-nodes-in-file path))))
     out))
 
 (provide 'arc-source-org)

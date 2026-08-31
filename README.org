@@ -597,6 +597,59 @@ and now has a way to find out whether it earns its service.
 Thirty-three questions cannot resolve anything finer than this. Growing the set
 is worth more than another sweep of the same one.
 
+** Freshness
+
+~M-x arc-freshness~ reports which collections have drifted from what is on
+disk, and the ~*arc*~ header line carries a compact summary so rot is visible
+without asking. ~arc-watch-mode~ keeps the mutable half current on its own.
+
+*** Two mechanisms, because the corpus has two kinds of source
+
+The obvious design -- hash every source, compare -- is wrong here, and
+measurably so. Of 38,436 sources on a real corpus, 656 are genuinely mutable
+(files and org nodes) and 37,780 are derived from immutable inputs: Info
+manuals from a Nix store path, NixOS and Home-Manager options from a
+~flake.lock~ revision. A derived source's content cannot change unless that
+input changes, so hashing them individually is sixty times the work to learn
+one bit per collection.
+
+So mutable sources are compared by recorded content hash, and derived
+collections carry a ~collections.provenance~ string -- a ~flake.lock~ hash, or the
+resolved Info directory list -- compared as one value. An org node records its
+FILE's hash rather than its own, deliberately, so a single staleness rule
+covers both mutable kinds.
+
+*** unknown is not stale, and neither is fresh
+
+A collection indexed before provenance recording existed, or sources indexed
+before hashing, have no evidence either way. Those report ~unknown~. Folding
+them into ~stale~ would have made a real vault read as "417 sources just
+changed", which is noise a reader learns to ignore -- and a freshness report
+nobody reads is exactly what this replaces. Reporting ~fresh~ without evidence
+would be the worse failure and is not done either.
+
+*** arc-watch-mode
+
+Re-indexes a saved file arc already knows, and sweeps for drift on a
+300-second idle timer. The sweep is what catches changes ~after-save-hook~
+never sees: a ~git pull~, a Syncthing update, an edit on another machine. It
+examines ~arc-watch-sweep-batch~ sources per tick and resumes where it stopped,
+because a sweep that rehashed every mutable source in one tick would be the
+reason someone turned it off.
+
+A saved file is re-indexed only if it lives under a directory in
+~arc-collection-directory-alist~ AND ~arc-indexable-file-p~ agrees -- which asks
+the directory walk rather than reimplementing its ignore rules, so the
+watcher cannot start indexing an SSH key that the walk correctly skips.
+
+*** Derived collections are never reindexed automatically
+
+A deliberate non-goal, against the spec's own wording. Rebuilding the option
+collections means embedding some 30,000 chunks -- around 40 minutes of GPU --
+and a NixOS rebuild changes ~flake.lock~ routinely. A ~nixos-rebuild switch~ must
+not silently start a 40-minute background job. arc reports the staleness and
+leaves ~arc-reindex-all~ to the operator, who knows whether now is a good time.
+
 ** Known limitations
 
 *** Asynchronous reindex never removes departed sources
