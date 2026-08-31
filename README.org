@@ -513,6 +513,68 @@ guards this by walking the actual call graph the child runs and
 failing if some future callee reads a new tunable that isn't on the
 injection list.
 
+** Measuring retrieval
+
+~M-x arc-eval~ runs a set of questions through the real retrieval path and
+reports recall at each cutoff in ~arc-eval-k~ (5 and 10 by default), into a
+~*arc-eval*~ buffer that lists, per question, the rank each expected source
+came back at -- or what came back instead.
+
+It never calls the chat model. A run stays fast and deterministic that way, and
+recall@k is a property of retrieval regardless: a model writing a fluent
+paragraph out of the wrong five chunks is the failure this is built to catch,
+not to paper over.
+
+*** The question set lives outside this repo
+
+~arc-eval-set-file~ defaults to ~~/docs/org/arc-eval.eld~. That is deliberate. A
+set worth having names real targets -- file paths, org-roam ids, option names --
+and this repository is public, so committing one publishes the shape of a
+private corpus. A synthetic set ships at ~test/fixtures/eval-set-sample.eld~ to
+keep the harness itself tested; it is a shape, not a measurement.
+
+An entry is a plist. Every key in an ~:expect~ clause must match a retrieved
+source for that clause to count, and ~:path-suffix~ matches the tail of a path so
+a set survives being read on another machine:
+
+#+begin_src elisp
+((:question "how do I turn on syncthing in home-manager"
+  :scope (:collections ("hm options"))
+  :expect ((:kind "hm-option" :option-name "services.syncthing.enable")))
+
+ (:question "which models does ollama pre-pull on this machine"
+  :scope (:collections ("dotfiles"))
+  :expect ((:kind "file" :path-suffix "ioshi/i-intelligence/ollama.nix"))))
+#+end_src
+
+Recognized ~:expect~ keys are ~:kind~, ~:option-name~, ~:org-id~, ~:info-node~,
+~:path~ (exact) and ~:path-suffix~. An unrecognized key is a hard error rather
+than a silent non-match -- a typo would otherwise read as a permanent retrieval
+failure.
+
+*** First baseline, and what it says
+
+Ten questions over options and configuration only, against a 63,302-chunk
+corpus (NixOS and Home-Manager options complete, plus dotfiles, a distro
+checkout, an org-roam vault and the built-in Info manuals):
+
+: recall@5  = 0.30      recall@10 = 0.80      at least one hit: 8/10
+
+The gap between those two numbers is the finding. ~arc-limit~ defaults to 5, so
+in ordinary use the right source reaches the model's context roughly a third of
+the time on these questions, while it is usually present by rank 10. Raising the
+limit is not obviously the fix -- more context is not free -- but nothing about
+that trade-off could even be discussed before there was a number.
+
+Two failure shapes showed up immediately, both worth naming:
+
+- Asking to *enable* something returns every ~...enableZshIntegration~-style
+  option ahead of the plain ~programs.zsh.enable~. Lexical overlap beats
+  intent.
+- A ~dotfiles~-scoped question about how something is configured came back with
+  only prose documentation -- ~.md~ files -- and none of the ~.nix~ modules that
+  actually configure it.
+
 ** Known limitations
 
 *** Asynchronous reindex never removes departed sources
