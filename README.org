@@ -552,28 +552,50 @@ Recognized ~:expect~ keys are ~:kind~, ~:option-name~, ~:org-id~, ~:info-node~,
 than a silent non-match -- a typo would otherwise read as a permanent retrieval
 failure.
 
-*** First baseline, and what it says
+*** What it found
 
-Ten questions over options and configuration only, against a 63,302-chunk
-corpus (NixOS and Home-Manager options complete, plus dotfiles, a distro
-checkout, an org-roam vault and the built-in Info manuals):
+The harness was built to answer "is retrieval any good". The first thing it
+found was that the question could not yet be asked: ~arc--retrieve-rows~ fetched
+its rows with a bare ~WHERE d.id IN (...)~ and no ~ORDER BY~, so SQLite returned
+them in rowid order and the entire hybrid ranking was discarded between the
+search and the answer. The model had been receiving its context in essentially
+arbitrary order, citations were listed by rowid rather than relevance, and
+recall@k was measuring "is the expected source among the k lowest rowids".
 
-: recall@5  = 0.30      recall@10 = 0.80      at least one hit: 8/10
+Nothing caught that for three phases, because every suite asserted WHICH rows
+came back and none asserted their ORDER. It surfaced here only as an
+impossibility: asking for 20 candidates changed recall@5, which cannot happen
+for a real ranking. ~test/test-arc-rank-order.el~ pins it now.
 
-The gap between those two numbers is the finding. ~arc-limit~ defaults to 5, so
-in ordinary use the right source reaches the model's context roughly a third of
-the time on these questions, while it is usually present by rank 10. Raising the
-limit is not obviously the fix -- more context is not free -- but nothing about
-that trade-off could even be discussed before there was a number.
+Three plausible improvements were then measured and *rejected*, which is most of
+what a harness is for:
 
-Two failure shapes showed up immediately, both worth naming:
+- *Stopword filtering* on the FTS query. BM25's IDF factor already discounts
+  common terms, and doing it by hand cost recall: 0.45 at k=5 with filtering,
+  0.55 without.
+- *Lowering the RRF constant* from 60. The arithmetic is persuasive -- on a
+  40-item pool, 1/(60+rank) nearly flattens rank away -- but swept at
+  10/20/60/120 the spread is one to two expectations out of thirty-four, inside
+  single-question noise.
+- *Excluding oversized Info index nodes.* This corpus contains a
+  594,549-character ~(elisp.info)Index~; across 330 retrieved results it was
+  never returned once. BM25's length normalisation had it handled.
 
-- Asking to *enable* something returns every ~...enableZshIntegration~-style
-  option ahead of the plain ~programs.zsh.enable~. Lexical overlap beats
-  intent.
-- A ~dotfiles~-scoped question about how something is configured came back with
-  only prose documentation -- ~.md~ files -- and none of the ~.nix~ modules that
-  actually configure it.
+One change survived, plus one default. Weighting the vector arm at 2 against the
+keyword arm's 1 (~arc-rrf-semantic-weight~) is better at every cutoff, and
+~arc-limit~ moved from 5 to 10 because the target is so often just below the old
+cutoff:
+
+: as shipped   recall@3 0.33   recall@5 0.55   recall@10 0.76   25/33 questions
+: now          recall@3 0.42   recall@5 0.58   recall@10 0.79   26/33 questions
+
+The arms alone score 0.48/0.52/0.67 (vector) and 0.18/0.27/0.48 (BM25). The
+keyword arm is weak at the top of the list and useful further down, which is
+exactly the shape a reranker exists to fix -- arc has that code path, disabled,
+and now has a way to find out whether it earns its service.
+
+Thirty-three questions cannot resolve anything finer than this. Growing the set
+is worth more than another sweep of the same one.
 
 ** Known limitations
 
