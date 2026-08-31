@@ -44,6 +44,7 @@
 ;; configuration, and cites sources you can jump to.
 
 ;;; Code:
+(require 'cl-lib)
 (require 'llm)
 (require 'llm-provider-utils)
 (require 'info)
@@ -195,6 +196,23 @@ nothing in `arc-index-plan' has ever created an \"external manuals\"
 collection -- it matches no `collections.name' row and silently
 retrieves nothing, same failure mode as a stale directory-path entry."
   :type '(repeat string))
+
+(defcustom arc-vault-collections '("vault")
+  "Collections `arc-ask-vault' searches."
+  :type '(repeat string)
+  :group 'arc)
+
+(defcustom arc-option-collections '("nix options" "hm options")
+  "Collections `arc-ask-options' searches."
+  :type '(repeat string)
+  :group 'arc)
+
+(defcustom arc-chat-models '("qwen2.5-coder:3b" "qwen2.5:7b")
+  "Chat models `arc-toggle-chat-model' cycles through, in order.
+The 3B model answers fast enough to keep a question conversational;
+the 7B one is the practical ceiling on 14 GiB with no swap."
+  :type '(repeat string)
+  :group 'arc)
 
 (defcustom arc-batch-embeddings-enabled nil
   "Enable batch embeddings if supported."
@@ -763,9 +781,43 @@ is exactly the failure the spec's refusal contract exists to prevent."
          (arc-ui-stream-answer answer (format "arc: retrieval failed: %s" msg)))))))
 
 ;;;###autoload
+(defun arc-ask-vault (question)
+  "Ask arc QUESTION against the org-roam vault only."
+  (interactive "sAsk arc (vault): ")
+  (arc-ask question (arc-scope :collections arc-vault-collections)))
+
+;;;###autoload
+(defun arc-ask-options (question)
+  "Ask arc QUESTION against the NixOS and Home-Manager options only."
+  (interactive "sAsk arc (options): ")
+  (arc-ask question (arc-scope :collections arc-option-collections)))
+
+;;;###autoload
+(defun arc-toggle-chat-model ()
+  "Switch `arc-chat-provider' to the next model in `arc-chat-models'.
+A model not in the list -- or an `arc-chat-provider' the user has set
+to something other than an Ollama provider -- is not silently worked
+around: the first case starts the cycle over, the second is a
+`user-error' naming the variable, because rebuilding an arbitrary
+provider is not this command's business."
+  (interactive)
+  (unless (cl-typep arc-chat-provider 'llm-ollama)
+    (user-error "arc: `arc-chat-provider' is not an Ollama provider; \
+`arc-toggle-chat-model' cannot switch its model"))
+  (let* ((current (llm-ollama-chat-model arc-chat-provider))
+         (rest (cdr (member current arc-chat-models)))
+         (next (or (car rest) (car arc-chat-models))))
+    (setf (llm-ollama-chat-model arc-chat-provider) next)
+    (message "arc: chat model is now %s" next)
+    next))
+
+;;;###autoload
 (defvar arc-command-map
   (let ((m (make-sparse-keymap)))
     (define-key m (kbd "i") #'arc-ask)
+    (define-key m (kbd "n") #'arc-ask-vault)
+    (define-key m (kbd "o") #'arc-ask-options)
+    (define-key m (kbd "m") #'arc-toggle-chat-model)
     (define-key m (kbd "R") #'arc-reindex-all)
     (define-key m (kbd "c") #'arc-reindex-cancel)
     m)
