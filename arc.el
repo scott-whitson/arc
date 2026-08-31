@@ -175,6 +175,16 @@ If set, all quotes with similarity less than threshold will be filtered out."
   "Number of quotes for send to reranker."
   :type 'integer)
 
+(defcustom arc-retrieval-max-distance nil
+  "Cosine distance past which a retrieved chunk is treated as no match.
+nil disables the check, which is the default on purpose: the spec puts
+the threshold's *value* behind phase 5's eval harness, because picking
+one by intuition is how a retrieval layer quietly starts refusing
+answers it had.  The mechanism lives here so phase 5 sets a number
+rather than building a feature."
+  :type '(choice (const nil) number)
+  :group 'arc)
+
 (defcustom arc-enabled-collections '("builtin manuals")
   "Enabled collections for arc chat.
 Used to default to `(\"builtin manuals\" \"external manuals\")', but
@@ -669,9 +679,28 @@ citation can name the line it actually came from."
         (arc-rerank prompt raw)
       (take arc-limit raw))))
 
+;; `arc-ui--last-scope' is defined with `defvar-local' in arc-ui.el as of
+;; Task 9.  This forward declaration lets this task's `arc-ask' set it and
+;; byte-compile clean on its own; remove it once Task 9 lands the real one.
+(defvar arc-ui--last-scope)
+
+(defun arc-ask-normalize-scope (scope)
+  "Return SCOPE as a scope plist.
+Accepts three shapes, because `arc-ask' is public and its documented
+second argument used to be a plain list of collection names:
+  nil                     -- `arc-enabled-collections'
+  (\"vault\" \"dotfiles\")    -- those collections
+  (:collections (\"vault\")) -- a scope plist, used as-is
+A list of strings is unambiguous here: a scope plist's first element
+is always a keyword."
+  (cond
+   ((null scope) (arc-scope-from-collections arc-enabled-collections))
+   ((keywordp (car scope)) scope)
+   (t (arc-scope-from-collections scope))))
+
 ;;;###autoload
-(defun arc-ask (question &optional collections heading)
-  "Ask arc QUESTION, grounded in COLLECTIONS, rendering into the arc buffer.
+(defun arc-ask (question &optional scope heading)
+  "Ask arc QUESTION, grounded in SCOPE, rendering into the arc buffer.
 QUESTION is what is sent to retrieval and to the model.  HEADING, when
 non-nil, is what is rendered as the answer's heading and recorded as
 `arc-ui--last-question' instead of QUESTION.
@@ -688,12 +717,21 @@ Both retrieval failure (an unreachable embedding endpoint, most
 commonly) and model failure render into the answer buffer rather than
 leaving it invisible -- retrieval failure never even reaches
 `arc-answer-request', which is why it needs an error path of its own
-here rather than reusing that function's."
+here rather than reusing that function's.
+
+SCOPE is a scope plist (see `arc-scope'), a plain list of collection
+names, or nil for `arc-enabled-collections'.  It is normalised by
+`arc-ask-normalize-scope'.
+
+When retrieval returns nothing at all, the model is never called: the
+buffer gets `arc-answer-refusal' instead.  Handing an empty context
+block to a chat model and hoping its prompt talks it out of answering
+is exactly the failure the spec's refusal contract exists to prevent."
   (interactive "sAsk arc: ")
-  (let* ((cols (or collections arc-enabled-collections))
+  (let* ((scope (arc-ask-normalize-scope scope))
          (display (or heading question)))
     (arc-find-similar
-     question (arc-scope-from-collections cols)
+     question scope
      (lambda (query)
        (let* ((ids (arc--retrieve-ids query question))
               (sources (mapcar #'arc-row-to-source (arc--retrieve-rows ids)))
@@ -701,19 +739,23 @@ here rather than reusing that function's."
          (pop-to-buffer (arc-ui-buffer))
          (setq arc-ui--last-question display)
          (setq arc-ui--last-sources sources)
-         (arc-answer-request
-          question sources
-          (lambda (text) (arc-ui-stream-answer answer text))
-          (lambda (text)
-            (arc-ui-stream-answer answer text)
-            (arc-ui-render-sources answer sources))
-          (lambda (_sym msg)
-            (arc-ui-stream-answer answer (format "arc: request failed: %s" msg))))))
+         (setq arc-ui--last-scope scope)
+         (if (null sources)
+             (arc-ui-stream-answer answer (arc-answer-refusal scope))
+           (arc-answer-request
+            question sources
+            (lambda (text) (arc-ui-stream-answer answer text))
+            (lambda (text)
+              (arc-ui-stream-answer answer text)
+              (arc-ui-render-sources answer sources))
+            (lambda (_sym msg)
+              (arc-ui-stream-answer answer (format "arc: request failed: %s" msg)))))))
      (lambda (_sym msg)
        (let ((answer (arc-ui-begin-answer display)))
          (pop-to-buffer (arc-ui-buffer))
          (setq arc-ui--last-question display)
          (setq arc-ui--last-sources nil)
+         (setq arc-ui--last-scope scope)
          (arc-ui-stream-answer answer (format "arc: retrieval failed: %s" msg)))))))
 
 ;;;###autoload

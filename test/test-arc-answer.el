@@ -57,3 +57,9 @@
       (arc-answer-request "q" nil #'ignore #'ignore
                           (lambda (_sym msg) (setq err msg))))
     (should (equal err "boom"))))
+
+(ert-deftest ea-refusal-names-the-scope ()
+  (should (equal (arc-answer-refusal (arc-scope :collections '("vault")))
+                 "arc: not enough data — nothing in vault matched this question."))
+  (should (equal (arc-answer-refusal nil)
+                 "arc: not enough data — nothing in everything matched this question.")))

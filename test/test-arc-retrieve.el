@@ -1,5 +1,6 @@
 ;;; test-arc-retrieve.el --- arc--retrieve-rows' schema-aware row lookup -*- lexical-binding: t; -*-
 (require 'ert)
+(require 'cl-lib)
 (defvar ar-root (expand-file-name ".." (file-name-directory
                                         (or load-file-name buffer-file-name))))
 (add-to-list 'load-path ar-root)
@@ -73,3 +74,40 @@ so it cannot rot silently again, reranker on or not."
      (should (= (length docs) 2))
      (should (member "alpha" (mapcar (lambda (d) (alist-get 'text d)) docs)))
      (should (member "beta" (mapcar (lambda (d) (alist-get 'text d)) docs))))))
+
+(ert-deftest er-normalize-scope-accepts-a-name-list ()
+  "README documents (arc-ask \"prompt\" '(\"vault\")).  That must keep working."
+  (should (equal (arc-ask-normalize-scope '("vault"))
+                 (arc-scope :collections '("vault"))))
+  (should (equal (arc-ask-normalize-scope '("a" "b"))
+                 (arc-scope :collections '("a" "b")))))
+
+(ert-deftest er-normalize-scope-passes-a-plist-through ()
+  (let ((s (arc-scope :kinds '("org-node"))))
+    (should (equal (arc-ask-normalize-scope s) s))))
+
+(ert-deftest er-normalize-scope-nil-uses-enabled-collections ()
+  (let ((arc-enabled-collections '("builtin manuals")))
+    (should (equal (arc-ask-normalize-scope nil)
+                   (arc-scope :collections '("builtin manuals"))))))
+
+(ert-deftest er-no-sources-refuses-without-calling-the-model ()
+  "The single behaviour most worth protecting: a config oracle that
+confabulates a NixOS option is worse than no oracle."
+  (let ((model-called nil)
+        (rendered ""))
+    (cl-letf (((symbol-function 'arc-answer-request)
+               (lambda (&rest _) (setq model-called t)))
+              ((symbol-function 'arc-find-similar)
+               (lambda (_text _scope on-done &optional _on-error) (funcall on-done "SELECT 1 WHERE 0")))
+              ((symbol-function 'arc--retrieve-ids) (lambda (&rest _) nil))
+              ((symbol-function 'arc--retrieve-rows) (lambda (&rest _) nil))
+              ((symbol-function 'arc-ui-begin-answer) (lambda (_q) (cons 1 1)))
+              ((symbol-function 'arc-ui-buffer) (lambda () (current-buffer)))
+              ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil))
+              ((symbol-function 'arc-ui-stream-answer)
+               (lambda (_a text) (setq rendered text))))
+      (arc-ask "anything" (arc-scope :collections '("vault")))
+      (should-not model-called)
+      (should (string-match-p "not enough data" rendered))
+      (should (string-match-p "vault" rendered)))))

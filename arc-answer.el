@@ -11,6 +11,7 @@
 
 (require 'llm)
 (require 'arc-source)
+(require 'arc-scope)
 
 (defvar arc-chat-provider)
 (defvar arc-chat-prompt-template)
@@ -36,6 +37,18 @@ text, ON-ERROR a symbol and a message."
   (llm-chat-streaming arc-chat-provider
                       (llm-make-chat-prompt (arc-answer-build-prompt question sources))
                       on-partial on-done on-error))
+
+(declare-function arc-scope-describe "arc-scope" (scope))
+
+(defun arc-answer-refusal (scope)
+  "Return the answer arc gives when nothing in SCOPE matched.
+The spec calls this the single behaviour most worth protecting: a
+config oracle that confabulates a NixOS option is worse than no
+oracle.  Naming the scope is the point -- \"not enough data\" alone
+leaves the reader unable to tell an empty index from a scope that
+simply did not hold the answer."
+  (format "arc: not enough data — nothing in %s matched this question."
+          (arc-scope-describe scope)))
 
 (provide 'arc-answer)
 ;;; arc-answer.el ends here
