@@ -98,32 +98,45 @@ question set would otherwise read as a retrieval failure forever."
 
 ;;; Retrieval ---------------------------------------------------------------
 
-(defun arc-eval--retrieve (question scope k)
+(defun arc-eval--retrieve (question scope k &optional arm)
   "Return up to K source plists arc retrieves for QUESTION at SCOPE.
 Goes through the real query builder and the real row fetch -- the point
-is to measure what arc does, not a reimplementation of it."
+is to measure what arc does, not a reimplementation of it.  ARM is
+passed to `arc--find-similar': nil for the real fused query, `semantic'
+or `keyword' to measure one arm alone."
   (let* ((arc-limit k)
          (scope (arc-ask-normalize-scope scope))
-         (sql (arc--find-similar question scope))
+         (sql (arc--find-similar question scope arm))
          (ids (arc--retrieve-ids sql question)))
     (mapcar #'arc-row-to-source (arc--retrieve-rows ids))))
 
-(defun arc-eval-run (&optional set)
+(defun arc-eval-run (&optional set arm)
   "Run SET (default `arc-eval-set-file') and return a result alist.
 Each result is (:question :expect-count :ranks :sources), where :ranks is
-one entry per :expect clause holding its 1-based rank or nil."
+one entry per :expect clause holding its 1-based rank or nil.  ARM is
+passed through to `arc-eval--retrieve'."
   (let* ((set (or set (arc-eval-read-set arc-eval-set-file)))
          (kmax (apply #'max arc-eval-k)))
     (mapcar
      (lambda (q)
        (let* ((question (plist-get q :question))
-              (sources (arc-eval--retrieve question (plist-get q :scope) kmax))
+              (sources (arc-eval--retrieve question (plist-get q :scope) kmax arm))
               (expects (plist-get q :expect)))
          (list :question question
                :expect-count (length expects)
                :ranks (mapcar (lambda (e) (cons e (arc-eval--rank-of e sources))) expects)
                :sources sources)))
      set)))
+
+(defun arc-eval-arms (&optional set)
+  "Return ((ARM . RESULTS) ...) for the fused query and each arm alone.
+This is the diagnosis that turns \"retrieval is bad\" into \"the keyword
+arm is not contributing\": if fused recall barely beats one arm, the
+other arm is dead weight, and if fused is WORSE than an arm alone, the
+fusion is actively hurting."
+  (let ((set (or set (arc-eval-read-set arc-eval-set-file))))
+    (mapcar (lambda (arm) (cons arm (arc-eval-run set arm)))
+            '(fused semantic keyword))))
 
 (defun arc-eval-recall (results k)
   "Return recall at K over RESULTS: matched expectations / total expectations."

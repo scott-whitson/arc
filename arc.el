@@ -120,13 +120,63 @@ This list may only shrink.")
   (user-error "arc: `%s' has not been migrated to the sources schema yet \
 (Task 10/11 owns this); it would fail against the current tables" fn))
 
-(defcustom arc-limit 5
-  "Count quotes to pass into llm context for answer."
-  :type 'natnum)
+(defcustom arc-limit 10
+  "How many chunks retrieval hands the model.
+
+10 rather than 5 because the expected source is frequently present but
+just below the old cutoff: measured over 33 questions at the current
+defaults, recall goes 0.42 at 3, 0.58 at 5, 0.79 at 10. The cost is
+small -- chunks average 643 characters, so ten of them is roughly 1,800
+tokens against a 32k window.
+
+Raising it further is not obviously right and nothing measured says
+where it turns: recall keeps climbing, but so does the chance of burying
+the answer among near-misses, and that cost does not show up in
+recall@k at all."
+  :type 'natnum :group 'arc)
 
 (defcustom arc-tar-executable "tar"
   "Path to tar executable."
   :type 'string)
+
+(defcustom arc-rrf-semantic-weight 2
+  "Weight on the vector arm's RRF contribution; the keyword arm is 1.
+
+2 rather than 1 because the arms are not equally good and weighting them
+equally cost real recall. Measured over 33 questions against a
+63k-chunk corpus, weight 1 against weight 2:
+
+  recall@3   0.33 -> 0.42
+  recall@5   0.55 -> 0.58
+  recall@10  0.76 -> 0.79
+  questions retrieving their target at all  25 -> 26 of 33
+
+Better at every cutoff, which is why this one is a default change and
+`arc-rrf-k' is not. For context, the arms alone score 0.48/0.52/0.67
+(vector) and 0.18/0.27/0.48 (BM25): the keyword arm is weak at the top
+of the list and useful further down, which is exactly the shape a
+reranker exists to fix. arc has that path (`arc-reranker-enabled', off
+by default) and now has a harness to prove whether it earns its
+service."
+  :type 'number :group 'arc)
+
+(defcustom arc-rrf-k 60
+  "The constant in reciprocal rank fusion's 1/(K + rank) term.
+Lower means rank matters more; higher means merely appearing in both
+arms matters more.
+
+60 comes from the original RRF paper, which fused lists thousands of
+items long, while arc fuses two lists of `arc-knn-candidates' items --
+40 by default. That mismatch looks like it should matter and, measured,
+it does not resolve: swept at K in {10,20,60,120} with
+`arc-rrf-semantic-weight' 2 over a 33-question set, K=20 was best at
+recall@3 and @5 (0.48/0.61) while K=120 was best at @10 (0.82) and K=60
+sat between them (0.42/0.58/0.79). Those spreads are one to two
+expectations out of thirty-four -- inside the noise of a single
+question. 60 is kept because nothing beat it consistently, NOT because
+it is known to be right; resolving this needs a larger set, not more
+sweeping of this one."
+  :type 'integer :group 'arc)
 
 (defcustom arc-semantic-split-function #'arc-split-by-paragraph
   "Function for semantic text split."
@@ -302,11 +352,29 @@ semantic_search AS (
   LIMIT %d
 )" vec k arc-knn-candidates))))
 
-(defun arc--find-similar (text scope)
+(defun arc--keyword-cte (text)
+  "Return the keyword-search CTE matching TEXT, joined to `scoped'."
+  (format "keyword_search AS (
+  SELECT f.rowid AS id, RANK () OVER (ORDER BY bm25(data_fts) ASC) AS rank
+  FROM data_fts f JOIN scoped ON scoped.id = f.rowid
+  WHERE data_fts MATCH '%s'
+  ORDER BY bm25(data_fts) ASC
+  LIMIT %d
+)" (arc-fts-query text) arc-knn-candidates))
+
+(defun arc--find-similar (text scope &optional arm)
   "Return the SQL selecting chunks in SCOPE similar to TEXT.
 SCOPE is a scope plist (see `arc-scope'); nil means the whole corpus.
 The scope reaches the search rather than filtering its results: both
-the vector side and the FTS side join against the `scoped' CTE."
+the vector side and the FTS side join against the `scoped' CTE.
+
+ARM selects which half of the hybrid to use, and exists so retrieval
+quality can be attributed rather than guessed at: nil or `fused' is the
+real query, `semantic' the vector arm alone, `keyword' the BM25 arm
+alone.  `arc-eval' reports recall for all three, which is how you learn
+that a question is failing because one arm is weak rather than because
+retrieval is \"bad\".  Only `fused' and `semantic' embed TEXT; the
+keyword arm skips that work entirely."
   ;; For collection scoping specifically, the previous version's inlined
   ;; `rowid IN (...)' filter was already effective in practice: SQLite
   ;; inlines a CTE referenced exactly once and pushes that IN-list into
@@ -321,34 +389,41 @@ the vector side and the FTS side join against the `scoped' CTE."
   ;; `:kinds', `:tags' or `:path-prefix', which did not exist in any form
   ;; before this task.  The `scoped' CTE joined explicitly into both arms
   ;; is what makes scoping true regardless of what the planner chooses.
-  (let ((vec (arc-vector-to-sqlite
-              (llm-embedding arc-embeddings-provider text))))
-    (format "WITH
+  (let ((vec (unless (eq arm 'keyword)
+               (arc-vector-to-sqlite
+                (llm-embedding arc-embeddings-provider text)))))
+    (pcase (or arm 'fused)
+      ('semantic
+       (format "WITH\n%s,\n%s\nSELECT semantic_search.id FROM semantic_search
+                ORDER BY semantic_search.rank ASC LIMIT %d;"
+               (arc--scoped-cte scope) (arc--semantic-cte scope vec)
+               (arc-get-limit)))
+      ('keyword
+       (format "WITH\n%s,\n%s\nSELECT keyword_search.id FROM keyword_search
+                ORDER BY keyword_search.rank ASC LIMIT %d;"
+               (arc--scoped-cte scope) (arc--keyword-cte text)
+               (arc-get-limit)))
+      (_
+       (format "WITH
 %s,
 %s,
-keyword_search AS (
-  SELECT f.rowid AS id, RANK () OVER (ORDER BY bm25(data_fts) ASC) AS rank
-  FROM data_fts f JOIN scoped ON scoped.id = f.rowid
-  WHERE data_fts MATCH '%s'
-  ORDER BY bm25(data_fts) ASC
-  LIMIT %d
-),
+%s,
 hybrid_search AS (
   SELECT
     COALESCE(semantic_search.id, keyword_search.id) AS id,
-    COALESCE(1.0 / (60 + semantic_search.rank), 0.0) +
-    COALESCE(1.0 / (60 + keyword_search.rank), 0.0) AS score
+    COALESCE(%f / (%d + semantic_search.rank), 0.0) +
+    COALESCE(1.0 / (%d + keyword_search.rank), 0.0) AS score
   FROM semantic_search
   FULL OUTER JOIN keyword_search ON semantic_search.id = keyword_search.id
   ORDER BY score DESC
   LIMIT %d
 )
 SELECT hybrid_search.id FROM hybrid_search;"
-            (arc--scoped-cte scope)
-            (arc--semantic-cte scope vec)
-            (arc-fts-query text)
-            arc-knn-candidates
-            (arc-get-limit))))
+               (arc--scoped-cte scope)
+               (arc--semantic-cte scope vec)
+               (arc--keyword-cte text)
+               (float arc-rrf-semantic-weight) arc-rrf-k arc-rrf-k
+               (arc-get-limit))))))
 
 (defun arc-find-similar (text scope on-done &optional on-error)
   "Find chunks in SCOPE similar to TEXT, asynchronously.
@@ -604,7 +679,19 @@ When FORCE parse even if already parsed."
 		      (expand-file-name dir)))))
 
 (defun arc-fts-query (prompt)
-  "Return fts match query for PROMPT."
+  "Return an FTS5 MATCH expression for PROMPT: its words, OR'd together.
+
+Do not add stopword filtering here. It was tried, measured, and
+reverted, and the measurement is worth keeping because the intuition is
+so appealing: dropping `how', `do', `the' by hand duplicates what BM25's
+IDF factor already does, and doing it anyway COST recall -- 0.45 at k=5
+with filtering against 0.55 without, on a 33-question set. BM25 knows
+more about term weighting than a hand-written stopword list does.
+
+Filtering oversized documents by hand is the same mistake. BM25's length
+normalisation already penalises them: this corpus contains a
+594,549-character Info index node, and across 330 retrieved results it
+was never returned once."
   (thread-last
     prompt
     (string-trim)
@@ -668,22 +755,44 @@ When FORCE parse even if already parsed."
 
 (defun arc--retrieve-rows (ids)
   "Return a (KIND PATH INFO-NODE ORG-ID OPTION-NAME CHUNK LINE-START
-LINE-END TITLE) row per id in IDS.
+LINE-END TITLE) row per id in IDS, IN THE ORDER IDS GIVES.
 IDS are `data' row ids (the same rowids `data_embeddings' and
 `data_fts' use).  Joins across to `sources' for whichever locator
 column KIND actually uses; the other three come back nil.  Returns
 nil, rather than erroring, when IDS is empty -- an empty SQL IN-list
-is invalid syntax."
+is invalid syntax.
+
+The ordering is not decoration.  This used to be a bare
+`WHERE d.id IN (...)' with no ORDER BY, so SQLite returned rows in
+rowid order and every trace of the hybrid ranking was thrown away
+between the search and the answer.  The consequences were not
+cosmetic: the model received its context in essentially arbitrary
+order, citations were listed by rowid rather than relevance, and
+`arc-eval' recall@k measured \"is the expected source among the k
+lowest rowids\" -- which is why asking for 20 candidates instead of 10
+changed recall@5, a result that makes no sense for a genuine ranking
+and is what exposed this.  The ordinal CTE below preserves the order
+without changing which columns come back."
   (when ids
+    ;; `delete-dups' keeps the FIRST occurrence, so the best-ranked position of
+    ;; a repeated id wins.  The old `IN (...)' form deduplicated implicitly;
+    ;; the ordinal join does not, and a duplicated id would otherwise hand the
+    ;; same chunk to the model twice.
+    (setq ids (delete-dups (copy-sequence ids)))
     (sqlite-select
      (arc-db)
      (format
-      "SELECT s.kind, s.path, s.info_node, s.org_id, s.option_name, d.chunk,
+      "WITH ordered(id, n) AS (VALUES %s)
+SELECT s.kind, s.path, s.info_node, s.org_id, s.option_name, d.chunk,
        d.line_start, d.line_end, d.title
 FROM data AS d
 JOIN sources AS s ON s.id = d.source_id
-WHERE d.id IN %s;"
-      (arc-sqlite-format-int-list ids)))))
+JOIN ordered ON ordered.id = d.id
+ORDER BY ordered.n;"
+      (mapconcat (lambda (pair) (format "(%d, %d)" (car pair) (cdr pair)))
+                 (let ((n 0))
+                   (mapcar (lambda (id) (cons id (setq n (1+ n)))) ids))
+                 ", ")))))
 
 (defun arc-row-to-source (row)
   "Convert an `arc--retrieve-rows' ROW into a source plist.
@@ -875,7 +984,8 @@ plain `emacs -Q'), so any `defcustom' it or a function it calls reads
 gets that variable's compiled-in default unless the current value is
 explicitly captured here with `async-inject-variables' and handed
 across.  `arc-knn-candidates', `arc-scope-bruteforce-max', `arc-limit',
-`arc-reranker-limit' and `arc-embedding-size' belong on this list for
+`arc-reranker-limit', `arc-embedding-size', `arc-rrf-k' and
+`arc-rrf-semantic-weight' belong on this list for
 exactly that reason -- each is read somewhere in the call graph
 `arc-find-similar' runs in the child (`arc--find-similar' itself, or
 `arc-scope-vector-plan', `arc-get-limit', or `arc-db' opening a fresh
@@ -906,6 +1016,8 @@ that test instead of shipping silently uninjected."
 		    ,(async-inject-variables "arc-limit")
 		    ,(async-inject-variables "arc-reranker-limit")
 		    ,(async-inject-variables "arc-embedding-size")
+		    ,(async-inject-variables "arc-rrf-k")
+		    ,(async-inject-variables "arc-rrf-semantic-weight")
 		    ,(async-inject-variables "load-path")
 		    ,(async-inject-variables "Info-directory-list")
 		    (require 'arc)

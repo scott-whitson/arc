@@ -130,7 +130,7 @@ not get."
   "Recall@10 is meaningless if retrieval only ever fetched 5."
   (let (asked)
     (cl-letf (((symbol-function 'arc-eval--retrieve)
-               (lambda (_q _s k) (setq asked k) nil)))
+               (lambda (_q _s k &optional _arm) (setq asked k) nil)))
       (let ((arc-eval-k '(5 10 25)))
         (arc-eval-run (arc-eval-read-set ae2-sample)))
       (should (= asked 25)))))
