@@ -7,6 +7,7 @@
 (require 'arc-test-vec0)
 (arc-test-ensure-vec0-or-skip!)
 (require 'arc)
+(require 'arc-scope)
 (require 'arc-test-helpers)
 
 (ert-deftest as-empty-scope-is-empty ()
@@ -45,7 +46,9 @@
                  "d.collection_id IN (SELECT id FROM collections WHERE name IN ('vault')) AND s.kind IN ('org-node')")))
 
 (ert-deftest as-quotes-are-escaped ()
-  (should (string-match-p "O''Brien" (arc-scope-predicate (arc-scope :collections '("O'Brien"))))))
+  (should (string-match-p "O''Brien" (arc-scope-predicate (arc-scope :collections '("O'Brien")))))
+  (should (string-match-p "O''Brien" (arc-scope-predicate (arc-scope :tags '("O'Brien")))))
+  (should (string-match-p "O''Brien" (arc-scope-predicate (arc-scope :path-prefix "/home/O'Brien")))))
 
 (ert-deftest as-describe ()
   (should (equal (arc-scope-describe nil) "everything"))
@@ -83,3 +86,13 @@
    (should (= (arc-scope-count (arc-scope :tags '("emacs"))) 1))
    (should (= (arc-scope-count (arc-scope :path-prefix "/vault")) 3))
    (should (= (arc-scope-count (arc-scope :collections '("nope"))) 0))))
+
+(ert-deftest as-total-and-count-agree-on-orphaned-data ()
+  "A `data' row whose `source_id' resolves to no `sources' row must not
+make `arc-scope-total' and an unscoped `arc-scope-count' disagree --
+Task 4 divides one by the other to scale k, so any divergence between
+what they each count would silently pick a wrong retrieval strategy."
+  (arc-test-with-temp-db
+   (as--seed (arc-db))
+   (sqlite-execute (arc-db) "INSERT INTO data (source_id, chunk) VALUES (NULL, 'orphan');")
+   (should (= (arc-scope-total) (arc-scope-count nil)))))

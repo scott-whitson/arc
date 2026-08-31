@@ -85,8 +85,15 @@ to \"1\", so a caller never needs a special case for it."
                  (arc-scope-predicate scope)))))
 
 (defun arc-scope-total ()
-  "Return how many `data' rows the corpus holds in total."
-  (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;")))
+  "Return how many `data' rows the corpus holds in total.
+Joined to `sources' the same way `arc-scope-count' is, so the two
+agree by construction: a `data' row whose `source_id' does not
+resolve to a `sources' row (the column carries no NOT NULL or FK
+enforcement) would otherwise inflate this past what any scope,
+including no scope at all, can ever count -- and Task 4 divides one
+of these by the other to scale the KNN `k', so that divergence would
+silently pick a wrong retrieval strategy rather than error."
+  (caar (sqlite-select (arc-db) "SELECT count(*) FROM data d JOIN sources s ON s.id = d.source_id;")))
 
 (defun arc-scope-describe (scope)
   "Return a short human description of SCOPE, for refusals and headings."
