@@ -79,8 +79,14 @@ list could not express at all."
                       WHERE d.id IN %s;" (arc-sqlite-format-int-list ids))))))
 
 (ert-deftest ass-vault-scope-returns-only-vault ()
-  "The regression this phase exists for: at k=40 the global nearest
-neighbours are all dotfiles, so a post-hoc filter returns nothing."
+  "A vault-scoped query against `ass--seed''s corpus returns only vault
+rows.  This is NOT a regression reproduction -- see `ass--seed''s own
+docstring: the believed \"global top-k is all dotfiles, so a post-hoc
+filter returns nothing\" failure was checked against the real,
+filtered query and found false, because SQLite already pushed the old
+inlined rowid list into vec0's own scan.  This test instead just
+confirms the new, explicit `scoped' CTE join gives the same correct
+answer without depending on that optimizer choice."
   (let ((arc-embedding-size ass-dim))
     (arc-test-with-temp-db
      (ass--seed)

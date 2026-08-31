@@ -777,14 +777,29 @@ is exactly the failure the spec's refusal contract exists to prevent."
 
 ;;;###autoload
 (defun arc-ask-vault (question)
-  "Ask arc QUESTION against the org-roam vault only."
+  "Ask arc QUESTION against the org-roam vault only.
+Refuses with a `user-error' naming `arc-vault-collections' when that
+variable has been customized to nil, rather than silently searching
+the whole corpus: `arc-ask-normalize-scope' treats `(:collections nil)'
+as an empty, unrestricted scope (the same way plain nil is), so
+passing it through unchecked would make a nil-ed `arc-vault-collections'
+answer the opposite of what \"vault only\" promises."
   (interactive "sAsk arc (vault): ")
+  (unless arc-vault-collections
+    (user-error "arc: `arc-vault-collections' is nil -- refusing to search \
+the whole corpus instead of the vault"))
   (arc-ask question (arc-scope :collections arc-vault-collections)))
 
 ;;;###autoload
 (defun arc-ask-options (question)
-  "Ask arc QUESTION against the NixOS and Home-Manager options only."
+  "Ask arc QUESTION against the NixOS and Home-Manager options only.
+Refuses with a `user-error' naming `arc-option-collections' when that
+variable has been customized to nil; see `arc-ask-vault' for why
+searching everything instead would be the worst available answer."
   (interactive "sAsk arc (options): ")
+  (unless arc-option-collections
+    (user-error "arc: `arc-option-collections' is nil -- refusing to search \
+the whole corpus instead of just the options"))
   (arc-ask question (arc-scope :collections arc-option-collections)))
 
 ;;;###autoload

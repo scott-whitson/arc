@@ -38,6 +38,17 @@
       (should (member "nix options" (plist-get got :collections)))
       (should (member "hm options" (plist-get got :collections))))))
 
+(ert-deftest ae-ask-vault-refuses-when-vault-collections-is-nil ()
+  "A nil-ed `arc-vault-collections' must refuse, not widen to the whole
+corpus: `(:collections nil)' is `arc-scope-empty-p', which compiles to
+predicate \"1\" -- the same as no scope at all."
+  (let ((arc-vault-collections nil))
+    (should-error (arc-ask-vault "q") :type 'user-error)))
+
+(ert-deftest ae-ask-options-refuses-when-option-collections-is-nil ()
+  (let ((arc-option-collections nil))
+    (should-error (arc-ask-options "q") :type 'user-error)))
+
 (ert-deftest ae-toggle-cycles-through-the-model-list ()
   (let* ((arc-chat-models '("a" "b" "c"))
          (arc-chat-provider (make-llm-ollama :chat-model "a" :embedding-model "e")))
