@@ -138,7 +138,7 @@ happened to embed their own name already, which is why options fared
 better than files.
 
 FTS5's default tokenizer splits on non-alphanumerics, so a path needs no
-transformation: /home/scott/dotfiles/ioshi/i-intelligence/syncthing.nix
+transformation: /home/u/dotfiles/ioshi/i-intelligence/syncthing.nix
 tokenizes to home, scott, dotfiles, ioshi, i, intelligence, syncthing,
 nix.
 
