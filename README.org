@@ -321,7 +321,23 @@ defined by ~arc-scope~ (in ~arc-scope.el~):
 
 ~(arc-scope :collections '("vault") :tags '("infra"))~ builds a scope
 combining any of these (all given restrictions apply, ANDed together);
-~(arc-scope)~, with no keys, and ~nil~ both mean the whole corpus.
+~(arc-scope)~, with no keys, and ~nil~ both mean the whole corpus --
+*when ~arc-scope-empty-p~ or ~arc-scope-predicate~ look at them
+directly.* ~arc-ask~'s second argument is a different story: a bare
+~nil~ passed there is ambiguous, because it is also the historical
+"caller didn't specify a scope" value, so ~arc-ask-normalize-scope~
+treats it as "use ~arc-enabled-collections~", not "search everything".
+For the one case where you actually want the whole corpus regardless
+of ~arc-enabled-collections~, pass ~:all~ instead: ~(arc-scope :all
+t)~ is a non-nil plist whose first element is a keyword, so
+~arc-ask-normalize-scope~ passes it through unchanged rather than
+substituting ~arc-enabled-collections~, while ~arc-scope-empty-p~
+still reports it empty (it names no actual restriction), so it
+retrieves against the whole corpus exactly like ~(arc-scope)~ does
+when nothing rewrites it first. This is what the ~"everything"~ preset
+below uses, precisely so pressing ~s~ and picking ~"everything"~ isn't
+quietly narrowed to ~arc-enabled-collections~.
+
 Pass a scope as ~arc-ask~'s second argument to search it instead of
 ~arc-enabled-collections~ for that one question.
 
@@ -335,12 +351,20 @@ Two commands wrap the common cases: ~arc-ask-vault~ scopes to
 ~arc-vault-collections~ (the vault only, ~("vault")~ by default) and
 ~arc-ask-options~ scopes to ~arc-option-collections~ (~("nix options"
 "hm options")~ by default) -- see the key table above (~n~ and ~o~).
+Both refuse with a ~user-error~, naming the offending variable, if
+that variable has been customized to ~nil~, rather than silently
+widening to the whole corpus: ~(:collections nil)~ is, like plain
+~nil~, an empty scope as far as ~arc-scope-empty-p~ is concerned, so
+without this check a nil-ed ~arc-vault-collections~ would make
+"ask the vault" search everything instead -- the opposite of what it
+promises.
+
 From inside an existing answer, ~s~ (~arc-ui-change-scope~, see "8.
 In-buffer keys" below) re-asks the same question at a different scope,
-picked with ~completing-read~ from ~arc-scope-presets~ -- an alist of
-~(NAME . SCOPE-PLIST)~ that defaults to ~"everything"~, ~"vault"~,
-~"options"~ and ~"dotfiles"~, and that you can add your own named
-scopes to.
+picked with ~completing-read~ from ~arc-scope-presets~ (in
+~arc-scope.el~) -- an alist of ~(NAME . SCOPE-PLIST)~ that defaults to
+~"everything"~ (~(:all t)~, see above), ~"vault"~, ~"options"~ and
+~"dotfiles"~, and that you can add your own named scopes to.
 
 A scope that matches nothing is not a smaller answer -- it is a
 refusal. When retrieval returns no candidates at all, the model is
@@ -397,8 +421,8 @@ buffer, not necessarily the one at point:
 |-------+-----------------------------+------------------------------------------------------|
 | ~RET~ | ~arc-ui-follow-citation~   | Jump to the citation link at point; does nothing off a link. |
 | ~TAB~ | ~org-cycle~                | Fold/unfold the answer or Sources subtree at point (plain org behaviour). |
-| ~f~   | ~arc-ui-follow-up~        | Prompt for a follow-up question and ask it with the answer subtree *at point* (its own question heading, body and Sources) quoted in as context, as a new answer appended to the buffer. |
-| ~r~   | ~arc-ui-reask~            | Ask the most recently asked question in this buffer again, retrieving afresh -- useful after a bad sampling or a model swap, without retyping. |
+| ~f~   | ~arc-ui-follow-up~        | Prompt for a follow-up question and ask it, at the buffer's current scope, with the answer subtree *at point* (its own question heading, body and Sources) quoted in as context, as a new answer appended to the buffer. |
+| ~r~   | ~arc-ui-reask~            | Ask the most recently asked question in this buffer again, at the same scope, retrieving afresh -- useful after a bad sampling or a model swap, without retyping. |
 | ~s~   | ~arc-ui-change-scope~     | Re-ask the most recently asked question in this buffer at a different scope, picked from ~arc-scope-presets~ (see "Scoping a question" above). |
 | ~w~   | ~arc-ui-capture~          | File the answer at point via ~arc-ui-capture-function~ (see above); reports that it is unconfigured rather than writing anywhere if that is unset. |
 | ~q~   | ~arc-ui-quit~             | Bury the ~*arc*~ buffer. |
@@ -415,7 +439,20 @@ from ~arc-ui--last-question~, which would risk pairing one answer's
 text with a different (and possibly much later) question. ~s~ is
 deliberately re-asking the same question at a new scope for the same
 reason ~r~ does: it reads ~arc-ui--last-question~, not the answer at
-point. All three -- ~f~, ~r~ and ~s~ -- guard on
+point.
+
+~r~ and ~f~ both also read ~arc-ui--last-scope~ -- the scope the
+buffer's most recent answer was actually retrieved at -- and pass it
+straight back to ~arc-ask~, so re-asking or following up stays at
+whatever scope ~s~ (or the entry point that started the buffer, ~i~,
+~n~ or ~o~) last put the buffer at. Passing ~nil~ there instead would
+not mean "the same scope again" -- as with ~arc-ask~ generally (see
+"Scoping a question" above), ~nil~ means "fall back to
+~arc-enabled-collections~" -- so without this, asking with ~n~ (the
+vault) and then pressing ~r~ would silently re-ask against
+~arc-enabled-collections~ instead of staying in the vault.
+
+All three -- ~f~, ~r~ and ~s~ -- guard on
 ~arc-ui--last-question~ being non-nil before doing anything, and
 signal a ~user-error~ in a buffer that has never had ~arc-ask~ render
 an answer into it.
@@ -458,6 +495,23 @@ Two ~defcustom~s tune the choice, both in ~arc-scope.el~:
 roughly 0.2 ms/row -- both defaults are plain numbers, not magic
 constants, and are fair to argue with once your own corpus's size and
 your own patience for a slow query are on the table.
+
+Both actually take effect where the decision is made. ~arc-find-similar~
+(what these two tune) runs inside a forked, ~emacs -Q~-equivalent child
+process (~async-start~, via ~arc--async-do~), which never loads your
+init file, so any ~defcustom~ read there sees only its compiled-in
+default unless the parent explicitly captures the live value and hands
+it across with ~async-inject-variables~. ~arc-knn-candidates~ and
+~arc-scope-bruteforce-max~ are on that injection list, along with
+~arc-limit~ and ~arc-reranker-limit~ (read via ~arc-get-limit~, which
+picks the answer context size) and ~arc-embedding-size~ (read when the
+child opens its own database connection, which it always does, having
+no cached one to inherit) -- so customizing any of these in your init
+file does change retrieval in the real, asynchronous path, not just in
+a synchronous call from ~M-:~. ~test/test-arc-async-injection.el~
+guards this by walking the actual call graph the child runs and
+failing if some future callee reads a new tunable that isn't on the
+injection list.
 
 ** Known limitations
 
