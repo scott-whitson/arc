@@ -8,16 +8,32 @@
 ;; A scope is a plist naming restrictions -- collections, kinds, org tags, a
 ;; path prefix -- that compiles to exactly one SQL predicate over `data'
 ;; joined to `sources'.  Retrieval puts that predicate in a `scoped' CTE and
-;; joins both the vector side and the FTS side against it.
+;; joins both the vector side and the FTS side against it explicitly.
 ;;
-;; The predicate is what makes scoping real rather than cosmetic.  Before
-;; this file existed, a "scoped" query ran the vec0 KNN operator across the
-;; whole corpus and filtered the survivors afterwards, so asking a
-;; vault-scoped question whose nearest global neighbours were all dotfiles
-;; returned no semantic candidates at all -- measured, on the live index:
-;; "how do I enable syncthing in home-manager" put 40 of 40 global nearest
-;; neighbours in dotfiles and none in the vault.  A scope has to reach the
-;; search, not the results.
+;; Before this file existed, the only scoping in the codebase was by whole
+;; collection, and it worked by inlining the scoped rowids directly into the
+;; query text as an `IN (...)' list -- 6,427 integers, twice, on the live
+;; index.  `:kinds', `:tags' and `:path-prefix' scoping did not exist in any
+;; form.  It was believed, and written into this phase's design, that the
+;; old inlined-list query also filtered the vec0 KNN operator's results
+;; *after* an unscoped global search, so a vault-scoped question whose
+;; nearest global neighbours were all dotfiles would return no semantic
+;; candidates at all.  That specific belief was checked against the real,
+;; filtered query and found false: SQLite deterministically flattens a CTE
+;; referenced exactly once and pushes the resulting `rowid IN (...)'
+;; predicate down into vec0's own scan via `sqlite3_vtab_in', so the old
+;; query's scope reached the search after all, by a route it never asked
+;; for. Measured on the live index (428 vault rows of 7,405 chunks): the old
+;; query's semantic arm returned 20 rows, all vault, in the same order as
+;; brute-force cosine distance -- not zero. Forcing that same CTE
+;; `AS MATERIALIZED', which defeats the flattening, reproduces the believed
+;; defect on the identical query text and returns zero rows; that is what
+;; made the old correctness an accident of an optimizer's choice rather than
+;; a designed property, and that dependency, not a missing semantic result,
+;; is what this file actually removes. The genuinely new things here are the
+;; scoping dimensions that did not exist before (`:kinds', `:tags',
+;; `:path-prefix'), an explicit join that does not depend on SQLite choosing
+;; to flatten anything, and no more inlined rowid lists.
 ;;
 ;; Tags are stored the way org itself writes them, colon-delimited and
 ;; colon-anchored (":emacs:nix:"), so a tag match is a substring match that

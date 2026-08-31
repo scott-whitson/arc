@@ -101,8 +101,14 @@ answer; `arc-ask' itself accepts any scope plist."
 (defvar-local arc-ui--last-scope nil
   "The scope the most recent answer in this buffer was retrieved at.
 Set by `arc-ask' as it renders, alongside `arc-ui--last-question'.
-`arc-ui-change-scope' reads it only to offer a sensible default; the
-scope it asks at is whatever the reader picks.")
+Currently write-only: nothing yet reads it back. A `rassoc' lookup
+against `arc-scope-presets' to offer a sensible default to
+`completing-read' would need exact structural equality against a
+preset's plist, and would silently fall through -- with no default
+offered rather than an error -- for a scope built by `arc-ask-vault',
+`arc-ask-options', or from a plain collection list, none of which
+build a plist `equal' to any preset's. Reserved rather than dead, the
+same way `arc-ui--last-sources' is.")
 
 (defun arc-ui-buffer ()
   "Return the arc answer buffer, creating it in `arc-answer-mode' if needed."

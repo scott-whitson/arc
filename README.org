@@ -174,13 +174,16 @@ to know either way.
 
 *** What's built and what isn't
 
-This is a phase 1–4 project: indexing, retrieval and answering all work
-end to end, and ~arc-ask~ renders straight into arc's own answer
-buffer, ~*arc*~. There is no way to scope a single query to a subset of
-collections from a prompt (short of the Lisp-level ~COLLECTIONS~
-argument below), no hooks that reindex a source automatically when it
-changes on disk, and no automated evaluation harness -- those are
-designed (see ~docs/design/~) but not built.
+This is a phase 1–4-and-5-pending project. Indexing, retrieval and
+answering all work end to end, ~arc-ask~ renders straight into arc's
+own answer buffer, ~*arc*~, and, as of this phase, a single query can
+be scoped to a subset of collections, kinds, org tags or a path prefix
+-- see "Scoping a question" below. What phase 5 still has to add:
+hooks that reindex a source automatically when it changes on disk, and
+an automated evaluation harness -- both designed (see ~docs/design/~)
+but not built. The ~*arc*~ buffer's header line reports the corpus's
+size, not its freshness -- see step 6 below -- and that stays true
+until phase 5's freshness tracking lands.
 
 *** 1. Pull the Ollama models
 
@@ -261,15 +264,23 @@ defaults to only ~("builtin manuals")~, regardless of what
 *** 5. Bind arc's commands
 
 arc is a library and does not bind any key for you. It ships
-~arc-command-map~, a prefix keymap with ~i~ on ~arc-ask~, ~R~ on
-~arc-reindex-all~ and ~c~ on ~arc-reindex-cancel~ -- bind that prefix
-to whatever key you like, e.g.:
+~arc-command-map~, a prefix keymap -- bind that prefix to whatever key
+you like, e.g.:
 
 #+begin_src elisp
 (keymap-set global-map "C-c i" arc-command-map)
 #+end_src
 
-~arc-transient~ (in ~arc-ui.el~) offers the same three commands as a
+| Key | Command                 | Effect                                                |
+|-----+--------------------------+--------------------------------------------------------|
+| ~i~ | ~arc-ask~               | Ask a question against ~arc-enabled-collections~ (or an explicit scope from Lisp). |
+| ~n~ | ~arc-ask-vault~         | Ask a question scoped to ~arc-vault-collections~ (the vault only). |
+| ~o~ | ~arc-ask-options~       | Ask a question scoped to ~arc-option-collections~ (NixOS and Home-Manager options only). |
+| ~m~ | ~arc-toggle-chat-model~ | Cycle ~arc-chat-provider~'s model through ~arc-chat-models~. |
+| ~R~ | ~arc-reindex-all~       | Reindex (synchronous from Lisp, asynchronous when called interactively -- see step 3 above). |
+| ~c~ | ~arc-reindex-cancel~    | Cancel an in-progress asynchronous reindex. |
+
+~arc-transient~ (in ~arc-ui.el~) offers the same commands as a
 ~transient~ menu, for whoever prefers that to a keymap.
 
 *** 6. Ask arc something
@@ -293,6 +304,61 @@ count per kind, e.g. "arc · 6855 chunks · file 6427 · org-node 428" --
 so you can see at a glance whether an index exists at all. It does
 not report /freshness/ (whether the corpus is still up to date with
 what is on disk); that tracking is phase 5.
+
+*** Scoping a question
+
+By default ~arc-ask~ searches ~arc-enabled-collections~, but a single
+question can be scoped more narrowly along four dimensions, all
+defined by ~arc-scope~ (in ~arc-scope.el~):
+
++ ~:collections~ -- a list of collection names, e.g. ~("vault")~.
++ ~:kinds~ -- a list of source kinds (~"file"~, ~"info"~, ~"org-node"~,
+  ~"nix-option"~, ~"hm-option"~).
++ ~:tags~ -- a list of org tags. Matched the way org itself writes
+  them, colon-delimited and colon-anchored, so a tag match cannot
+  accidentally match a longer tag with the same ending.
++ ~:path-prefix~ -- a directory or path prefix string.
+
+~(arc-scope :collections '("vault") :tags '("infra"))~ builds a scope
+combining any of these (all given restrictions apply, ANDed together);
+~(arc-scope)~, with no keys, and ~nil~ both mean the whole corpus.
+Pass a scope as ~arc-ask~'s second argument to search it instead of
+~arc-enabled-collections~ for that one question.
+
+The older, simpler calling convention still works unchanged:
+~(arc-ask "prompt" '("vault"))~ -- a plain list of collection-name
+strings -- is normalised into an equivalent ~:collections~ scope by
+~arc-ask-normalize-scope~, so nothing that already calls ~arc-ask~
+this way needs to change.
+
+Two commands wrap the common cases: ~arc-ask-vault~ scopes to
+~arc-vault-collections~ (the vault only, ~("vault")~ by default) and
+~arc-ask-options~ scopes to ~arc-option-collections~ (~("nix options"
+"hm options")~ by default) -- see the key table above (~n~ and ~o~).
+From inside an existing answer, ~s~ (~arc-ui-change-scope~, see "8.
+In-buffer keys" below) re-asks the same question at a different scope,
+picked with ~completing-read~ from ~arc-scope-presets~ -- an alist of
+~(NAME . SCOPE-PLIST)~ that defaults to ~"everything"~, ~"vault"~,
+~"options"~ and ~"dotfiles"~, and that you can add your own named
+scopes to.
+
+A scope that matches nothing is not a smaller answer -- it is a
+refusal. When retrieval returns no candidates at all, the model is
+never called; the ~*arc*~ buffer gets an explicit message instead,
+naming the scope, e.g. "arc: not enough data — nothing in vault
+matched this question." That is deliberate: handing an empty context
+block to a chat model and hoping its prompt talks it out of answering
+is exactly the failure the refusal contract exists to prevent.
+
+*~:tags~ scoping needs a reindex.* ~sources.tags~ is populated only
+when an org-node source is parsed -- from ~#+filetags~ and each
+heading's own tags (see ~arc-source-org.el~) -- and only at index
+time. An index built before this phase has the ~tags~ column (schema
+migrations add it) but no values in it, so ~:tags~ scoping against
+that index silently matches nothing, with no error, until the
+collection is reindexed. Run ~(arc-reindex-all '("vault"))~ (or
+whichever collection holds the org-node sources you want tag-scoped)
+to populate it.
 
 *** 7. Capture an answer to your vault
 
@@ -333,6 +399,7 @@ buffer, not necessarily the one at point:
 | ~TAB~ | ~org-cycle~                | Fold/unfold the answer or Sources subtree at point (plain org behaviour). |
 | ~f~   | ~arc-ui-follow-up~        | Prompt for a follow-up question and ask it with the answer subtree *at point* (its own question heading, body and Sources) quoted in as context, as a new answer appended to the buffer. |
 | ~r~   | ~arc-ui-reask~            | Ask the most recently asked question in this buffer again, retrieving afresh -- useful after a bad sampling or a model swap, without retyping. |
+| ~s~   | ~arc-ui-change-scope~     | Re-ask the most recently asked question in this buffer at a different scope, picked from ~arc-scope-presets~ (see "Scoping a question" above). |
 | ~w~   | ~arc-ui-capture~          | File the answer at point via ~arc-ui-capture-function~ (see above); reports that it is unconfigured rather than writing anywhere if that is unset. |
 | ~q~   | ~arc-ui-quit~             | Bury the ~*arc*~ buffer. |
 
@@ -345,16 +412,52 @@ prompt entirely from the answer subtree at point via
 ~arc-ui-answer-at-point~ -- which already opens with its own
 ~** question~ heading -- rather than naming the question separately
 from ~arc-ui--last-question~, which would risk pairing one answer's
-text with a different (and possibly much later) question. Both still
-guard on ~arc-ui--last-question~ being non-nil before doing anything,
-and signal a ~user-error~ in a buffer that has never had ~arc-ask~
-render an answer into it.
+text with a different (and possibly much later) question. ~s~ is
+deliberately re-asking the same question at a new scope for the same
+reason ~r~ does: it reads ~arc-ui--last-question~, not the answer at
+point. All three -- ~f~, ~r~ and ~s~ -- guard on
+~arc-ui--last-question~ being non-nil before doing anything, and
+signal a ~user-error~ in a buffer that has never had ~arc-ask~ render
+an answer into it.
 
-The spec (~docs/design/2026-08-29-design.md~) also names an in-buffer
-~s~ key (change scope and re-ask) and two global entry points, ~n~
-(vault only) and ~o~ (options only). None of the three are built:
-they all need the scoped retrieval that phase 3 adds, and binding them
-now would ship keys that cannot work.
+*** Retrieval strategy and its knobs
+
+Retrieval picks between two vector-search strategies per query, and
+which one it picks depends on the scope's size, not the corpus's:
+
++ *KNN* -- ask the ~vec0~ extension's nearest-neighbour operator for
+  the ~k~ nearest rows, globally, then keep the ones inside the scope.
+  Fast, but the operator's ~k~ result rows are chosen before scoping
+  is applied, so a narrow scope needs ~k~ raised well past
+  ~arc-knn-candidates~ to have a chance of returning enough in-scope
+  rows -- and sqlite-vec 0.1.6 refuses any ~k~ over *4096* (measured:
+  ~k = 7405~, the full corpus size, errors with "k value in knn query
+  too large").
++ *Brute force* -- compute ~vec_distance_cosine~ directly against
+  every row the scope admits, with no ~k~ at all. Exact, and its cost
+  tracks the scope's size, not the corpus's, because SQLite only
+  evaluates the distance function on the rows the join admits: measured
+  at roughly 0.2 ms per row in scope, 54 ms for a 428-row scope and
+  1.59 s across the full 7,405-row corpus.
+
+Two ~defcustom~s tune the choice, both in ~arc-scope.el~:
+
++ ~arc-knn-candidates~ (default 40) -- how many nearest neighbours
+  retrieval wants, in or out of scope. For an unscoped query this is
+  ~k~ directly; for a scoped one it is what ~arc-scope-vector-plan~
+  scales ~k~ up to approximate, or the number of rows brute force pulls
+  in scope order.
++ ~arc-scope-bruteforce-max~ (default 2000) -- the largest scope, in
+  chunks, searched by brute force rather than a scaled-up KNN. Above
+  it, ~arc-scope-vector-plan~ scales ~k~ by the ratio of corpus size to
+  scope size; if that scaled ~k~ would exceed the 4096 ceiling, brute
+  force runs regardless of cost, because there is no ~k~ that could
+  work instead.
+
+2000 was picked to keep brute force's worst case near 400 ms at
+roughly 0.2 ms/row -- both defaults are plain numbers, not magic
+constants, and are fair to argue with once your own corpus's size and
+your own patience for a slow query are on the table.
 
 ** Known limitations
 

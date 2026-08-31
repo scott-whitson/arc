@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make a scoped query actually search its scope, and expose that as the `n` (vault) and `o` (options) entry points, the in-buffer `s` key, and an explicit refusal when nothing in scope matches.
+**Goal:** Add scoping dimensions that do not exist yet (`:kinds`, `:tags`, `:path-prefix` — only whole-collection scoping exists today), stop scoping's correctness from depending on an optimizer choice nobody asked for, and expose scope as the `n` (vault) and `o` (options) entry points, the in-buffer `s` key, and an explicit refusal when nothing in scope matches.
 
-**Architecture:** A scope is a plist compiled to one SQL predicate over `data` joined to `sources`. That predicate becomes a `scoped` CTE that both the vector side and the FTS side join against, replacing today's post-hoc filter and today's inlined rowid `IN`-lists. The vector side picks its strategy from the scope's measured row count: brute-force `vec_distance_cosine` inside a small scope, the vec0 KNN operator with a proportionally raised `k` for a large one.
+**Architecture:** A scope is a plist compiled to one SQL predicate over `data` joined to `sources`. That predicate becomes a `scoped` CTE that both the vector side and the FTS side join against explicitly, replacing today's inlined rowid `IN`-list — which pastes every scoped rowid into the query text (twice, on the live corpus: 6,427 integers), can express collection scoping only, and turns out to already reach vec0's scan in practice, because SQLite flattens a CTE referenced exactly once and pushes the resulting `rowid IN (...)` down into the vector search via `sqlite3_vtab_in` (confirmed: forcing that CTE `AS MATERIALIZED`, which defeats the flattening, makes the identical query return zero rows). **See "Correction" below** — an earlier draft of this document justified the whole phase on the claim that this old path returned no semantic candidates for a scoped query; that specific claim was wrong, checked against the unfiltered query rather than the filtered one. The vector side picks its strategy from the scope's measured row count: brute-force `vec_distance_cosine` inside a small scope, the vec0 KNN operator with a proportionally raised `k` for a large one.
 
 **Tech Stack:** Emacs Lisp, SQLite 3.51 (FTS5, `json`-free), sqlite-vec `vec0` 0.1.6, `llm`/`llm-ollama`, ERT.
 
@@ -12,7 +12,7 @@
 
 ## Measured constraints
 
-These were measured on 2026-08-30 against a copy of the live index (7,405 chunks: dotfiles 6,427 / vault 428 / hm options 200 / nix options 200 / builtin manuals 150). They are the reason this plan exists in its current shape; do not re-derive them, and do not design against different numbers without re-measuring.
+These were measured on 2026-08-30 against a copy of the live index (7,405 chunks: dotfiles 6,427 / vault 428 / hm options 200 / nix options 200 / builtin manuals 150). The numbers below are accurate as measurements; what they were originally taken to prove about the *old, pre-phase code's own behaviour* was wrong — see "Correction" immediately below the table. Do not re-derive these figures, and do not design against different numbers without re-measuring.
 
 | Measurement | Result |
 |---|---|
@@ -21,12 +21,35 @@ These were measured on 2026-08-30 against a copy of the live index (7,405 chunks
 | Global top-40 KNN for "how is my backup strategy set up" | 36 dotfiles, 3 vault, 1 nix options |
 | vec0 `k` ceiling | **4096** — `k = 7405` errors with `k value in knn query too large, provided 7405 and the limit is 4096` |
 | KNN k=40 / k=200 / k=1000, unscoped | 13 ms / 13 ms / 24 ms |
-| Vault-scoped hits at k=40 / 200 / 1000 | 0 / 2 / 7 |
+| Vault-scoped hits at k=40 / 200 / 1000, taking each unscoped KNN result set and counting how many of it are vault rows | 0 / 2 / 7 |
 | Brute-force `vec_distance_cosine` joined to the 428-row vault scope | 54 ms |
 | Brute-force `vec_distance_cosine` across all 7,405 rows | **1.59 s** |
 | SQLite version available to Emacs 30.2 on this host | 3.51.2 (`FULL OUTER JOIN` and `LIKE ... ESCAPE` both confirmed working) |
 
-The load-bearing conclusion: **brute-force cost scales with scope size, not corpus size** (SQLite pushes the join filter, so `vec_distance_cosine` is only evaluated on rows in scope). That is what makes an adaptive strategy correct and cheap rather than a compromise.
+The load-bearing conclusion: **brute-force cost scales with scope size, not corpus size** (SQLite pushes the join filter, so `vec_distance_cosine` is only evaluated on rows in scope). That is what makes an adaptive strategy correct and cheap rather than a compromise. This conclusion is unaffected by the correction below — it is about the *new* brute-force path, not about what the old code did.
+
+### Correction (recorded after implementation, 2026-08-30)
+
+**What this document originally claimed, and used as its central justification:** that the old, pre-phase retrieval ran a global, unscoped `k = 40` KNN and filtered the survivors down to the requested scope afterwards, and that a vault-scoped question therefore came back with **zero** semantic candidates and silently fell back to keyword-only search. The evidence offered was the first row of the table above — 40 of 40 global nearest neighbours in `dotfiles`, none in `vault` — treated as proof of the *old, scoped code path's* end-to-end output.
+
+**That specific claim is false, and this document should not have made it.** It was checked twice after the fact — once by Task 5's implementer, once directly against a copy of the live index — and both times the same thing was found:
+
+- The 40/40 measurement above is real, but it measures the *unfiltered, global* top-40. Nobody had actually run the *old code's scoped query* before asserting what it returned.
+- Running the old query's semantic arm, as actually written, against the real corpus (428 vault rows out of 7,405 chunks) returns **20 rows, all vault** — not zero. Those 20 rowids are identical, and identically ordered, to the true nearest 20 by brute-force cosine distance, with real distinct ranks (1 through 8 checked against strictly increasing distances, not tied).
+- **Why:** the old query built its scope as a rowid list and inlined it directly into the SQL text (see Task 3/6 below, and `arc.el` prior to this phase). SQLite deterministically flattens a CTE that is referenced exactly once and pushes the resulting `rowid IN (...)` predicate down into vec0's own scan via `sqlite3_vtab_in`. The scope reached the search after all — by a route the old code never asked for and gave no guarantee of.
+- A further claim made during the same investigation — that ranking was destroyed and every surviving row tied at `rank = 1` — is **also false on real data**. That was an artifact of a synthetic test fixture built with tied distances; the real corpus shows genuine, strictly-ordered ranks.
+
+**What remains true, and is the actual, honest justification for this phase:**
+
+1. `:kinds`, `:tags` and `:path-prefix` scoping did not exist in any form before this phase — only whole-collection scoping did. This is new capability, not a fix.
+2. The `n` / `o` / `s` / `m` entry points did not exist and the project needs them to replace its predecessor.
+3. The refusal contract is new: when retrieval returns nothing in scope, the model is never called, and the answer says so, naming the scope.
+4. The one robustness claim that survives from the original framing: the old query's correctness for collection scoping depended on SQLite *choosing* to flatten that CTE — an optimizer decision, not a designed property. Forcing `AS MATERIALIZED` on the identical query text defeats the flattening and returns zero rows with no error. A future edit that referenced the same CTE a second time would have silently un-scoped every query. The new, explicit `scoped` CTE joined into both search arms does not depend on the optimizer's cooperation.
+5. The old query also pasted its entire scoped rowid list into its own SQL text twice (once for the vector arm, once for the keyword arm) — 6,427 integers on the live corpus. That inlining is removed regardless of the correctness question above.
+
+The table above is left intact because the numbers in it are real and some of them (the `k` ceiling, the brute-force timings) remain load-bearing for Task 4's strategy. What changed is the caption: those numbers no longer stand as evidence that the old scoped-query code path returned near-zero semantic candidates, because nobody had measured that path directly until after this phase's design was already written.
+
+**A note on the rest of this document below:** the per-task sections that follow (Task 3's `arc-scope.el` Commentary sample, Task 6's `arc--find-similar` docstring sample, and a Task 6 "Expected: FAIL... returns no ids at all under the current post-hoc filter" prediction) were written before this correction and still carry the same retracted framing verbatim, in some cases word-for-word. They are left as originally written, as the historical record of what this plan believed at the time it was drafted — not deleted or silently rewritten. Read every occurrence of "filtered afterwards," "40 of 40," "returns no ids at all," or "no semantic candidates whatsoever" further down in this document in light of this Correction section, not as an independently verified claim. The actual shipped code (`arc-scope.el`, `arc.el`) and its own commentary reflect the corrected understanding; this plan document does not fully, and that gap is intentional here rather than fixed retroactively line by line.
 
 ## Global Constraints
 
