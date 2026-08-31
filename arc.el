@@ -166,10 +166,13 @@ relevance.  See https://github.com/s-kostyaev/reranker for more
 details."
   :type 'string)
 
-(defcustom arc-reranker-similarity-threshold 0
-  "Reranker similarity threshold.
-If set, all quotes with similarity less than threshold will be filtered out."
-  :type 'number)
+(defcustom arc-reranker-similarity-threshold nil
+  "Drop reranked chunks scoring below this similarity.
+nil disables the check.  It used to default to 0, which reads like
+\"off\" but is not: it silently dropped every negatively-scored chunk,
+and `nil' is the value that actually means no filtering."
+  :type '(choice (const nil) number)
+  :group 'arc)
 
 (defcustom arc-reranker-limit 20
   "Number of quotes for send to reranker."
