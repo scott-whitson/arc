@@ -4,6 +4,7 @@
 ;; shape is asserted, not assumed: an agent that cannot parse the output
 ;; has no other way to find out.
 (require 'ert)
+(require 'cl-lib)
 (require 'json)
 (defvar att-root (expand-file-name ".." (file-name-directory
                                          (or load-file-name buffer-file-name))))
@@ -52,6 +53,27 @@ that has to distinguish them will get it wrong otherwise."
 (ert-deftest att-search-rejects-an-unknown-scope-by-name ()
   (arc-test-with-temp-db
    (should-error (arc-tool-search "alpha" "nosuchscope" 10 'keyword))))
+
+(ert-deftest att-search-rejects-an-unrecognised-arm-rather-than-mislabel-it ()
+  "`arc--find-similar' silently falls through an unrecognised arm to
+`fused'; `arc-tool-search' must not echo the caller's typo back in its
+`:arm' field as though that arm had actually run."
+  (arc-test-with-temp-db
+   (arc-index-source
+    '(:kind "file" :path "/tmp/a.txt"
+      :chunks ((:text "alpha one" :line-start 1 :line-end 1)))
+    "test")
+   (should-error (arc-tool-search "alpha" "everything" 10 'bogus))))
+
+(ert-deftest att-search-normalises-a-nil-arm-to-fused-in-its-own-report ()
+  (arc-test-with-temp-db
+   (arc-index-source
+    '(:kind "file" :path "/tmp/a.txt"
+      :chunks ((:text "alpha one" :line-start 1 :line-end 1)))
+    "test")
+   (cl-letf (((symbol-function 'llm-embedding) (lambda (_p _t) [1.0 0.0 0.0])))
+     (let ((out (att--parse (arc-tool-search "alpha" "everything" 10 nil))))
+       (should (equal (alist-get 'arm out) "fused"))))))
 
 (ert-deftest att-scopes-lists-every-preset ()
   (let* ((out (att--parse (arc-tool-scopes)))

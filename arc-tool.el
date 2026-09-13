@@ -23,6 +23,20 @@
 (require 'arc-index)
 (require 'arc-scope)
 
+(defun arc-tool--arm (arm)
+  "Normalise ARM to `keyword' or `fused', or signal for anything else.
+`arc--find-similar' silently treats an unrecognised ARM as `fused' --
+harmless there, since its only other callers pass a value they chose
+themselves.  `arc-tool-search' instead echoes ARM back in its JSON
+`:arm' field for a caller that cannot see the code, so doing the same
+silent fallback here would mislabel a typo as the arm that actually
+ran; e.g. `--arm bogus' would report `\"arm\":\"bogus\"' while quietly
+having run the fused query."
+  (pcase arm
+    ((or 'nil 'fused) 'fused)
+    ('keyword 'keyword)
+    (_ (error "arc: unknown arm %S (try: keyword, fused)" arm))))
+
 (defun arc-tool--scope (name)
   "Return the scope plist NAME names in `arc-scope-presets', or signal."
   (if (or (null name) (string-empty-p name))
@@ -52,15 +66,18 @@
 (defun arc-tool-search (query &optional scope-name limit arm)
   "Search for QUERY and return the results as a JSON string.
 SCOPE-NAME names an entry in `arc-scope-presets'.  LIMIT overrides
-`arc-search-limit'.  ARM is passed through to `arc-search-documents'."
+`arc-search-limit'.  ARM is normalised by `arc-tool--arm' -- `keyword'
+or `fused' (nil), anything else signals -- and passed through to
+`arc-search-documents'."
   (let* ((scope (arc-tool--scope scope-name))
+         (arm (arc-tool--arm arm))
          (arc-search-limit (or limit arc-search-limit))
          (start (float-time))
          (docs (arc-search-documents query scope arm)))
     (json-serialize
      (list :query query
            :scope (or scope-name "default")
-           :arm (symbol-name (or arm 'fused))
+           :arm (symbol-name arm)
            :elapsed_ms (round (* 1000 (- (float-time) start)))
            :count (length docs)
            :results (vconcat (mapcar #'arc-tool--document-json docs))))))
