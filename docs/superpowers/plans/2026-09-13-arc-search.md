@@ -1304,6 +1304,11 @@ commands read the document instead of re-parsing the buffer."
 
 ### Task 6: Consult source, two-stage
 
+> Superseded by Ruling T6-E: the `sit-for`/`arc-search-hybrid-delay` mechanism
+> below was replaced by `arc-search--two-stage`, which lets consult's own
+> `consult-async-input-debounce` govern timing instead. Left as written below
+> for the historical record; do not implement against this section.
+
 **Files:**
 - Modify: `arc-search-ui.el`
 - Test: `test/test-arc-search-consult.el` (create)

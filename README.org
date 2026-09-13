@@ -51,8 +51,13 @@ In addition to ~arc-ask~, which answers with a local model, arc exposes the
 same index as plain search with no model in the path.
 
 + ~M-x arc-search~ :: minibuffer search. Types on the BM25 arm, which needs no
-  embedding call and returns in tens of milliseconds, then upgrades to the full
-  hybrid after ~arc-search-hybrid-delay~ seconds of idle. Requires ~consult~;
+  embedding call and returns in tens of milliseconds, then -- once you pause --
+  the same invocation re-ranks the whole list with the full hybrid's own
+  ordering, not just what BM25 missed. There is no arc-side delay to tune:
+  timing is consult's own, governed by ~consult-async-input-debounce~, which
+  restarts the computation if a keystroke interrupts it. The marginalia
+  annotation on each candidate says which arm actually produced it, so you can
+  see the keyword-only paint settle into the fused one. Requires ~consult~;
   arc loads and works without it, minus this command.
 + ~M-x arc-search-show~ :: the same search rendered into ~*arc-search*~, where
   ~TAB~ expands a document to every passage that matched, ~g~ re-runs and ~s~
