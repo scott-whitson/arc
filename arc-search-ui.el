@@ -105,11 +105,28 @@ looking at to splice into rather than having to reconstruct it."
     (arc-search-render (arc-search-documents query scope) query scope)
     (display-buffer arc-search-results-buffer-name)))
 
+(defun arc-search--document-link (doc)
+  "Return an org link string for DOC, targeting its best-matched line.
+`arc-source-link' defaults to line 1 when given no LINE, which is
+wrong for a \"file\" result: the passage that actually matched is
+almost never the first line of the file.  DOC's first passage is its
+best-scoring chunk (`arc-rollup' keeps passages best-first), so its
+`:line-start' is passed through as LINE.  A document with no passages,
+or whose first passage carries no `:line-start', falls back to
+`arc-source-link's own one-argument form rather than passing a nil
+LINE through -- `arc-source-link's \"file\" branch does `(or line 1)'
+so this fallback only matters for readability, not correctness, but a
+nil arms-length LINE reads as a mistake even where it happens to work.
+LINE is ignored by `arc-source-link' for every other kind, so passing
+it through for those too is harmless."
+  (let ((line (plist-get (car (plist-get doc :passages)) :line-start)))
+    (if line (arc-source-link doc line) (arc-source-link doc))))
+
 (defun arc-search-visit ()
-  "Visit the document at point."
+  "Visit the document at point, jumping to its best-matched line."
   (interactive)
   (let ((doc (arc-search--document-at-point)))
-    (org-link-open-from-string (arc-source-link doc))))
+    (org-link-open-from-string (arc-search--document-link doc))))
 
 (defun arc-search--splice-document (docs full)
   "Return DOCS with the entry matching FULL's `:source-id' replaced by FULL.

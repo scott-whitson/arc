@@ -101,5 +101,58 @@ reason rollup exists, and hiding it in the ranking alone wastes it."
          (spliced (arc-search--splice-document asu--docs full)))
     (should (equal spliced asu--docs))))
 
+;; Review round 1, finding 1: the three tests above exercise
+;; `arc-search--splice-document' and `arc-search--rerender-preserving-point'
+;; directly, never the command bound to TAB. A regression back to the
+;; brief's `(arc-search--rerender-preserving-point (list full))' at that one
+;; call site would still pass all of them. This test drives
+;; `arc-search-toggle-passages' itself, stubbing `arc-search-documents' so no
+;; database is touched, and is the one that would catch that exact
+;; regression. Confirmed by temporarily reverting the command's body to the
+;; broken form and re-running: this test failed (b.nix disappeared) while
+;; every other test still passed, then confirmed passing again once
+;; reverted back.
+(ert-deftest asu-toggle-passages-command-preserves-other-documents ()
+  "The command bound to TAB must not discard the buffer's other documents."
+  (arc-search-render asu--docs "alpha" '(:all t))
+  (with-current-buffer arc-search-results-buffer-name
+    (goto-char (point-min))
+    (should (re-search-forward "a\\.nix" nil t))
+    (goto-char (match-beginning 0))
+    (let ((full (list :source-id 1 :kind "file" :path "/tmp/a.nix" :title "a.nix"
+                       :org-id nil :option-name nil :info-node nil
+                       :score 0.5 :chunk-count 3 :best-rank 0
+                       :passages '((:chunk "alpha one" :line-start 1 :line-end 1 :score 0.5)
+                                   (:chunk "alpha two" :line-start 9 :line-end 9 :score 0.4)
+                                   (:chunk "alpha extra" :line-start 20 :line-end 20 :score 0.3)))))
+      ;; Stand in for a real re-query with `arc-rollup-passages' bound
+      ;; high: no database, no Ollama, just a canned document list.
+      (cl-letf (((symbol-function 'arc-search-documents)
+                 (lambda (&rest _) (list full))))
+        (arc-search-toggle-passages)))
+    (should (string-match-p "a\\.nix" (buffer-string)))
+    (should (string-match-p "b\\.nix" (buffer-string)))
+    (should (string-match-p "alpha extra" (buffer-string)))))
+
+;; Controller ruling T5-A: `arc-search-visit' called `arc-source-link'
+;; with no LINE, so every "file" result opened at line 1 regardless of
+;; where it matched. `arc-search--document-link' fixes that by passing
+;; the document's first (best-scoring) passage's `:line-start' through.
+;; Tested directly, never via `org-link-open-from-string', so nothing
+;; is actually opened.
+(ert-deftest asu-document-link-targets-the-best-passage-line ()
+  (let ((doc (list :source-id 5 :kind "file" :path "/tmp/c.nix" :title "c.nix"
+                    :org-id nil :option-name nil :info-node nil
+                    :score 0.3 :chunk-count 1 :best-rank 0
+                    :passages '((:chunk "x" :line-start 42 :line-end 42 :score 0.3)))))
+    (should (string-match-p "::42\\]\\]" (arc-search--document-link doc)))))
+
+(ert-deftest asu-document-link-falls-back-when-there-is-no-passage-line ()
+  "No passages at all must not error, and must not fabricate a line number."
+  (let ((doc (list :source-id 6 :kind "file" :path "/tmp/d.nix" :title "d.nix"
+                    :org-id nil :option-name nil :info-node nil
+                    :score 0.1 :chunk-count 0 :best-rank 0 :passages nil)))
+    (should (string-match-p "::1\\]\\]" (arc-search--document-link doc)))))
+
 (provide 'test-arc-search-ui)
 ;;; test-arc-search-ui.el ends here
