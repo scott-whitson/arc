@@ -123,9 +123,13 @@ else
   # Plain text by default. jq is optional: fall back to the raw JSON.
   if command -v jq >/dev/null 2>&1; then
     case "$cmd" in
-      search) printf '%s' "$out" | jq -r '.results[] | "\(.path // .option_name // .info_node)  [\(.chunks) match(es), score \(.score|.*1000|round/1000)]\n\(.passages[] | "    \(.line_start): \(.text)")"' ;;
+      # Header once per document, then its passages. The passage list must be
+      # a SEPARATE jq output (comma), not interpolated into the header string:
+      # `\(.passages[] | ...)` inside one string makes jq emit the whole string
+      # once per passage, repeating the header for every matched line.
+      search) printf '%s' "$out" | jq -r '.results[] | "\(.path // .option_name // .info_node)  [\(.chunks) match(es), score \(.score|.*1000|round/1000)]", (.passages[] | "    \(.line_start // "-"): \(.text | gsub("[ \t\n]+"; " ") | .[0:160])")' ;;
       scopes) printf '%s' "$out" | jq -r '.scopes[] | "\(.name)  (\(.chunks) chunks)"' ;;
-      stats)  printf '%s' "$out" | jq -r '"chunks: \(.chunks)  sources: \(.sources)", (.kinds[] | "  \(.kind): \(.chunks)"), (.collections[] | "  \(.collection): \(.sources) source(s), \(.chunks) chunk(s), last indexed \(.last_indexed_at // "never")"), (.freshness[] | "  \(.collection): \(.state)")' ;;
+      stats)  printf '%s' "$out" | jq -r '"chunks: \(.chunks)  sources: \(.sources)", (.kinds[] | "  \(.kind): \(.chunks)"), (.collections[] | "  \(.collection): \(.sources) source(s), \(.chunks) chunk(s), last indexed \(if .last_indexed_at then (.last_indexed_at|strflocaltime("%Y-%m-%d %H:%M")) else "never" end)"), (.freshness[] | "  \(.collection): \(.state)")' ;;
     esac
   else
     printf '%s\n' "$out"
