@@ -48,36 +48,81 @@ results, not an error thrown out of the minibuffer."
      (let ((arc-rollup-function 'max))
        (should (= (length (arc-search--candidates "alpha" '(:all t) nil)) 1))))))
 
+(ert-deftest asx-candidates-are-tagged-with-the-arm-that-found-them ()
+  "Important-7(b): the marginalia must be able to say which arm a row
+came from, which means the candidate has to carry that itself."
+  (arc-test-with-temp-db
+   (arc-index-source
+    '(:kind "file" :path "/tmp/a.txt"
+      :chunks ((:text "alpha one" :line-start 1 :line-end 1)))
+    "test")
+   (let ((arc-rollup-function 'max))
+     (should (eq (get-text-property
+                  0 'arc-search-arm
+                  (car (arc-search--candidates "alpha" '(:all t) 'keyword)))
+                'keyword)))))
+
+(ert-deftest asx-candidates-tag-a-fallback-to-keyword-honestly ()
+  "A dead embedding endpoint on a requested fused search falls back to
+the keyword arm's own results (see the previous test) -- those results
+must be tagged `keyword', not `fused', or the marginalia would claim a
+re-rank that never ran."
+  (arc-test-with-temp-db
+   (arc-index-source
+    '(:kind "file" :path "/tmp/a.txt"
+      :chunks ((:text "alpha one" :line-start 1 :line-end 1)))
+    "test")
+   (cl-letf (((symbol-function 'llm-embedding)
+              (lambda (&rest _) (error "connection refused"))))
+     (let ((arc-rollup-function 'max))
+       (should (eq (get-text-property
+                    0 'arc-search-arm
+                    (car (arc-search--candidates "alpha" '(:all t) nil)))
+                  'keyword))))))
+
+(ert-deftest asx-stage-annotation-reads-off-the-candidate ()
+  (should (equal (arc-search--stage-annotation
+                 (propertize "x" 'arc-search-arm 'keyword))
+                "  keyword"))
+  (should (equal (arc-search--stage-annotation
+                 (propertize "x" 'arc-search-arm 'fused))
+                "  fused"))
+  (should (null (arc-search--stage-annotation (propertize "x" 'arc-document nil)))))
+
 (defun asx--doc (id)
   "Return a minimal file-kind document plist identified by ID."
   (list :kind "file" :path (format "/tmp/%s.txt" id) :source-id id
         :chunk-count 1))
 
-(ert-deftest asx-two-stage-calls-back-twice-with-disjoint-source-ids ()
-  "The sink `arc-search--two-stage' feeds only clears on the FIRST
-callback and APPENDS on every later one in the same invocation, so the
-second callback must carry only what the first did not -- otherwise
-every document both arms found would render twice."
+(defun asx--call-source-ids (call)
+  "Return the `:source-id' list of candidates in CALL, a two-stage
+callback argument -- nil unless CALL is a candidate list."
+  (mapcar (lambda (c) (plist-get (get-text-property 0 'arc-document c) :source-id))
+          call))
+
+(ert-deftest asx-two-stage-paints-keyword-then-flushes-then-fused ()
+  "Important-7(a): the fused arm must re-rank the WHOLE list, not just
+the tail the keyword arm missed -- `consult--async-dynamic' only clears
+its display on the FIRST callback and APPENDS on every later one, so an
+earlier version sent only the fused arm's extras, freezing BM25's order
+for everything it had already found. Sending `flush' between the two
+calls clears the first paint (`consult--async-sink' treats the symbol
+`flush' as \"clear the candidate list\"), so the second call's own
+order -- the fused arm's real ranking, `b' before `a' here even though
+the keyword arm found `a' first -- is what survives, not an append."
   (let* ((calls nil)
          (keyword-docs (list (asx--doc "a") (asx--doc "b")))
-         (fused-docs (list (asx--doc "b") (asx--doc "c"))))
+         (fused-docs (list (asx--doc "b") (asx--doc "a") (asx--doc "c"))))
     (cl-letf (((symbol-function 'arc-search-documents)
                (lambda (_query _scope &optional arm)
                  (if (eq arm 'keyword) keyword-docs fused-docs))))
       (arc-search--two-stage "alpha" '(:all t)
                              (lambda (docs) (push docs calls))))
     (setq calls (nreverse calls))
-    (should (= (length calls) 2))
-    (should (equal (mapcar (lambda (c)
-                              (plist-get (get-text-property 0 'arc-document c)
-                                        :source-id))
-                           (nth 0 calls))
-                   '("a" "b")))
-    (should (equal (mapcar (lambda (c)
-                              (plist-get (get-text-property 0 'arc-document c)
-                                        :source-id))
-                           (nth 1 calls))
-                   '("c")))))
+    (should (= (length calls) 3))
+    (should (equal (asx--call-source-ids (nth 0 calls)) '("a" "b")))
+    (should (eq (nth 1 calls) 'flush))
+    (should (equal (asx--call-source-ids (nth 2 calls)) '("b" "a" "c")))))
 
 (ert-deftest asx-command-is-guarded-on-consult ()
   (should (eq (fboundp 'arc-search) (featurep 'consult))))

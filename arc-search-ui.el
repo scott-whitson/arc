@@ -199,6 +199,20 @@ erroring or blanking it."
               (format " · %s" (plist-get doc :kind))
             "")))
 
+(defun arc-search--stage-annotation (cand)
+  "Return the marginalia annotation for CAND: which arm actually found it.
+
+The spec calls for the active stage to be \"visible in the marginalia
+annotation\" -- this is that surface.  Reads the `arc-search-arm' text
+property `arc-search--candidates' propertizes each candidate with, so
+it says `keyword' while the fast BM25-only paint is on screen and
+`fused' once `arc-search--two-stage's flush-then-replace has landed
+the hybrid's own ranking (see that function's commentary for why the
+replacement, not an append, is what makes the fused arm's order the
+one that survives)."
+  (when-let* ((arm (get-text-property 0 'arc-search-arm cand)))
+    (format "  %s" (symbol-name arm))))
+
 (defun arc-search--candidates (query scope arm)
   "Return propertised candidate strings for QUERY in SCOPE using ARM.
 
@@ -208,57 +222,73 @@ full-corpus query.
 
 Never signals.  A failure here is most often an unreachable embedding
 endpoint on the hybrid arm, and the correct response is to fall back to
-the keyword arm rather than throw the user out of the minibuffer."
+the keyword arm rather than throw the user out of the minibuffer.
+
+Each candidate carries the arm that *actually* produced it on its
+`arc-search-arm' text property -- not necessarily the ARM requested,
+since a dead embedding endpoint falls back to the keyword arm's
+results, and tagging that fallback `fused' would claim a re-rank in the
+marginalia annotation (`arc-search--stage-annotation') that never
+happened."
   (if (string-empty-p (string-trim (or query "")))
       nil
-    (let ((docs (condition-case _
-                    (arc-search-documents query scope arm)
-                  (error
-                   (unless (eq arm 'keyword)
-                     (condition-case _
-                         (arc-search-documents query scope 'keyword)
-                       (error nil)))))))
+    (let* ((actual-arm (or arm 'fused))
+           (docs (condition-case _
+                     (arc-search-documents query scope arm)
+                   (error
+                    (unless (eq arm 'keyword)
+                      (setq actual-arm 'keyword)
+                      (condition-case _
+                          (arc-search-documents query scope 'keyword)
+                        (error nil)))))))
       (mapcar (lambda (doc)
                 (propertize (concat (arc-source-label doc)
                                     (arc-search--annotate doc))
-                            'arc-document doc))
+                            'arc-document doc
+                            'arc-search-arm actual-arm))
               docs))))
 
 (defun arc-search--two-stage (input scope callback)
   "Compute two-stage candidates for INPUT in SCOPE, calling CALLBACK.
 
 Calls CALLBACK once with the keyword arm's candidates -- the fast,
-~50ms first paint that needs no embedding call -- and then, still
-within this same invocation, a second time with whatever the fused
-arm found that the keyword arm did not already return, deduped by the
-`:source-id' carried on each candidate's `arc-document' text property.
+~50ms first paint that needs no embedding call -- then, still within
+this same invocation, `flush' to clear that paint, then once more with
+the fused arm's full, independently-ranked result set.
 
-The dedupe matters because the sink this feeds (`consult--async-dynamic',
-see its handling of the `init'/`running' state) only clears the display
-on the FIRST callback; every later callback in the same invocation
-APPENDS.  Sending the fused arm's full result set on the second call
-would duplicate every document both arms found; sending only the
-extras is what makes two callbacks read as one result set that
-sharpens, rather than one that repeats itself with more entries below.
+An earlier version sent only the fused documents the keyword arm had
+missed, appended after the first paint, because the sink this feeds
+(`consult--async-dynamic') only clears its display on the FIRST
+callback and APPENDS on every later one. That kept BM25's order frozen
+for every document it found and let the fused arm only order the tail
+-- which discarded exactly the re-ranking this whole hybrid exists to
+provide. `consult--async-dynamic' passes a non-nil callback argument
+straight to the sink as an action (see its `compute' closure around
+`(funcall sink response)'), and the sink's action protocol
+(`consult--async-sink') treats the symbol `flush' as \"clear the
+candidate list\" -- so calling CALLBACK with `flush' between the two
+result sets clears the first paint before the second one lands, and
+the fused arm's own order survives untouched. Verified against a real
+`consult--dynamic-collection' pipeline (`consult--async-wrap' plus
+`consult--async-sink') in a throwaway daemon: the resulting candidate
+order after keyword-then-flush-then-fused was byte-for-byte the order
+`arc-search-documents' returns for the fused arm alone, where the
+previous append-only version was not.
+
+No dedupe is needed on the second call now that it replaces rather
+than appends -- every duplicate the fused arm and the keyword arm
+share is exactly one entry in the fused arm's own ranked list.
 
 Never calls CALLBACK after returning, matching the contract
-`consult--async-dynamic' documents for its FUN argument.  Never signals:
+`consult--async-dynamic' documents for its FUN argument. Never signals:
 `arc-search--candidates' already fails soft per arm, so a dead
-embedding endpoint here still delivers the keyword-arm callback --
-this function then has nothing new to add, so the second call is
-just empty, not absent."
-  (let* ((first (arc-search--candidates input scope 'keyword))
-         (seen (mapcar (lambda (c)
-                          (plist-get (get-text-property 0 'arc-document c) :source-id))
-                        first)))
-    (funcall callback first)
-    (let* ((full (arc-search--candidates input scope nil))
-           (extra (cl-remove-if
-                   (lambda (c)
-                     (member (plist-get (get-text-property 0 'arc-document c) :source-id)
-                             seen))
-                   full)))
-      (funcall callback extra))))
+embedding endpoint here still delivers the keyword-arm callback, then
+`flush', then whatever `arc-search--candidates' falls back to for a
+failed fused arm -- which is the same keyword-arm query again, so the
+display ends up back where it started rather than blanked."
+  (funcall callback (arc-search--candidates input scope 'keyword))
+  (funcall callback 'flush)
+  (funcall callback (arc-search--candidates input scope nil)))
 
 (when (require 'consult nil t)
 
@@ -325,13 +355,17 @@ minibuffer map rather than replacing it -- see `consult--setup-keymap'.")
     "Search arc's documents from the minibuffer.
 
 Paints the keyword arm's results first -- no embedding call, tens of
-milliseconds -- then the same invocation paints whatever the fused arm
-adds, per `arc-search--two-stage'.  There is no idle delay to tune:
-`consult--async-dynamic' wraps the computation in `while-no-input' and
-restarts it after `consult-async-input-debounce' if a keystroke
-interrupts it, which is what makes a still-typing user see the keyword
-arm and a paused one see the sharpened result, without this command
-hand-rolling the same thing on top.  Nothing is computed for the first
+milliseconds -- then the same invocation replaces that paint with the
+fused arm's own, independently-ranked result set, per
+`arc-search--two-stage'.  The replacement is a real re-rank, not just
+an appended tail: the fused arm's ordering governs the whole list, BM25
+hits included, rather than freezing BM25's order for what it already
+found.  There is no idle delay to tune: `consult--async-dynamic' wraps
+the computation in `while-no-input' and restarts it after
+`consult-async-input-debounce' if a keystroke interrupts it, which is
+what makes a still-typing user see the keyword arm and a paused one see
+the sharpened result, without this command hand-rolling the same thing
+on top.  Nothing is computed for the first
 `consult-async-min-input' (3, by default) characters typed -- that is
 consult's own standard behaviour, not a bug here.  \\<minibuffer-local-map>
 \\[exit-minibuffer] visits the document; \\<arc-search--session-keymap>
@@ -350,7 +384,7 @@ buffer."
                  :require-match t
                  :keymap arc-search--session-keymap
                  :category 'arc-document
-                 :annotate (lambda (_) nil))))
+                 :annotate #'arc-search--stage-annotation)))
       (when doc
         (org-link-open-from-string (arc-search--document-link doc))))))
 
