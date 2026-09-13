@@ -41,13 +41,21 @@ evaluate() {
   out=$(emacsclient -e "$1" 2>&1); status=$?
   if [ $status -ne 0 ]; then
     case "$out" in
-      *"can't find socket"*|*"No socket"*|*"Connection refused"*|*"could not"*) dead ;;
       # emacsclient exits non-zero for a signalled Lisp error too, with the
-      # error text prefixed "*ERROR*: " -- strip that here, in the branch
-      # where it actually arrives, rather than in the status-0 case below
-      # (emacsclient never returns 0 with this prefix, so checking there
-      # only, as the form reads at a glance, would never fire).
+      # error text prefixed "*ERROR*: ". This branch must come first: a
+      # signalled error's own text is free-form -- `arc-index.el' and
+      # `arc-watch.el' both emit messages like "arc: could not reindex
+      # ..." -- and an unanchored *later* pattern below matching on
+      # "could not" would shadow a real Lisp error and misreport it as a
+      # dead daemon, sending a caller off to start a daemon that is
+      # already running while discarding the actual failure.
       \*ERROR\**) die "${out#\*ERROR\*: }" ;;
+      # These are emacsclient's own transport failures, not anything the
+      # daemon's Lisp said, so they are anchored on "emacsclient:" (the
+      # prefix emacsclient puts on every line it prints itself) rather
+      # than matched on bare substrings that a signalled error could also
+      # contain.
+      *emacsclient:*"can't find socket"*|*emacsclient:*"No socket"*|*emacsclient:*"Connection refused"*|*emacsclient:*"could not"*) dead ;;
       *) die "${out:-emacsclient failed}" ;;
     esac
   fi
@@ -64,9 +72,26 @@ cmd="$1"; shift
 query=""; scope=""; limit=""; arm="nil"; json=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --scope) scope="${2:-}"; shift 2 ;;
-    --limit) limit="${2:-}"; shift 2 ;;
-    --arm)   arm="(quote ${2:-fused})"; shift 2 ;;
+    --scope)
+      # A trailing `--scope' with nothing after it must not become a
+      # `shift 2' with only one argument left: that shifts NOTHING (no
+      # `set -e' is in effect to catch the failing shift), so `$#' never
+      # decreases and the `while [ $# -gt 0 ]' loop above spins forever.
+      [ $# -ge 2 ] || die "--scope needs a value"
+      scope="$2"; shift 2 ;;
+    --limit)
+      [ $# -ge 2 ] || die "--limit needs a value"
+      case "$2" in
+        ''|*[!0-9]*) die "--limit must be a positive integer, got: $2" ;;
+      esac
+      limit="$2"; shift 2 ;;
+    --arm)
+      [ $# -ge 2 ] || die "--arm needs a value"
+      case "$2" in
+        keyword|fused) arm="(quote $2)" ;;
+        *) die "--arm must be 'keyword' or 'fused', got: $2" ;;
+      esac
+      shift 2 ;;
     --json)  json=1; shift ;;
     --help|-h) usage ;;
     -*) die "unknown option: $1" ;;
