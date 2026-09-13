@@ -189,15 +189,6 @@ erroring or blanking it."
          (scope (alist-get name arc-scope-presets nil nil #'equal)))
     (arc-search-show arc-search--query scope)))
 
-(defcustom arc-search-hybrid-delay 0.3
-  "Idle seconds before search upgrades from the keyword arm to the hybrid.
-
-The keyword arm runs in 4-63 ms because it skips the embedding call
-entirely; the hybrid runs in 118-181 ms because it does not.  The first
-is fast enough to run on every keystroke, the second is not, and the
-only thing separating them is a pause."
-  :type 'number :group 'arc)
-
 (defun arc-search--annotate (doc)
   "Return the annotation suffix for DOC."
   (format "  %s%s"
@@ -232,6 +223,42 @@ the keyword arm rather than throw the user out of the minibuffer."
                                     (arc-search--annotate doc))
                             'arc-document doc))
               docs))))
+
+(defun arc-search--two-stage (input scope callback)
+  "Compute two-stage candidates for INPUT in SCOPE, calling CALLBACK.
+
+Calls CALLBACK once with the keyword arm's candidates -- the fast,
+~50ms first paint that needs no embedding call -- and then, still
+within this same invocation, a second time with whatever the fused
+arm found that the keyword arm did not already return, deduped by the
+`:source-id' carried on each candidate's `arc-document' text property.
+
+The dedupe matters because the sink this feeds (`consult--async-dynamic',
+see its handling of the `init'/`running' state) only clears the display
+on the FIRST callback; every later callback in the same invocation
+APPENDS.  Sending the fused arm's full result set on the second call
+would duplicate every document both arms found; sending only the
+extras is what makes two callbacks read as one result set that
+sharpens, rather than one that repeats itself with more entries below.
+
+Never calls CALLBACK after returning, matching the contract
+`consult--async-dynamic' documents for its FUN argument.  Never signals:
+`arc-search--candidates' already fails soft per arm, so a dead
+embedding endpoint here still delivers the keyword-arm callback --
+this function then has nothing new to add, so the second call is
+just empty, not absent."
+  (let* ((first (arc-search--candidates input scope 'keyword))
+         (seen (mapcar (lambda (c)
+                          (plist-get (get-text-property 0 'arc-document c) :source-id))
+                        first)))
+    (funcall callback first)
+    (let* ((full (arc-search--candidates input scope nil))
+           (extra (cl-remove-if
+                   (lambda (c)
+                     (member (plist-get (get-text-property 0 'arc-document c) :source-id)
+                             seen))
+                   full)))
+      (funcall callback extra))))
 
 (when (require 'consult nil t)
 
@@ -297,9 +324,16 @@ minibuffer map rather than replacing it -- see `consult--setup-keymap'.")
   (defun arc-search (&optional scope)
     "Search arc's documents from the minibuffer.
 
-Types on the keyword arm, which needs no embedding call and returns in
-tens of milliseconds; upgrades to the full hybrid after
-`arc-search-hybrid-delay' seconds of idle.  \\<minibuffer-local-map>
+Paints the keyword arm's results first -- no embedding call, tens of
+milliseconds -- then the same invocation paints whatever the fused arm
+adds, per `arc-search--two-stage'.  There is no idle delay to tune:
+`consult--async-dynamic' wraps the computation in `while-no-input' and
+restarts it after `consult-async-input-debounce' if a keystroke
+interrupts it, which is what makes a still-typing user see the keyword
+arm and a paused one see the sharpened result, without this command
+hand-rolling the same thing on top.  Nothing is computed for the first
+`consult-async-min-input' (3, by default) characters typed -- that is
+consult's own standard behaviour, not a bug here.  \\<minibuffer-local-map>
 \\[exit-minibuffer] visits the document; \\<arc-search--session-keymap>
 \\[arc-search-to-buffer] sends the whole result set to the results
 buffer."
@@ -308,10 +342,8 @@ buffer."
            (arc-search--session-scope scope)
            (doc (consult--read
                  (consult--dynamic-collection
-                  (lambda (input)
-                    (arc-search--candidates
-                     input scope
-                     (if (sit-for arc-search-hybrid-delay) nil 'keyword))))
+                  (lambda (input callback)
+                    (arc-search--two-stage input scope callback)))
                  :prompt "arc search: "
                  :lookup #'arc-search--consult-lookup
                  :sort nil

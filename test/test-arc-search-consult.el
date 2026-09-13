@@ -48,6 +48,37 @@ results, not an error thrown out of the minibuffer."
      (let ((arc-rollup-function 'max))
        (should (= (length (arc-search--candidates "alpha" '(:all t) nil)) 1))))))
 
+(defun asx--doc (id)
+  "Return a minimal file-kind document plist identified by ID."
+  (list :kind "file" :path (format "/tmp/%s.txt" id) :source-id id
+        :chunk-count 1))
+
+(ert-deftest asx-two-stage-calls-back-twice-with-disjoint-source-ids ()
+  "The sink `arc-search--two-stage' feeds only clears on the FIRST
+callback and APPENDS on every later one in the same invocation, so the
+second callback must carry only what the first did not -- otherwise
+every document both arms found would render twice."
+  (let* ((calls nil)
+         (keyword-docs (list (asx--doc "a") (asx--doc "b")))
+         (fused-docs (list (asx--doc "b") (asx--doc "c"))))
+    (cl-letf (((symbol-function 'arc-search-documents)
+               (lambda (_query _scope &optional arm)
+                 (if (eq arm 'keyword) keyword-docs fused-docs))))
+      (arc-search--two-stage "alpha" '(:all t)
+                             (lambda (docs) (push docs calls))))
+    (setq calls (nreverse calls))
+    (should (= (length calls) 2))
+    (should (equal (mapcar (lambda (c)
+                              (plist-get (get-text-property 0 'arc-document c)
+                                        :source-id))
+                           (nth 0 calls))
+                   '("a" "b")))
+    (should (equal (mapcar (lambda (c)
+                              (plist-get (get-text-property 0 'arc-document c)
+                                        :source-id))
+                           (nth 1 calls))
+                   '("c")))))
+
 (ert-deftest asx-command-is-guarded-on-consult ()
   (should (eq (fboundp 'arc-search) (featurep 'consult))))
 
