@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# arc -- document search over the arc index, via the running Emacs daemon.
+#
+# The daemon is the point. arc's database is already open there, warm, with
+# vec0 loaded; an `emacs --batch' CLI would pay cold start, reload the
+# extension, contend with the live WAL and duplicate the retrieval code. The
+# cost of that choice is this script's one real failure mode, which is why it
+# gets its own exit status rather than a cryptic emacsclient message.
+set -uo pipefail
+
+die()  { printf 'Error: %s\n' "$1" >&2; exit 1; }
+dead() { printf 'Error: arc: emacs daemon not running\n' >&2; exit 2; }
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: arc <command> [options]
+
+  arc search QUERY [--scope NAME] [--limit N] [--arm keyword|fused] [--json]
+  arc scopes [--json]
+  arc stats  [--json]
+
+Exit: 0 ok, 1 error, 2 emacs daemon not running.
+USAGE
+  exit 1
+}
+
+# Evaluate an elisp form in the daemon. Distinguishes "no daemon" from "the
+# form signalled": emacsclient exits non-zero for the former and prints a
+# *ERROR* line for the latter.
+#
+# `arc-tool-*' returns the result of `json-serialize', which Emacs documents
+# as a *unibyte* UTF-8-encoded string. Handed straight to emacsclient's
+# printer, every byte >= 128 (an em dash, a curly quote, any accented
+# letter -- all routine in real notes) comes back octal-escaped, e.g.
+# \342\200\224, which the quote/backslash unescape below cannot undo and
+# which breaks JSON parsing outright. `decode-coding-string' turns the
+# unibyte JSON bytes back into a proper multibyte Lisp string first, so the
+# characters print as themselves.
+evaluate() {
+  local out status
+  out=$(emacsclient -e "$1" 2>&1); status=$?
+  if [ $status -ne 0 ]; then
+    case "$out" in
+      *"can't find socket"*|*"No socket"*|*"Connection refused"*|*"could not"*) dead ;;
+      # emacsclient exits non-zero for a signalled Lisp error too, with the
+      # error text prefixed "*ERROR*: " -- strip that here, in the branch
+      # where it actually arrives, rather than in the status-0 case below
+      # (emacsclient never returns 0 with this prefix, so checking there
+      # only, as the form reads at a glance, would never fire).
+      \*ERROR\**) die "${out#\*ERROR\*: }" ;;
+      *) die "${out:-emacsclient failed}" ;;
+    esac
+  fi
+  # emacsclient renders a string result as a quoted elisp literal; unwrap it.
+  printf '%s' "$out" | sed -e 's/^"//' -e 's/"$//' -e 's/\\"/"/g' -e 's/\\\\/\\/g'
+  printf '\n'
+}
+
+command -v emacsclient >/dev/null 2>&1 || die "emacsclient not found on PATH"
+
+[ $# -ge 1 ] || usage
+cmd="$1"; shift
+
+query=""; scope=""; limit=""; arm="nil"; json=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --scope) scope="${2:-}"; shift 2 ;;
+    --limit) limit="${2:-}"; shift 2 ;;
+    --arm)   arm="(quote ${2:-fused})"; shift 2 ;;
+    --json)  json=1; shift ;;
+    --help|-h) usage ;;
+    -*) die "unknown option: $1" ;;
+    *) if [ -z "$query" ]; then query="$1"; else query="$query $1"; fi; shift ;;
+  esac
+done
+
+# Elisp string literal: escape backslashes first, then quotes.
+elisp_string() {
+  printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+}
+
+case "$cmd" in
+  search)
+    [ -n "$query" ] || die "search needs a query"
+    form="(decode-coding-string (progn (require 'arc-tool) (arc-tool-search $(elisp_string "$query") $( [ -n "$scope" ] && elisp_string "$scope" || printf nil ) ${limit:-nil} $arm)) 'utf-8)"
+    ;;
+  scopes) form="(decode-coding-string (progn (require 'arc-tool) (arc-tool-scopes)) 'utf-8)" ;;
+  stats)  form="(decode-coding-string (progn (require 'arc-tool) (arc-tool-stats)) 'utf-8)" ;;
+  --help|-h) usage ;;
+  *) die "unknown command: $cmd" ;;
+esac
+
+out=$(evaluate "$form") || exit $?
+
+if [ "$json" -eq 1 ]; then
+  printf '%s\n' "$out"
+else
+  # Plain text by default. jq is optional: fall back to the raw JSON.
+  if command -v jq >/dev/null 2>&1; then
+    case "$cmd" in
+      search) printf '%s' "$out" | jq -r '.results[] | "\(.path // .option_name // .info_node)  [\(.chunks) match(es), score \(.score|.*1000|round/1000)]\n\(.passages[] | "    \(.line_start): \(.text)")"' ;;
+      scopes) printf '%s' "$out" | jq -r '.scopes[] | "\(.name)  (\(.chunks) chunks)"' ;;
+      stats)  printf '%s' "$out" | jq -r '"chunks: \(.chunks)  sources: \(.sources)", (.kinds[] | "  \(.kind): \(.chunks)"), (.freshness[] | "  \(.collection): \(.state)")' ;;
+    esac
+  else
+    printf '%s\n' "$out"
+  fi
+fi

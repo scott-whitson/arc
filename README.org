@@ -45,6 +45,44 @@ Every parse creates or updates a named collection. arc searches the
 enabled collections, adds the relevant quotes to context, and lets the
 LLM answer the query.
 
+** Search
+
+In addition to ~arc-ask~, which answers with a local model, arc exposes the
+same index as plain search with no model in the path.
+
++ ~M-x arc-search~ :: minibuffer search. Types on the BM25 arm, which needs no
+  embedding call and returns in tens of milliseconds, then upgrades to the full
+  hybrid after ~arc-search-hybrid-delay~ seconds of idle. Requires ~consult~;
+  arc loads and works without it, minus this command.
++ ~M-x arc-search-show~ :: the same search rendered into ~*arc-search*~, where
+  ~TAB~ expands a document to every passage that matched, ~g~ re-runs and ~s~
+  re-scopes.
+
+Results are *documents*, not chunks. arc's corpus mixes one-chunk sources (nix
+options, Info nodes) with sources that split into dozens (vault notes,
+dotfiles), so a chunk-level result list lets one long note fill every slot.
+~arc-rollup-function~ chooses how a document's score is aggregated from its
+chunks'; see ~docs/design/2026-09-13-rollup-measurement.md~ for the sweep that
+picked the default.
+
+*** As a tool
+
+~bin/arc~ exposes ~search~, ~scopes~ and ~stats~ to anything outside Emacs,
+through ~emacsclient~ and the running daemon -- so the database stays warm and
+there is no second process to babysit. Symlink it onto ~PATH~:
+
+#+begin_src sh
+ln -s /path/to/arc/bin/arc ~/.local/bin/arc
+arc search "disk layout" --scope dotfiles --json
+#+end_src
+
+Exit status is 0 on success, 1 on error, and 2 specifically when the Emacs
+daemon is not running -- the one failure mode this transport has that the
+in-Emacs commands do not.
+
+There is deliberately no ~ask~ verb. A caller that wants prose already has its
+own model; arc's job here is retrieval.
+
 ** Models
 
 arc talks to a local [[https://ollama.com][Ollama]] instance and expects these models to be
