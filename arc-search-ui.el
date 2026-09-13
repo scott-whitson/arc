@@ -1,5 +1,8 @@
 ;;; arc-search-ui.el --- search surfaces for arc -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2026 Scott Whitson
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
 ;;; Commentary:
 
 ;; Two surfaces onto `arc-search-documents', because the two speeds

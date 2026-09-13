@@ -1,5 +1,8 @@
 ;;; arc-tool.el --- arc's agent-facing verbs -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2026 Scott Whitson
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
 ;;; Commentary:
 
 ;; Three verbs for a caller outside Emacs: search, scopes, stats.

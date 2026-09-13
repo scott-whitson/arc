@@ -1,6 +1,7 @@
 ;;; arc-rollup.el --- chunk scores to ranked documents -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026
+;; Copyright (C) 2026 Scott Whitson
+;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;;; Commentary:
 
@@ -16,8 +17,6 @@
 ;; other documents that also matched.
 
 ;;; Code:
-
-(require 'cl-lib)
 
 (defcustom arc-rollup-function 'max
   "How a document's score is aggregated from its chunks' scores.

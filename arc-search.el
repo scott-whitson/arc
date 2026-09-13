@@ -1,5 +1,8 @@
 ;;; arc-search.el --- document search over the arc index -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2026 Scott Whitson
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
 ;;; Commentary:
 
 ;; arc's retrieval was built to feed an LLM: `arc-ask' asks for ten
