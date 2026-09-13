@@ -55,6 +55,20 @@ buffer."
   (or (get-text-property (point) 'arc-document)
       (user-error "arc-search: no document on this line")))
 
+(defun arc-search--passage-locator (doc p)
+  "Return a \"path:line\" locator string for passage P of DOC, or nil.
+
+Only a \"file\" document has a `:path' at all -- `info', `nix-option'
+and `hm-option' sources do not, which on a typical corpus is 37,780 of
+38,437 sources.  Formatting `(or (plist-get doc :path) \"\")'
+unconditionally rendered a bare \":1\" or \":\" for every one of them: a
+locator built entirely out of punctuation, pointing at nothing.  Nil
+here means \"this passage has no locator\", not \"an empty one\" --
+`arc-search--insert-document' omits the prefix rather than printing it
+with nothing on either side."
+  (when-let* ((path (plist-get doc :path)))
+    (format "%s:%s" path (or (plist-get p :line-start) ""))))
+
 (defun arc-search--insert-document (doc)
   "Insert one line for DOC, plus its passages, propertised with DOC."
   (let ((start (point))
@@ -65,12 +79,12 @@ buffer."
                         (format "(%d matches)" (plist-get doc :chunk-count))
                       "(1 match)")))
     (dolist (p (plist-get doc :passages))
-      (insert (format "    %s:%s  %s\n"
-                      (or (plist-get doc :path) "")
-                      (or (plist-get p :line-start) "")
-                      (string-trim
-                       (replace-regexp-in-string
-                        "[ \t\n]+" " " (or (plist-get p :chunk) ""))))))
+      (let ((locator (arc-search--passage-locator doc p)))
+        (insert (format "    %s%s\n"
+                        (if locator (concat locator "  ") "")
+                        (string-trim
+                         (replace-regexp-in-string
+                          "[ \t\n]+" " " (or (plist-get p :chunk) "")))))))
     (insert "\n")
     (put-text-property start (point) 'arc-document doc)))
 

@@ -18,6 +18,26 @@
      :passages ((:chunk "alpha three" :line-start 4 :line-end 4 :score 0.2))))
   "Two documents in the shape `arc-search-documents' returns.")
 
+;; Important-5 regression pin: every fixture above is `:kind "file"',
+;; which is exactly why the bare `:path' render bug (a `":1"' or `":"'
+;; locator with nothing on either side) survived six render tests and a
+;; task review. `info' and `nix-option' sources -- no `:path' at all --
+;; are 37,780 of 38,437 sources on a typical corpus.
+
+(defvar asu--info-doc
+  '(:source-id 3 :kind "info" :path nil :title nil
+    :org-id nil :option-name nil :info-node "(auth)Top"
+    :score 0.3 :chunk-count 1 :best-rank 2
+    :passages ((:chunk "authinfo format details" :line-start nil :line-end nil :score 0.3)))
+  "A pathless `info' document -- `:path' and `:line-start' are both nil.")
+
+(defvar asu--nixopt-doc
+  '(:source-id 4 :kind "nix-option" :path nil :title nil
+    :org-id nil :option-name "services.foo.enable" :info-node nil
+    :score 0.25 :chunk-count 1 :best-rank 3
+    :passages ((:chunk "Whether to enable foo." :line-start nil :line-end nil :score 0.25)))
+  "A pathless `nix-option' document.")
+
 (ert-deftest asu-render-lists-every-document ()
   (arc-search-render asu--docs "alpha" '(:all t))
   (with-current-buffer arc-search-results-buffer-name
@@ -47,6 +67,31 @@ reason rollup exists, and hiding it in the ranking alone wastes it."
   (arc-search-render nil "zzz" '(:all t))
   (with-current-buffer arc-search-results-buffer-name
     (should (string-match-p "No documents" (buffer-string)))))
+
+(ert-deftest asu-render-of-a-file-document-shows-a-path-line-locator ()
+  (arc-search-render (list (car asu--docs)) "alpha" '(:all t))
+  (with-current-buffer arc-search-results-buffer-name
+    (should (string-match-p "/tmp/a\\.nix:1" (buffer-string)))))
+
+(ert-deftest asu-render-of-a-pathless-info-document-has-no-bare-colon-locator ()
+  "37,780 of 38,437 sources on a typical corpus are `info', `nix-option'
+or `hm-option' -- none of them have a `:path'.  Formatting `(or path
+\"\")' unconditionally rendered a bare \":1\" or \":\" locator for every
+one of them: punctuation pointing at nothing.  Every fixture above this
+test is `:kind \"file\"', which is how six render tests and a task
+review missed exactly this."
+  (arc-search-render (list asu--info-doc) "auth" '(:all t))
+  (with-current-buffer arc-search-results-buffer-name
+    (should (string-match-p "authinfo format details" (buffer-string)))
+    (should-not (string-match-p "^\\s-*:" (buffer-string)))
+    (should-not (string-match-p "nil:nil" (buffer-string)))))
+
+(ert-deftest asu-render-of-a-pathless-nix-option-document-has-no-bare-colon-locator ()
+  (arc-search-render (list asu--nixopt-doc) "foo" '(:all t))
+  (with-current-buffer arc-search-results-buffer-name
+    (should (string-match-p "Whether to enable foo\\." (buffer-string)))
+    (should-not (string-match-p "^\\s-*:" (buffer-string)))
+    (should-not (string-match-p "nil:nil" (buffer-string)))))
 
 (ert-deftest asu-every-document-line-carries-its-plist ()
   "RET and TAB read the document off the line's text property."
