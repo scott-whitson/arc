@@ -189,5 +189,138 @@ erroring or blanking it."
          (scope (alist-get name arc-scope-presets nil nil #'equal)))
     (arc-search-show arc-search--query scope)))
 
+(defcustom arc-search-hybrid-delay 0.3
+  "Idle seconds before search upgrades from the keyword arm to the hybrid.
+
+The keyword arm runs in 4-63 ms because it skips the embedding call
+entirely; the hybrid runs in 118-181 ms because it does not.  The first
+is fast enough to run on every keystroke, the second is not, and the
+only thing separating them is a pause."
+  :type 'number :group 'arc)
+
+(defun arc-search--annotate (doc)
+  "Return the annotation suffix for DOC."
+  (format "  %s%s"
+          (if (> (plist-get doc :chunk-count) 1)
+              (format "%d matches" (plist-get doc :chunk-count))
+            "1 match")
+          (if (plist-get doc :kind)
+              (format " · %s" (plist-get doc :kind))
+            "")))
+
+(defun arc-search--candidates (query scope arm)
+  "Return propertised candidate strings for QUERY in SCOPE using ARM.
+
+Returns nil for a blank QUERY: consult calls a dynamic source on every
+keystroke including the first empty one, and that must not become a
+full-corpus query.
+
+Never signals.  A failure here is most often an unreachable embedding
+endpoint on the hybrid arm, and the correct response is to fall back to
+the keyword arm rather than throw the user out of the minibuffer."
+  (if (string-empty-p (string-trim (or query "")))
+      nil
+    (let ((docs (condition-case _
+                    (arc-search-documents query scope arm)
+                  (error
+                   (unless (eq arm 'keyword)
+                     (condition-case _
+                         (arc-search-documents query scope 'keyword)
+                       (error nil)))))))
+      (mapcar (lambda (doc)
+                (propertize (concat (arc-source-label doc)
+                                    (arc-search--annotate doc))
+                            'arc-document doc))
+              docs))))
+
+(when (require 'consult nil t)
+
+  (declare-function consult--read "consult")
+  (declare-function consult--dynamic-collection "consult")
+  ;; `arc-search--consult-lookup' and `arc-search-to-buffer' are both
+  ;; defined further down in this very `when' block, but the byte
+  ;; compiler does not track defuns nested inside a runtime conditional
+  ;; for forward-reference purposes -- each would otherwise be flagged
+  ;; "not known to be defined" despite being defined right here.
+  (declare-function arc-search--consult-lookup nil)
+  (declare-function arc-search-to-buffer nil)
+
+  (defvar arc-search--session-scope nil
+    "Scope of the in-flight `arc-search' minibuffer session.
+
+Plain `defvar', deliberately distinct from the Task 5 buffer-locals
+\(`arc-search--query', `arc-search--scope', `arc-search--docs'\), which
+belong to the results buffer and must not be redeclared here.  `arc-search'
+lets this dynamically for the extent of its `consult--read' call so that
+`arc-search-to-buffer', invoked from that session's minibuffer keymap,
+can read the session's scope without threading it through consult's own
+API.")
+
+  (defun arc-search--consult-lookup (selected candidates &rest _)
+    "Return the document plist behind SELECTED among CANDIDATES."
+    (when-let* ((match (car (member selected candidates))))
+      (get-text-property 0 'arc-document match)))
+
+  (defun arc-search-to-buffer ()
+    "Send the current `arc-search' minibuffer query to the results buffer.
+
+Reads the minibuffer's current input, exits the minibuffer, and then
+calls `arc-search-show' with that input and the session's scope
+\(`arc-search--session-scope'\).
+
+Deliberately re-queries rather than trying to extract consult's live
+candidate list: re-querying is simpler, cannot desync from whatever
+consult happens to be holding, and always hands the buffer the full
+hybrid result set regardless of which arm the minibuffer was displaying
+when M-RET was pressed.  Do not \"optimise\" this into reusing whatever
+candidates are already on screen.
+
+`exit-minibuffer' throws immediately, so the call to `arc-search-show'
+is scheduled with `run-at-time' rather than placed after it in this
+function's body -- code after `exit-minibuffer' in the same command
+does not run."
+    (interactive)
+    (let ((query (minibuffer-contents-no-properties))
+          (scope arc-search--session-scope))
+      (run-at-time 0 nil #'arc-search-show query scope)
+      (exit-minibuffer)))
+
+  (defvar arc-search--session-keymap
+    (let ((map (make-sparse-keymap)))
+      (define-key map (kbd "M-RET") #'arc-search-to-buffer)
+      map)
+    "Keymap for the `arc-search' minibuffer session.
+Passed as consult's `:keymap', which composes it on top of the ambient
+minibuffer map rather than replacing it -- see `consult--setup-keymap'.")
+
+  ;;;###autoload
+  (defun arc-search (&optional scope)
+    "Search arc's documents from the minibuffer.
+
+Types on the keyword arm, which needs no embedding call and returns in
+tens of milliseconds; upgrades to the full hybrid after
+`arc-search-hybrid-delay' seconds of idle.  \\<minibuffer-local-map>
+\\[exit-minibuffer] visits the document; \\<arc-search--session-keymap>
+\\[arc-search-to-buffer] sends the whole result set to the results
+buffer."
+    (interactive)
+    (let* ((scope (arc-ask-normalize-scope scope))
+           (arc-search--session-scope scope)
+           (doc (consult--read
+                 (consult--dynamic-collection
+                  (lambda (input)
+                    (arc-search--candidates
+                     input scope
+                     (if (sit-for arc-search-hybrid-delay) nil 'keyword))))
+                 :prompt "arc search: "
+                 :lookup #'arc-search--consult-lookup
+                 :sort nil
+                 :require-match t
+                 :keymap arc-search--session-keymap
+                 :category 'arc-document
+                 :annotate (lambda (_) nil))))
+      (when doc
+        (org-link-open-from-string (arc-source-link doc))))))
+
 (provide 'arc-search-ui)
 ;;; arc-search-ui.el ends here
