@@ -92,6 +92,42 @@ that has to distinguish them will get it wrong otherwise."
      (should (assq 'kinds out))
      (should (assq 'freshness out)))))
 
+(ert-deftest att-stats-reports-per-collection-sources-chunks-and-last-indexed ()
+  "Controller Ruling F-1: `arc tool stats' must report per-collection
+sources, chunks and last-indexed time, additive to the existing
+`:kinds' (keyed by source kind, not collection) and `:freshness'
+fields."
+  (arc-test-with-temp-db
+   (let ((arc-index-plan '(("test" . file))))
+     (arc-index-source
+      '(:kind "file" :path "/tmp/a.txt"
+        :chunks ((:text "alpha" :line-start 1 :line-end 1)
+                  (:text "beta" :line-start 2 :line-end 2)))
+      "test")
+     (let* ((out (att--parse (arc-tool-stats)))
+            (rows (alist-get 'collections out))
+            (row (car rows)))
+       (should (assq 'kinds out))
+       (should (assq 'freshness out))
+       (should (= (length rows) 1))
+       (should (equal (alist-get 'collection row) "test"))
+       (should (= (alist-get 'sources row) 1))
+       (should (= (alist-get 'chunks row) 2))
+       (should (numberp (alist-get 'last_indexed_at row)))))))
+
+(ert-deftest att-stats-collections-row-is-zeroed-for-a-never-indexed-collection ()
+  "A collection nothing has been indexed into yet must still get a row
+-- zeroed, not omitted -- the same choice `arc-freshness-report' makes
+for `absent'."
+  (arc-test-with-temp-db
+   (let* ((arc-index-plan '(("ghost" . org)))
+          (out (att--parse (arc-tool-stats)))
+          (row (car (alist-get 'collections out))))
+     (should (equal (alist-get 'collection row) "ghost"))
+     (should (= (alist-get 'sources row) 0))
+     (should (= (alist-get 'chunks row) 0))
+     (should (null (alist-get 'last_indexed_at row))))))
+
 (ert-deftest att-stats-freshness-row-maps-kind-and-detail-correctly ()
   "`arc-freshness-report' rows are (NAME KIND STATE DETAIL).  KIND (the
 chunker, e.g. `org') and DETAIL (a reason string, e.g. \"never

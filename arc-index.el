@@ -343,6 +343,30 @@ anything that runs often."
                           LEFT JOIN data d ON d.source_id = s.id
                           GROUP BY s.kind;")))
 
+(defun arc-index-collection-stats ()
+  "Return a per-collection list of (NAME SOURCES CHUNKS LAST-INDEXED).
+
+SOURCES is the count of distinct indexed sources in NAME's collection;
+CHUNKS is its chunk count; LAST-INDEXED is `MAX(sources.indexed_at)'
+among them, or nil when NAME has no chunks yet.
+
+Iterates `arc-index-plan' rather than `SELECT DISTINCT collection FROM
+data', the same choice `arc-freshness-report' makes and for the same
+reason: a collection with nothing indexed yet still gets a zeroed row
+here instead of silently vanishing from the report."
+  (mapcar
+   (lambda (cell)
+     (let* ((name (car cell))
+            (row (car (sqlite-select
+                       (arc-db)
+                       (format "SELECT count(DISTINCT d.source_id), count(d.id), MAX(s.indexed_at)
+                                FROM data d JOIN sources s ON s.id = d.source_id
+                                WHERE d.collection_id =
+                                  (SELECT id FROM collections WHERE name = %s);"
+                               (arc--sql-quote name))))))
+       (list name (or (nth 0 row) 0) (or (nth 1 row) 0) (nth 2 row))))
+   arc-index-plan))
+
 (defvar arc-index--write-generation 0
   "Incremented by every function in arc that writes or deletes chunks.
 `arc-index-stats-cached' compares against it to know its cached answer

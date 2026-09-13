@@ -94,9 +94,12 @@ or `fused' (nil), anything else signals -- and passed through to
                   arc-scope-presets)))))
 
 (defun arc-tool-stats ()
-  "Return corpus size and freshness as a JSON string.
+  "Return corpus size, per-collection breakdown and freshness as a JSON string.
 Freshness is here so a caller can tell a current answer from a stale
-one before quoting it as configuration.
+one before quoting it as configuration; the per-collection breakdown is
+here so it can tell WHICH collection, and how recently, without
+re-deriving it from `:kinds' (keyed by source kind, not collection) or
+counting `:freshness' rows itself.
 
 `arc-freshness-report' rows are (NAME KIND STATE DETAIL) -- see its
 docstring.  KIND (the chunker a collection uses, e.g. `file' or
@@ -104,7 +107,12 @@ docstring.  KIND (the chunker a collection uses, e.g. `file' or
 different claims about a collection; collapsing KIND into a field
 named `:detail' and dropping the real detail would mislabel a
 collection's kind as its freshness detail to a caller that cannot see
-the source to tell the difference."
+the source to tell the difference.
+
+`arc-index-collection-stats' rows are (NAME SOURCES CHUNKS
+LAST-INDEXED) -- see its docstring.  LAST-INDEXED is
+`sources.indexed_at', seconds since the epoch, or `:null' for a
+collection with nothing indexed yet."
   (json-serialize
    (list :chunks (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))
          :sources (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))
@@ -112,6 +120,13 @@ the source to tell the difference."
                  (mapcar (lambda (kv)
                            (list :kind (car kv) :chunks (cdr kv)))
                          (arc-index-stats)))
+         :collections (vconcat
+                       (mapcar (lambda (r)
+                                 (list :collection (format "%s" (nth 0 r))
+                                       :sources (nth 1 r)
+                                       :chunks (nth 2 r)
+                                       :last_indexed_at (or (nth 3 r) :null)))
+                               (arc-index-collection-stats)))
          :freshness (vconcat
                      (mapcar (lambda (r)
                                (list :collection (format "%s" (nth 0 r))

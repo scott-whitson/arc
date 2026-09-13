@@ -125,7 +125,7 @@ else
     case "$cmd" in
       search) printf '%s' "$out" | jq -r '.results[] | "\(.path // .option_name // .info_node)  [\(.chunks) match(es), score \(.score|.*1000|round/1000)]\n\(.passages[] | "    \(.line_start): \(.text)")"' ;;
       scopes) printf '%s' "$out" | jq -r '.scopes[] | "\(.name)  (\(.chunks) chunks)"' ;;
-      stats)  printf '%s' "$out" | jq -r '"chunks: \(.chunks)  sources: \(.sources)", (.kinds[] | "  \(.kind): \(.chunks)"), (.freshness[] | "  \(.collection): \(.state)")' ;;
+      stats)  printf '%s' "$out" | jq -r '"chunks: \(.chunks)  sources: \(.sources)", (.kinds[] | "  \(.kind): \(.chunks)"), (.collections[] | "  \(.collection): \(.sources) source(s), \(.chunks) chunk(s), last indexed \(.last_indexed_at // "never")"), (.freshness[] | "  \(.collection): \(.state)")' ;;
     esac
   else
     printf '%s\n' "$out"
