@@ -352,7 +352,7 @@ buffer."
                  :category 'arc-document
                  :annotate (lambda (_) nil))))
       (when doc
-        (org-link-open-from-string (arc-source-link doc))))))
+        (org-link-open-from-string (arc-search--document-link doc))))))
 
 (provide 'arc-search-ui)
 ;;; arc-search-ui.el ends here

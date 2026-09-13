@@ -82,5 +82,23 @@ every document both arms found would render twice."
 (ert-deftest asx-command-is-guarded-on-consult ()
   (should (eq (fboundp 'arc-search) (featurep 'consult))))
 
+(ert-deftest asx-arc-search-visits-the-best-matched-line-not-line-1 ()
+  "Ruling T5-A extracted `arc-search--document-link' precisely because
+`arc-source-link' defaults to line 1 when given no LINE, which is
+wrong for a file result -- the passage that matched is almost never
+the file's first line. `arc-search-visit' (the results-buffer path)
+already goes through it; this is the consult front door, which must
+resolve the same selected document to the same link. `consult--read'
+is stubbed to hand back a canned document directly, so this covers the
+selection-to-link step without driving an actual minibuffer session."
+  (let* ((doc (list :kind "file" :path "/tmp/a.txt" :source-id "a"
+                    :passages (list (list :line-start 42 :chunk "text"))))
+         (opened nil))
+    (cl-letf (((symbol-function 'consult--read) (lambda (&rest _) doc))
+              ((symbol-function 'org-link-open-from-string)
+               (lambda (link) (setq opened link))))
+      (arc-search))
+    (should (equal opened "[[file:/tmp/a.txt::42]]"))))
+
 (provide 'test-arc-search-consult)
 ;;; test-arc-search-consult.el ends here
