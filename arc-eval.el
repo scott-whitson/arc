@@ -29,6 +29,7 @@
 (require 'subr-x)
 (require 'arc)
 (require 'arc-scope)
+(require 'arc-search)
 
 (defcustom arc-eval-set-file
   (expand-file-name "docs/org/arc-eval.eld" (getenv "HOME"))
@@ -239,6 +240,55 @@ fusion is actively hurting."
       (goto-char (point-min))
       (special-mode))
     buf))
+
+(defun arc-eval-document-recall (set k &optional arm)
+  "Fraction of SET's questions whose expected source is in the top K documents.
+
+The chunk-level scorer asks whether an expected source appears among k
+retrieved chunks; this asks whether it appears among k retrieved
+documents, which is what a reader of search results actually sees.  The
+question set needs no change to support it: an `:expect' clause already
+names source identity -- `:kind', `:option-name', `:path-suffix' -- and
+never a chunk."
+  (let ((hits 0) (n 0))
+    (dolist (q set)
+      (setq n (1+ n))
+      (let* ((arc-search-limit k)
+             (docs (arc-search-documents (plist-get q :question)
+                                         (plist-get q :scope)
+                                         arm)))
+        (when (cl-some
+               (lambda (expect)
+                 (cl-some (lambda (doc) (arc-eval--source-matches-p doc expect))
+                          docs))
+               (plist-get q :expect))
+          (setq hits (1+ hits)))))
+    (if (zerop n) 0.0 (/ (float hits) n))))
+
+(defun arc-eval-rollup-sweep ()
+  "Report document recall for every `arc-rollup-function', at every `arc-eval-k'.
+This is what chooses the default.  Three hand-tuned retrieval
+interventions have already lost to BM25's own weighting in this package;
+the aggregation gets measured rather than argued about."
+  (interactive)
+  (let ((set (arc-eval-read-set arc-eval-set-file)))
+    (with-current-buffer (get-buffer-create arc-eval-buffer-name)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "arc rollup sweep -- %d questions\n\n" (length set)))
+        (insert (format "%-10s %s\n" "function"
+                        (mapconcat (lambda (k) (format "recall@%-4d" k))
+                                   arc-eval-k " ")))
+        (dolist (fn '(max top-n sum))
+          (let ((arc-rollup-function fn))
+            (insert (format "%-10s %s\n" fn
+                            (mapconcat
+                             (lambda (k)
+                               (format "%-11.2f"
+                                       (arc-eval-document-recall set k)))
+                             arc-eval-k " ")))))
+        (goto-char (point-min))))
+    (display-buffer arc-eval-buffer-name)))
 
 ;;;###autoload
 (defun arc-eval ()

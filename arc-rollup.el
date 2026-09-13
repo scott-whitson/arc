@@ -33,11 +33,12 @@
             every thirty-nine-chunk note outranks every one-chunk option
             on structure alone.
 
-The default is provisional.  Picking an aggregation by intuition is the
-mistake `arc-fts-query' records three times over -- stopword filtering,
-oversized-document filtering and prefix matching each lost to BM25's own
-weighting -- and the same prior applies here.  `arc-eval-rollup-sweep'
-settles it."
+`max' is the measured default, not a placeholder.  `arc-eval-rollup-sweep'
+against the 33-question eval set gave max 0.73/0.82 recall at k=5/10,
+against 0.64/0.73 for `top-n' (n=3) and 0.58/0.67 for `sum' -- max ahead
+at both cutoffs, no tie to break.  See
+docs/design/2026-09-13-rollup-measurement.md for the full table and what
+lost."
   :type '(choice (const max) (const top-n) (const sum))
   :group 'arc)
 
