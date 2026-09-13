@@ -362,7 +362,7 @@ semantic_search AS (
   LIMIT %d
 )" (arc-fts-query text) arc-knn-candidates))
 
-(defun arc--find-similar (text scope &optional arm)
+(defun arc--find-similar (text scope &optional arm scored)
   "Return the SQL selecting chunks in SCOPE similar to TEXT.
 SCOPE is a scope plist (see `arc-scope'); nil means the whole corpus.
 The scope reaches the search rather than filtering its results: both
@@ -374,7 +374,14 @@ real query, `semantic' the vector arm alone, `keyword' the BM25 arm
 alone.  `arc-eval' reports recall for all three, which is how you learn
 that a question is failing because one arm is weak rather than because
 retrieval is \"bad\".  Only `fused' and `semantic' embed TEXT; the
-keyword arm skips that work entirely."
+keyword arm skips that work entirely.
+
+SCORED, when non-nil, adds a second column to every row: the score the
+ranking already computed.  It is additive on purpose -- `arc-ask' and
+`arc-eval' both consume the single-column shape, so the default return
+must not move.  For the single-arm cases, which have a rank but no RRF
+score, the score is `1.0 / (arc-rrf-k + rank)': the same shape and the
+same magnitude as a one-sided fused score."
   ;; For collection scoping specifically, the previous version's inlined
   ;; `rowid IN (...)' filter was already effective in practice: SQLite
   ;; inlines a CTE referenced exactly once and pushes that IN-list into
@@ -394,14 +401,20 @@ keyword arm skips that work entirely."
                 (llm-embedding arc-embeddings-provider text)))))
     (pcase (or arm 'fused)
       ('semantic
-       (format "WITH\n%s,\n%s\nSELECT semantic_search.id FROM semantic_search
+       (format "WITH\n%s,\n%s\nSELECT semantic_search.id%s FROM semantic_search
                 ORDER BY semantic_search.rank ASC LIMIT %d;"
                (arc--scoped-cte scope) (arc--semantic-cte scope vec)
+               (if scored
+                   (format ", 1.0 / (%d + semantic_search.rank) AS score" arc-rrf-k)
+                 "")
                (arc-get-limit)))
       ('keyword
-       (format "WITH\n%s,\n%s\nSELECT keyword_search.id FROM keyword_search
+       (format "WITH\n%s,\n%s\nSELECT keyword_search.id%s FROM keyword_search
                 ORDER BY keyword_search.rank ASC LIMIT %d;"
                (arc--scoped-cte scope) (arc--keyword-cte text)
+               (if scored
+                   (format ", 1.0 / (%d + keyword_search.rank) AS score" arc-rrf-k)
+                 "")
                (arc-get-limit)))
       (_
        (format "WITH
@@ -418,12 +431,13 @@ hybrid_search AS (
   ORDER BY score DESC
   LIMIT %d
 )
-SELECT hybrid_search.id FROM hybrid_search;"
+SELECT hybrid_search.id%s FROM hybrid_search;"
                (arc--scoped-cte scope)
                (arc--semantic-cte scope vec)
                (arc--keyword-cte text)
                (float arc-rrf-semantic-weight) arc-rrf-k arc-rrf-k
-               (arc-get-limit))))))
+               (arc-get-limit)
+               (if scored ", hybrid_search.score" ""))))))
 
 (defun arc-find-similar (text scope on-done &optional on-error)
   "Find chunks in SCOPE similar to TEXT, asynchronously.
