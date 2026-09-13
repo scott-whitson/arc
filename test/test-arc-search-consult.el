@@ -127,6 +127,21 @@ the keyword arm found `a' first -- is what survives, not an append."
 (ert-deftest asx-command-is-guarded-on-consult ()
   (should (eq (fboundp 'arc-search) (featurep 'consult))))
 
+(ert-deftest asx-no-autoload-cookie-hides-inside-a-conditional-block ()
+  "Minor 10: `;;;###autoload' cookie extraction is line-based -- it does
+not track that a defun is nested inside `(when (require \\='consult nil
+t) ...)'. A cookie on an indented line here would generate an
+unconditional autoload for `arc-search', so it would appear in `M-x'
+completion, load this file, and only then fail as undefined on a
+machine without consult. Every real autoload cookie in this file is at
+column 0, directly above its top-level defun; an indented one is
+exactly this bug."
+  (with-temp-buffer
+    (insert-file-contents (expand-file-name "arc-search-ui.el" asx-root))
+    (goto-char (point-min))
+    (while (re-search-forward "^\\([ \t]*\\);;;###autoload" nil t)
+      (should (string-empty-p (match-string 1))))))
+
 (ert-deftest asx-arc-search-visits-the-best-matched-line-not-line-1 ()
   "Ruling T5-A extracted `arc-search--document-link' precisely because
 `arc-source-link' defaults to line 1 when given no LINE, which is

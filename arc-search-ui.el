@@ -364,7 +364,12 @@ does not run."
 Passed as consult's `:keymap', which composes it on top of the ambient
 minibuffer map rather than replacing it -- see `consult--setup-keymap'.")
 
-  ;;;###autoload
+  ;; Deliberately no `;;;###autoload' cookie here. Cookie extraction is
+  ;; line-based and does not track that this defun is nested inside `(when
+  ;; (require 'consult nil t) ...)': a cookie on this line would generate
+  ;; an unconditional autoload, so `M-x arc-search' would appear in
+  ;; completion, load this file, and only then fail as undefined on a
+  ;; machine without consult installed.
   (defun arc-search (&optional scope)
     "Search arc's documents from the minibuffer.
 
