@@ -275,6 +275,39 @@ a real flake: see ~arc-nixopt-flake~ and ~arc-hm-flake~ (both default
 to ~~/dotfiles~ too) in ~arc-source-nixopt.el~ -- if you are not on
 NixOS/Home-Manager, drop those two plan entries as well.
 
+*** 2b. Exclude what the =home= collection overlaps
+
+The =home= collection is rooted at =$HOME=, so two exclusions have to live
+outside this repo, in files you write once:
+
+=~/.arcignore=:
+#+begin_example
+docs/org/
+downloads/
+#+end_example
+
+=docs/org/= is owned by =vault=, which indexes it with the org chunker; without
+this line every note is indexed twice, and the second copy has no org id.
+=downloads/= is installer and ISO junk.
+
+=~/.config/emacs/.arcignore=:
+#+begin_example
+elpa/
+eln-cache/
+auto-save-list/
+ellama-sessions/
+arc/
+#+end_example
+
+=arc/= is where =arc-db-directory= puts =arc.sqlite=. Indexing it is also
+blocked by =arc-secret-denylist=, which covers the case where you have pointed
+=arc-db-directory= somewhere else; the line here is the belt to that pair of
+braces.
+
+Nothing else needs excluding: =arc-ignore-invisible-files= is =t=, so every
+other dotted directory under =$HOME= -- =~/.cache=, =~/.local=, =~/.pi=,
+browser and password-manager caches -- is already out of =home=.
+
 *** 3. Build the index
 
 #+begin_src elisp
