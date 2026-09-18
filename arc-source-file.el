@@ -91,6 +91,28 @@ see `arc--ignore-pattern-to-regexp'."
                                  (split-string (buffer-string) "\n" t)))))
                          arc-ignore-patterns-files)))))
 
+(defcustom arc-text-file-size-ceiling (* 10 1024 1024)
+  "Files larger than this many bytes are treated as binary, unread.
+Checked against `file-attributes' before `arc--text-file-p' opens
+anything.  arc splits at `arc-chunk-size-ceiling' (4000 characters), so
+no plausible prose file comes anywhere near this ceiling, while every
+video, disk image, model weight and archive under $HOME comfortably
+exceeds it.  Without this check, `arc--text-file-p' -- which has to
+read a candidate file in decoded, not literal, form to tell text from
+binary correctly (see its docstring) -- calls `find-file-noselect' on
+whatever `arc--file-list' hands it, unconditionally.  For a small
+config file that is instant; for a 234 MB `.mkv' it means decoding the
+whole thing into a buffer, which one host measured at 20+ minutes
+before anyone noticed, once `home' widened the corpus to include
+directories with real video files in them.
+
+The honest cost: a genuine multi-megabyte TEXT file -- a giant log, a
+generated data dump -- silently drops out of the corpus rather than
+slowly indexing it. That trade is deliberate: nothing arc chunks at
+4000 characters benefits from a document this large staying whole
+anyway, and the alternative is the hang this ceiling exists to stop."
+  :type 'natnum :group 'arc)
+
 (defun arc--text-file-p (filename)
   "Check if FILENAME contains text.
 Reads FILENAME the same way `arc-chunk-file' actually will -- decoded,
@@ -104,15 +126,21 @@ Emacs's internal `eight-bit' raw-byte characters in the chunked text.
 Those cannot be JSON-encoded for the embeddings API, so indexing
 crashed on the first such file it met -- far from FILENAME, and far
 from this function.  A null byte OR any undecodable byte (surfacing
-as a raw-byte character once decoded) now both mark FILENAME binary."
-  (or (and (get-file-buffer filename) t) ;; if file opened assume it text
-      (with-current-buffer (find-file-noselect filename t)
-	(prog1
-	    (not (save-excursion
-                   (goto-char (point-min))
-                   (or (search-forward "\0" nil t 1)
-                       (re-search-forward "[\x3FFF80-\x3FFFFF]" nil t))))
-	  (kill-buffer)))))
+as a raw-byte character once decoded) now both mark FILENAME binary.
+
+Below `arc-text-file-size-ceiling', that logic runs exactly as above,
+unchanged.  At or above it, FILENAME is declared binary without being
+read at all -- see that variable's docstring for why."
+  (and (<= (file-attribute-size (file-attributes filename))
+           arc-text-file-size-ceiling)
+       (or (and (get-file-buffer filename) t) ;; if file opened assume it text
+           (with-current-buffer (find-file-noselect filename t)
+             (prog1
+                 (not (save-excursion
+                        (goto-char (point-min))
+                        (or (search-forward "\0" nil t 1)
+                            (re-search-forward "[\x3FFF80-\x3FFFFF]" nil t))))
+               (kill-buffer))))))
 
 (defcustom arc-secret-denylist
   '("*.age" "*.gpg" "*.pem" "*.key" "*_ed25519" "id_rsa" "id_ed25519" ".env"
