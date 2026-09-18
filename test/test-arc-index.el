@@ -131,7 +131,7 @@ returns -- the full-ingest escape hatch has to actually be one edit."
 (ert-deftest ai-reindex-all-collections-argument-scopes-the-rebuild ()
   "Passing COLLECTIONS to arc-reindex-all must rebuild only the named
 plan entries and leave every other collection alone -- this is what
-lets a caller (eminix/arc-reindex, eminix/arc-reindex-notes) rebuild
+lets a caller (emanix/arc-reindex, emanix/arc-reindex-notes) rebuild
 just its own collections instead of the whole plan."
   (ai-with-temp-db
    (let* ((arc-index-plan '(("manuals-a" . info) ("manuals-b" . info)))
@@ -232,7 +232,7 @@ priority list must still find it."
 
 (ert-deftest ai-reindex-all-skips-a-missing-collection-directory-without-erroring ()
   "`arc-collection-directory-alist' can name a directory absent on this
-host (`eminix' on a machine with no such checkout, for instance); this
+host (a collection whose checkout this host does not have, for instance); this
 must be a reported skip, not a `file-missing' error that aborts every
 collection still queued behind it in `arc-index-plan'."
   (ai-with-temp-db

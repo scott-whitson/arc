@@ -1,4 +1,4 @@
-;;; arc.el --- Local config-aware oracle for eminix -*- lexical-binding: t -*-
+;;; arc.el --- Local config-aware oracle for emanix -*- lexical-binding: t -*-
 
 ;; Copyright (C) 2024, 2025 Free Software Foundation, Inc.
 ;; Copyright (C) 2026 Scott Whitson
@@ -61,7 +61,7 @@
 ;; has to work, so unscoped `arc-ask' keeps behaving exactly as before.
 (require 'arc-scope)
 ;; `arc-index' is required unconditionally here, not left for some external
-;; setup function (`eminix/arc--setup', say) to require separately: nothing
+;; setup function (`emanix/arc--setup', say) to require separately: nothing
 ;; in this file called into it before, so `arc-index-stats' -- which
 ;; `arc-ui-header-line' calls on every header-line redisplay -- was void
 ;; the moment anyone required only `arc' and never happened to call

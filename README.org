@@ -251,23 +251,28 @@ describe *this* machine, not yours:
 
 #+begin_src elisp
 ;; arc-collection-directory-alist defaults to:
-(("dotfiles" . "~/dotfiles")
- ("eminix"   . "~/projects/eminix")
- ("vault"    . "~/docs/org"))
+(("vault"       . "~/docs/org")
+ ("home"        . "~")
+ ("emacs"       . "~/.config/emacs")
+ ("claude"      . "~/.claude")
+ ("agent-shell" . "~/.agent-shell")
+ ("mail"        . "~/.mail"))
 
-;; arc-index-plan defaults to:
-(("dotfiles" . file) ("eminix" . file) ("vault" . org)
+;; arc-index-plan defaults to (note: no "mail"):
+(("vault" . org) ("home" . file) ("emacs" . file)
+ ("claude" . file) ("agent-shell" . file)
  ("nix options" . nixopt) ("hm options" . hmopt)
  ("builtin manuals" . info))
 #+end_src
 
 Before indexing anything, either edit these two variables (in your
 init file, with ~setopt~ or ~customize-set-variable~) to name your own
-directories and collections, or remove the ~"dotfiles"~/~"eminix"~/
-~"vault"~ entries entirely if you have no equivalent of them. The
-~"nix options"~ and ~"hm options"~ entries also need a real flake:
-see ~arc-nixopt-flake~ and ~arc-hm-flake~ (both default to
-~~/dotfiles~ too) in ~arc-source-nixopt.el~ -- if you are not on
+directories and collections, or remove the entries you have no
+equivalent of. ~"mail"~ is configured but deliberately absent from
+~arc-index-plan~: add it there to index mail, and nothing will do so
+until you do. The ~"nix options"~ and ~"hm options"~ entries also need
+a real flake: see ~arc-nixopt-flake~ and ~arc-hm-flake~ (both default
+to ~~/dotfiles~ too) in ~arc-source-nixopt.el~ -- if you are not on
 NixOS/Home-Manager, drop those two plan entries as well.
 
 *** 3. Build the index

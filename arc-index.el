@@ -641,13 +641,13 @@ for collection NAME under DIR, or skip with a `message' when DIR does
 not exist on this host.  Return the list of source ids indexed, or
 `arc--reindex-skipped'.
 `arc-collection-directory-alist' can name a directory that is simply
-absent here -- `eminix' on a host with no such checkout, for instance
--- and `directory-files-recursively' used to signal `file-missing' the
-moment such a plan entry's turn came up, aborting every collection
-still queued behind it.  A missing directory is now an ordinary,
-reported skip instead -- and, importantly, not a reason to prune every
-row this collection already has: the corpus here is merely unbuilt,
-not emptied."
+absent here -- a collection whose checkout this host does not have,
+for instance -- and `directory-files-recursively' used to signal
+`file-missing' the moment such a plan entry's turn came up, aborting
+every collection still queued behind it.  A missing directory is now
+an ordinary, reported skip instead -- and, importantly, not a reason
+to prune every row this collection already has: the corpus here is
+merely unbuilt, not emptied."
   (if (not (file-directory-p dir))
       (progn (message "arc: skipping %s, directory does not exist: %s" name dir)
              arc--reindex-skipped)
