@@ -653,6 +653,78 @@ merely unbuilt, not emptied."
              arc--reindex-skipped)
     (arc--index-sources-with-progress name (funcall producer dir))))
 
+(defun arc-index--collection-overlaps ()
+  "Return the planned collection pairs whose corpora overlap unexcluded.
+
+Each element is (OUTER INNER OUTER-DIR INNER-DIR): INNER's directory
+lies under OUTER's, both are built by `arc-index-plan', and nothing in
+OUTER's ignore files or invisibility rules keeps OUTER's walk out of
+INNER's tree.  Computed from `arc-collection-directory-alist' and
+`arc-index-plan' alone -- no database, no walk, no I/O beyond reading
+OUTER's ignore files.
+
+This exists because the default layout overlaps by design: `home' is
+$HOME and `vault' is ~/docs/org inside it, and the ONLY thing
+separating them is a `.arcignore' the operator writes by hand, outside
+this repository.  Without it ~/docs/org is walked twice -- once by
+`vault' with the org chunker, once by `home' with the `file' chunker,
+the second copy carrying no org id, no title and no citable link while
+competing in every ranking and doubling the embedding cost of the
+largest curated collection.  All of that is silent: two collections
+indexing the same file is not an error at any layer below this one.
+
+The reach test is `arc--path-indexable-p', the same predicate the walk
+filters with, asked about a hypothetical file inside INNER.  Sharing it
+is what makes this agree with the walk rather than approximate it --
+notably, it is why the three dotted roots (`emacs', `claude',
+`agent-shell') do NOT report: `arc-ignore-invisible-files' already
+keeps `home' out of them, and the predicate knows that."
+  (let ((planned (seq-filter (lambda (cell)
+                               (assoc (car cell) arc-collection-directory-alist))
+                             arc-index-plan))
+        (overlaps '()))
+    (dolist (outer planned)
+      (let* ((outer-name (car outer))
+             (outer-dir (file-name-as-directory
+                         (expand-file-name (arc-collection-directory outer-name))))
+             (ignore-regexps (arc--read-ignore-file-regexps outer-dir)))
+        (dolist (inner planned)
+          (let* ((inner-name (car inner))
+                 (inner-dir (file-name-as-directory
+                             (expand-file-name (arc-collection-directory inner-name)))))
+            (when (and (not (equal outer-dir inner-dir))
+                       (string-prefix-p outer-dir inner-dir)
+                       (arc--path-indexable-p
+                        (expand-file-name "a-file" inner-dir)
+                        outer-dir ignore-regexps))
+              (push (list outer-name inner-name outer-dir inner-dir) overlaps))))))
+    (nreverse overlaps)))
+
+(defun arc-index--warn-overlapping-collections ()
+  "Warn once for each pair `arc-index--collection-overlaps' reports.
+A warning and not an error: an overlap is a misconfiguration, not a
+corruption, and refusing to index would be a worse answer than indexing
+and saying so.  Called from `arc-reindex-all' -- once per run, before
+any work, so it is seen rather than buried under progress messages."
+  (dolist (overlap (arc-index--collection-overlaps))
+    (pcase-let ((`(,outer ,inner ,outer-dir ,inner-dir) overlap))
+      (display-warning
+       'arc
+       (format "collection %S (%s) sits inside collection %S (%s) and nothing excludes it.
+
+Every file under %s will be indexed TWICE: once by %S with its own
+chunker, and once by %S with the %S chunker -- the second copy with no
+org id, no title and no citable link, competing in every ranking and
+doubling the embedding cost.
+
+Fix: add a line excluding %s to %s.arcignore, then reindex."
+               inner inner-dir outer outer-dir
+               inner-dir inner outer
+               (alist-get outer arc-index-plan nil nil #'equal)
+               (file-relative-name inner-dir outer-dir)
+               outer-dir)
+       :warning))))
+
 ;;;###autoload
 (defun arc-reindex-all (&optional collections async)
   "Rebuild collections in `arc-index-plan'.  Reports per-kind counts.
@@ -681,6 +753,13 @@ and friends), and a real full ingest is a 20-40 minute run that must
 not freeze Emacs to get.  Progress is reported via `message' either
 way; see `arc-index-progress-every'.
 
+Warns, before any work, about a planned collection whose directory
+sits inside another planned collection's with nothing excluding the
+overlap -- see `arc-index--warn-overlapping-collections'.  A warning
+and not a refusal: the default layout overlaps on purpose (`vault' is
+inside `home'), and it is an operator-written `.arcignore', outside
+this repository, that separates them.
+
 KNOWN LIMITATION: the asynchronous path never prunes.  A source that
 has genuinely left the corpus (deleted, gitignored, excluded) keeps
 whatever it was last indexed as and stays citable until a *synchronous*
@@ -691,6 +770,7 @@ not an oversight: see `arc--prune-collection''s docstring for why a
 long-running asynchronous walk cannot build a trustworthy kept-list to
 prune against."
   (interactive (list nil t))
+  (arc-index--warn-overlapping-collections)
   (if async
       (arc--reindex-all-async collections)
     (arc--reindex-all-sync collections)))

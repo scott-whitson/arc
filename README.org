@@ -308,6 +308,13 @@ Nothing else needs excluding: =arc-ignore-invisible-files= is =t=, so every
 other dotted directory under =$HOME= -- =~/.cache=, =~/.local=, =~/.pi=,
 browser and password-manager caches -- is already out of =home=.
 
+If you skip this step, ~arc-reindex-all~ says so before it starts: it warns,
+once per run, for every planned collection whose directory sits inside another
+planned collection's with nothing excluding the overlap, naming both and the
+line to add. It is a warning and not a refusal -- the overlap is a
+misconfiguration, not a corruption -- but an unheeded one costs you a doubled
+=vault=, chunked the second time with no org id, no title and no citable link.
+
 *** 3. Build the index
 
 #+begin_src elisp

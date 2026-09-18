@@ -8,6 +8,7 @@
 ;; construction.  `mail' is configured but out of the plan: indexing mail should
 ;; be a deliberate act.
 (require 'ert)
+(require 'cl-lib)
 (defvar acl-root (expand-file-name ".." (file-name-directory
                                          (or load-file-name buffer-file-name))))
 (add-to-list 'load-path acl-root)
@@ -58,6 +59,91 @@ not leave a preset pointing at a name the plan no longer builds."
   (dolist (preset arc-scope-presets)
     (dolist (name (plist-get (cdr preset) :collections))
       (should (assoc name arc-index-plan)))))
+
+;;; --- Final review I4: the overlap nothing repo-side could see -------
+;; `vault' is ~/docs/org and `home' is $HOME, so `home' contains `vault'
+;; and only an operator-written ~/.arcignore -- a file outside this
+;; repository -- keeps the two apart.  A fresh operator who builds the
+;; index before writing that file gets ~/docs/org walked twice, the second
+;; copy chunked by `file' with no org id, no title and no citable link,
+;; competing in every ranking and doubling the embedding cost of the
+;; largest curated collection.  Silently: two collections indexing one
+;; file is not an error at any other layer.
+
+(defmacro acl-with-overlapping-plan (arcignore &rest body)
+  "Run BODY with `home' and `vault' planned, `vault' inside `home'.
+ARCIGNORE, when non-nil, is written to `home''s .arcignore first."
+  (declare (indent 1))
+  `(let* ((home (make-temp-file "acl-home" t))
+          (vault (expand-file-name "docs/org" home))
+          (arc-collection-directory-alist
+           (list (cons "home" home) (cons "vault" vault)))
+          (arc-index-plan '(("home" . file) ("vault" . org))))
+     (unwind-protect
+         (progn
+           (make-directory vault t)
+           (when ,arcignore
+             (with-temp-file (expand-file-name ".arcignore" home)
+               (insert ,arcignore)))
+           ,@body)
+       (delete-directory home t))))
+
+(ert-deftest acl-an-unexcluded-overlap-is-reported ()
+  (acl-with-overlapping-plan nil
+    (let ((overlaps (arc-index--collection-overlaps)))
+      (should (= 1 (length overlaps)))
+      (should (equal "home" (nth 0 (car overlaps))))
+      (should (equal "vault" (nth 1 (car overlaps)))))))
+
+(ert-deftest acl-an-arcignored-overlap-is-not-reported ()
+  "The documented fix must actually silence it, or the warning is noise."
+  (acl-with-overlapping-plan "docs/org/\n"
+    (should (null (arc-index--collection-overlaps)))))
+
+(ert-deftest acl-a-dotted-collection-root-is-not-an-overlap ()
+  "`arc-ignore-invisible-files' already keeps `home' out of ~/.config/emacs,
+~/.claude and ~/.agent-shell.  Warning about those three on every
+reindex would train the operator to ignore the warning that matters."
+  (let* ((home (make-temp-file "acl-home" t))
+         (emacs-dir (expand-file-name ".config/emacs" home))
+         (arc-collection-directory-alist
+          (list (cons "home" home) (cons "emacs" emacs-dir)))
+         (arc-index-plan '(("home" . file) ("emacs" . file))))
+    (unwind-protect
+        (progn
+          (make-directory emacs-dir t)
+          (should (null (arc-index--collection-overlaps))))
+      (delete-directory home t))))
+
+(ert-deftest acl-a-collection-does-not-overlap-itself ()
+  (let* ((dir (make-temp-file "acl-solo" t))
+         (arc-collection-directory-alist (list (cons "home" dir)))
+         (arc-index-plan '(("home" . file))))
+    (unwind-protect (should (null (arc-index--collection-overlaps)))
+      (delete-directory dir t))))
+
+(ert-deftest acl-reindex-all-warns-about-an-unexcluded-overlap ()
+  "Loudly, once, naming both collections and the fix -- and it must warn
+rather than refuse: an overlap is a misconfiguration, not a corruption."
+  (acl-with-overlapping-plan nil
+    (let ((warnings '()))
+      (cl-letf (((symbol-function 'arc--reindex-all-sync) (lambda (&rest _) nil))
+                ((symbol-function 'display-warning)
+                 (lambda (_type message &rest _) (push message warnings))))
+        (arc-reindex-all))
+      (should (= 1 (length warnings)))
+      (should (string-match-p "vault" (car warnings)))
+      (should (string-match-p "home" (car warnings)))
+      (should (string-match-p "\\.arcignore" (car warnings))))))
+
+(ert-deftest acl-reindex-all-is-silent-when-the-overlap-is-excluded ()
+  (acl-with-overlapping-plan "docs/org/\n"
+    (let ((warnings '()))
+      (cl-letf (((symbol-function 'arc--reindex-all-sync) (lambda (&rest _) nil))
+                ((symbol-function 'display-warning)
+                 (lambda (_type message &rest _) (push message warnings))))
+        (arc-reindex-all))
+      (should (null warnings)))))
 
 (provide 'test-arc-collections)
 ;;; test-arc-collections.el ends here
