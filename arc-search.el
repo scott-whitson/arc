@@ -25,23 +25,52 @@
 (defcustom arc-search-pool 200
   "How many chunks retrieval considers before rolling them up.
 
-Ten chunks cannot produce ten documents: on this corpus a two-hundred
-chunk pool yields about a hundred and thirty distinct sources, and a
-forty-chunk one routinely yields fewer than ten.  Depth is close to
-free -- the brute-force vector scan already touches every row and LIMIT
-only changes the sort -- measured at +8 ms on the keyword arm and +22 ms
-on the fused arm going from forty to two hundred.
+Ten chunks cannot produce ten documents: measured on the 63,302-chunk
+corpus of 2026-09-13, a two-hundred chunk pool yielded about a hundred
+and thirty distinct sources, and a forty-chunk one routinely yielded
+fewer than ten.  Depth is close to free -- the brute-force vector scan
+already touches every row and LIMIT only changes the sort -- measured
+at +8 ms on the keyword arm and +22 ms on the fused arm going from
+forty to two hundred, on that same corpus.
 
-This is a ceiling, not a promise: `arc-search--effective-pool' lowers it
-for scopes where depth would change the query plan."
+Those figures are historical.  The corpus measured 310,767 chunks on
+2026-09-17, roughly five times the size they were taken at, and they
+have not been re-measured since; nothing about the SHAPE of the
+finding changed (a deeper pool is still most of a rollup's input, and
+LIMIT is still not where the cost is), but treat the exact numbers as
+an order of magnitude rather than a current measurement.  A reader who
+needs them exact should re-measure and say against what size.
+
+This is a ceiling, not a promise: `arc-search--effective-pool' lowers
+it for scopes where depth would change the query plan."
   :type 'integer :group 'arc)
 
 (defcustom arc-search-limit 10
   "How many documents a search returns."
   :type 'integer :group 'arc)
 
+(defun arc-search--minimum-pool (scope)
+  "Return the shallowest pool that could yield `arc-search-limit' documents.
+
+A pool is counted in CHUNKS and the answer is counted in DOCUMENTS, so
+the conversion between them is SCOPE's own chunks-per-source ratio --
+which is not a constant and cannot be one: `nix options' is one chunk
+per document, `vault' is twenty-four to forty-six.  Ten documents from
+a one-chunk-per-document scope need ten chunks; ten from a prose scope
+need hundreds.
+
+Measured from the scope rather than assumed, which is what keeps this
+from going stale the way a hardcoded threshold does.  Never below
+`arc-knn-candidates', the depth retrieval has always had."
+  (let* ((chunks (arc-scope-count scope))
+         (sources (arc-scope-source-count scope)))
+    (if (or (null sources) (zerop sources))
+        arc-knn-candidates
+      (max arc-knn-candidates
+           (ceiling (* arc-search-limit (/ (float chunks) sources)))))))
+
 (defun arc-search--effective-pool (scope)
-  "Return the deepest pool for SCOPE that does not change its vector plan.
+  "Return the pool to use for SCOPE.
 
 `arc-scope-vector-plan' asks vec0 for k = ceil(`arc-knn-candidates' *
 total/n) on a scoped query, and correctly falls back to brute force when
@@ -51,11 +80,32 @@ roughly 0.2 ms per row in scope, so a scope just above
 default pool to a ~400 ms brute-force one at a deep pool -- a large,
 silent regression caused by nothing but asking for more candidates.
 
-Search is allowed to be deep, or to change the plan, not both.  An
-unscoped query and one already on the brute-force branch cannot flip, so
-they take the full pool.  Anything else is clamped to the largest pool
-whose k still fits under the ceiling, and never below
-`arc-knn-candidates', which is the depth retrieval always had."
+So search is allowed to be deep, or to change the plan, not both --
+with one exception, below.  An unscoped query and one already on the
+brute-force branch cannot flip, so they take the full pool.  Anything
+else is clamped to the largest pool whose k still fits under the
+ceiling: floor(`arc-vec0-k-ceiling' * n/total).
+
+THE EXCEPTION, and why it had to be added.  That clamp is a RATIO, so
+it shrinks as the corpus grows while the scope stays the same size.
+It engages below n/total = `arc-search-pool'/`arc-vec0-k-ceiling',
+which is a fixed ratio but a moving number of chunks: 3,091 chunks on
+the 63,302-chunk corpus this was written against, 15,174 on the
+310,767-chunk corpus of 2026-09-17.  A scope of 5,572 chunks was
+comfortably unclamped before and would now be handed a 73-chunk pool
+against a ten-document limit.  For a one-chunk-per-document scope 73 is
+still plenty; for a prose scope it is three or four documents where ten
+were asked for -- a silently short answer, which is a worse failure
+than a slow one, and just as invisible as the plan flip this clamp
+exists to prevent.
+
+`arc-search--minimum-pool' is therefore a floor under the clamp,
+derived from the scope's own chunks-per-source ratio rather than from
+any corpus-size constant.  When the two conflict, the floor wins and
+the plan flips to brute force: exact, bounded by the scope, and the
+clamped band is by construction under a twentieth of the corpus.
+`arc-search-pool' remains a hard ceiling over both, so no scope can
+ask for more depth than an unscoped query would."
   (let ((want (max arc-search-pool arc-knn-candidates)))
     (if (or (arc-scope-empty-p scope)
             (eq (car (arc-scope-vector-plan scope)) 'brute))
@@ -64,8 +114,10 @@ whose k still fits under the ceiling, and never below
             (total (arc-scope-total)))
         (if (or (zerop n) (zerop total))
             want
-          (max arc-knn-candidates
-               (min want (floor (* arc-vec0-k-ceiling (/ (float n) total))))))))))
+          (let ((plan-preserving (floor (* arc-vec0-k-ceiling (/ (float n) total)))))
+            (if (>= plan-preserving want)
+                want
+              (min want (max plan-preserving (arc-search--minimum-pool scope))))))))))
 
 (defun arc-search--attach-sources (rows)
   "Turn (ID SCORE) ROWS into chunk plists carrying their source id.

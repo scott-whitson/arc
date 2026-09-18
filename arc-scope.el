@@ -115,6 +115,20 @@ to \"1\", so a caller never needs a special case for it."
          (format "SELECT count(*) FROM data d JOIN sources s ON s.id = d.source_id WHERE %s;"
                  (arc-scope-predicate scope)))))
 
+(defun arc-scope-source-count (scope)
+  "Return how many distinct sources SCOPE admits.
+Joined exactly the way `arc-scope-count' joins, so the two are two
+counts of one row set: the chunks in scope, and the documents those
+chunks belong to.  `arc-search--minimum-pool' divides one by the other,
+because how deep a chunk pool has to be before it can yield N DOCUMENTS
+is a property of the scope, not a constant -- an option collection is
+one chunk per document, a collection of prose is dozens."
+  (caar (sqlite-select
+         (arc-db)
+         (format "SELECT count(DISTINCT d.source_id) FROM data d
+                  JOIN sources s ON s.id = d.source_id WHERE %s;"
+                 (arc-scope-predicate scope)))))
+
 (defun arc-scope-total ()
   "Return how many `data' rows the corpus holds in total.
 Joined to `sources' the same way `arc-scope-count' is, so the two
@@ -178,9 +192,22 @@ the number of neighbours wanted *within the scope*, which is what
 Brute force is exact -- it considers every row in scope and no row
 outside it -- and its cost tracks the size of the scope rather than
 the size of the corpus, because SQLite evaluates the distance function
-only on the joined rows.  Measured on this corpus at roughly 0.2 ms per
-row in scope: a 428-row scope took 54 ms, all 7,405 rows took 1.59 s.
-2000 keeps the worst case near 400 ms."
+only on the joined rows.  Measured on a 7,405-chunk corpus at roughly
+0.2 ms per row in scope: a 428-row scope took 54 ms, all 7,405 rows
+took 1.59 s.  2000 keeps THIS branch's worst case near 400 ms.
+
+It does not, and cannot, keep brute force's worst case near 400 ms,
+and that is worth knowing before raising or lowering it.
+`arc-scope-vector-plan' also falls back to brute force when no legal
+`k' exists -- when ceil(`arc-knn-candidates' * total/n) exceeds
+`arc-vec0-k-ceiling', i.e. below n = total * `arc-knn-candidates' /
+`arc-vec0-k-ceiling', about total/102 at the defaults.  That band is
+above this ceiling once the corpus passes about 205,000 chunks, and
+the corpus measured 310,767 on 2026-09-17, so scopes from 2,001 to
+roughly 3,035 chunks now take brute force with no choice in the
+matter, at up to about 600 ms.  Lowering this variable does not shrink
+that band and raising it does not extend into it; the band belongs to
+the ceiling, not to this budget."
   :type 'integer
   :group 'arc)
 

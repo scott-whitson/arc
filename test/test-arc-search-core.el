@@ -104,6 +104,12 @@ clamp actually engaged rather than passing the pool through unchanged
           (arc-scope-bruteforce-max 1)
           (arc-knn-candidates 2)
           (arc-search-pool 200)
+          ;; One source of five chunks, so one document is five chunks:
+          ;; a limit of one asks for a pool of five, under the clamp's
+          ;; ten, and the clamp is what decides. The case where the
+          ;; floor wins instead is
+          ;; `asr-the-clamp-never-shallows-below-what-the-limit-needs'.
+          (arc-search-limit 1)
           (arc-vec0-k-ceiling 10)
           (base (car (arc-scope-vector-plan scope)))
           (pool (arc-search--effective-pool scope)))
@@ -111,6 +117,59 @@ clamp actually engaged rather than passing the pool through unchanged
      (should (< pool arc-search-pool))
      (let ((arc-knn-candidates pool))
        (should (eq (car (arc-scope-vector-plan scope)) base))))))
+
+(ert-deftest asr-the-clamp-never-shallows-below-what-the-limit-needs ()
+  "The clamp is a RATIO of the corpus, so it shrinks as the corpus grows
+while the scope does not: its engagement threshold moved from 3,091
+chunks to 15,174 when the corpus went from 63,302 to 310,767.  A scope
+that was comfortably unclamped is now handed a pool too shallow to
+produce `arc-search-limit' documents -- a silently short answer, which
+is worse than the slow one the clamp exists to prevent.
+
+The fixture is the same shrunken-constants trick as
+`asr-deep-pool-does-not-flip-the-vector-plan': one source of ten
+chunks, so ten chunks is ONE document, and a limit of two needs twenty.
+The plan-preserving clamp lands at floor(10 * 10/10) = 10 -- one
+document where two were asked for.  The floor must win."
+  (arc-test-with-temp-db
+   (apply #'asr--index-file "/tmp/prose.txt" "test"
+          (mapcar #'number-to-string (number-sequence 1 10)))
+   (let* ((scope '(:collections ("test")))
+          (arc-scope-bruteforce-max 1)
+          (arc-knn-candidates 2)
+          (arc-search-pool 200)
+          (arc-search-limit 2)
+          (arc-vec0-k-ceiling 10))
+     (should (eq 'knn (car (arc-scope-vector-plan scope))))
+     ;; ten chunks, one source -> ten chunks per document
+     (should (= 20 (arc-search--minimum-pool scope)))
+     (should (= 20 (arc-search--effective-pool scope))))))
+
+(ert-deftest asr-the-floor-is-still-capped-by-the-pool-ceiling ()
+  "`arc-search-pool' is a hard ceiling over the floor as well: no scope
+may ask for more depth than an unscoped query would."
+  (arc-test-with-temp-db
+   (apply #'asr--index-file "/tmp/prose.txt" "test"
+          (mapcar #'number-to-string (number-sequence 1 10)))
+   (let* ((scope '(:collections ("test")))
+          (arc-scope-bruteforce-max 1)
+          (arc-knn-candidates 2)
+          (arc-search-pool 12)
+          (arc-search-limit 5)          ; would want 50 chunks
+          (arc-vec0-k-ceiling 10))
+     (should (= 50 (arc-search--minimum-pool scope)))
+     (should (= 12 (arc-search--effective-pool scope))))))
+
+(ert-deftest asr-minimum-pool-is-measured-from-the-scope-not-assumed ()
+  "A one-chunk-per-document scope needs `arc-search-limit' chunks, not
+hundreds -- which is why this is measured rather than a constant, and
+why the real `nix options'-shaped scopes keep the pool they have."
+  (arc-test-with-temp-db
+   (dotimes (i 10)
+     (asr--index-file (format "/tmp/opt%d.txt" i) "test" "one chunk only"))
+   (let ((arc-knn-candidates 2)
+         (arc-search-limit 3))
+     (should (= 3 (arc-search--minimum-pool '(:collections ("test"))))))))
 
 (provide 'test-arc-search-core)
 ;;; test-arc-search-core.el ends here
