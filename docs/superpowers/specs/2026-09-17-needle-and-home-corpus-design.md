@@ -87,10 +87,44 @@ without a measurement."*
 window — kills the truncation defect outright), `mxbai-embed-large` (1024d),
 `needle-embed` (dimension TBD from `agent.embed`).
 
+**Corpus measurement, 2026-09-17.** Measured over the five collections this
+branch enables — `vault`, `home`, `emacs`, `claude`, `agent-shell`:
+
+| | files | chunks |
+|---|---:|---:|
+| vault / home / emacs / claude / agent-shell | 11,102 | 272,282 |
+| full `arc-index-plan` (adds nix options, hm options, builtin manuals) | 49,587 | 310,767 |
+
+Per-collection detail worth keeping: `vault` 419 files / 16,468 chunks;
+`agent-shell` 19 files / 53,141 chunks; nix options 25,274 chunks; hm options
+5,572 chunks; builtin manuals 7,639 chunks.
+
+**Embedding cost, same date.** Sampled with 20 real `llm-embedding` calls
+against `nomic-embed-text`: 0.132 s/call serial, projecting roughly 600–680
+minutes serial, or 150–170 minutes under the most favourable concurrent
+reading. That is a 20-call sample extrapolated to ~310k chunks, not a
+measured full run — soft enough to move, not soft enough to ignore. The
+budget for doing this inside the corpus-widening plan was 90 minutes; the
+projection blew it by 6–7x, so the embed did not run.
+
+**No recall baseline was taken, deliberately.** *"The corpus growth and the
+embedding-model swap both force a full rebuild, so they land in one run
+rather than two"* (Scale, below) — a `nomic-embed-text` baseline measured now
+would mean embedding the whole corpus once for the baseline and once more for
+the bake-off. The Needle plan already measures all four arms —
+`nomic-embed-text`, `bge-m3`, `mxbai-embed-large`, `needle-embed` — in one
+pass over this corpus, with the `nomic-embed-text` arm serving as the
+baseline. That is strictly better than a separate baseline run: same corpus,
+same session, directly comparable.
+
 **Gate:** Needle takes the embedding slot only if it does not regress
-`recall@10` against the 0.75 baseline. If it regresses, Needle still ships as
-front glue and Ollama stays for embeddings; "drop Ollama" is deferred, not
-abandoned.
+`recall@10` against the `nomic-embed-text` arm measured in that same pass. If
+it regresses, Needle still ships as front glue and Ollama stays for
+embeddings; "drop Ollama" is deferred, not abandoned.
+
+A four-arm bake-off over ~310k chunks is, at this rate, a multi-hour job per
+arm — the plan that runs it needs to schedule it as such, not as a coffee
+break.
 
 **Bake-off must not touch the live database.** `arc-embedding-size` is 768 and
 `arc-db.el:43` states the vec0 table is created at a fixed width — every arm
@@ -182,10 +216,11 @@ as well, so no future collection can re-introduce it.
 
 ### Scale
 
-12,593 visible files under `~` against a current corpus of roughly 63,000
-chunks. A full re-embed is currently 20–40 minutes of sustained compute. The
-corpus growth and the embedding-model swap both force a full rebuild, so they
-land in one run rather than two.
+49,587 visible files under `~` against a measured corpus of 310,767 chunks
+(2026-09-17, full `arc-index-plan`). A full re-embed projects to roughly
+600–680 minutes of sustained compute, serial (see Retrieval, above, for the
+sampling method). The corpus growth and the embedding-model swap both force a
+full rebuild, so they land in one run rather than two.
 
 ## The `eminix` → `emanix` rename
 
@@ -223,8 +258,11 @@ survives only in `arc.el`'s header, the README prose, the tests and the fixture.
 
 ## Success criteria
 
-1. `arc-eval-run` reports the four embedding arms with `recall@5` and `recall@10`
-   against the 0.25 / 0.75 baseline, each in its own database.
+1. `arc-eval-run` reports all four embedding arms — `nomic-embed-text`,
+   `bge-m3`, `mxbai-embed-large`, `needle-embed` — with `recall@5` and
+   `recall@10`, each in its own database, measured in one pass over this
+   corpus; the `nomic-embed-text` arm serves as the baseline the other three
+   are judged against.
 2. arc indexes `~` under the five collections enabled in `arc-index-plan`
    (`vault`, `home`, `emacs`, `claude`, `agent-shell`), with `mail` configured
    but off; excludes every cache named here; and never reads `arc.sqlite`.
