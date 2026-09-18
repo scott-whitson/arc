@@ -409,11 +409,31 @@ see)."
   (nth 2 arc-index--stats-cache))
 
 (defcustom arc-collection-directory-alist
-  `(("dotfiles" . ,(expand-file-name "dotfiles" (getenv "HOME")))
-    ("eminix"   . ,(expand-file-name "projects/eminix" (getenv "HOME")))
-    ("vault"    . ,(expand-file-name "docs/org" (getenv "HOME"))))
+  `(("vault"       . ,(expand-file-name "docs/org" (getenv "HOME")))
+    ("home"        . ,(expand-file-name (getenv "HOME")))
+    ("emacs"       . ,(expand-file-name ".config/emacs" (getenv "HOME")))
+    ("claude"      . ,(expand-file-name ".claude" (getenv "HOME")))
+    ("agent-shell" . ,(expand-file-name ".agent-shell" (getenv "HOME")))
+    ("mail"        . ,(expand-file-name ".mail" (getenv "HOME"))))
   "Map a collection name to the directory it indexes.
-Derived from $HOME -- never hardcode an absolute home path here."
+Derived from $HOME -- never hardcode an absolute home path here.
+
+`home' is $HOME itself.  That is safe rather than reckless because
+`arc-ignore-invisible-files' defaults to t, so every dotted directory
+is excluded from it -- ~/.cache, ~/.local (124,521 files, 14 GB),
+~/.pi (41,982 files) and the browser and password-manager caches never
+enter the corpus.  Its overlap with `vault' is excluded through
+~/.arcignore; see `arc-ignore-patterns-files'.
+
+That same exclusion is why `emacs', `claude' and `agent-shell' are
+separate entries: they hold data, they live under dotted roots, and
+`home' cannot see them.  Turning `arc-ignore-invisible-files' off
+globally to reach them is not the alternative -- that would admit all
+14 GB of ~/.local.
+
+`mail' is configured but deliberately absent from `arc-index-plan'.
+Indexing mail should be something the operator turns on, not something
+that happens because a default changed."
   :type '(alist :key-type string :value-type directory) :group 'arc)
 
 (defun arc-collection-directory (name)
@@ -422,9 +442,14 @@ Derived from $HOME -- never hardcode an absolute home path here."
       (error "arc: no directory configured for collection %S" name)))
 
 (defcustom arc-index-plan
-  '(("dotfiles" . file) ("eminix" . file) ("vault" . org)
+  '(("vault" . org) ("home" . file) ("emacs" . file)
+    ("claude" . file) ("agent-shell" . file)
     ("nix options" . nixopt) ("hm options" . hmopt) ("builtin manuals" . info))
-  "Collections to build and the chunker each uses."
+  "Collections to build and the chunker each uses.
+`vault' must stay on the `org' chunker: the `file' chunker would index
+the same text without org ids or titles, and `arc-eval''s `:org-id'
+expectations match on exactly those.  `mail' is absent on purpose; see
+`arc-collection-directory-alist'."
   :type '(alist :key-type string :value-type symbol) :group 'arc)
 
 (defcustom arc-index-nixopt-cap nil
