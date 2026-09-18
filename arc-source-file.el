@@ -18,8 +18,14 @@
 (require 'arc-chunk)
 (require 'arc-db)   ; arc-source-by-path, used by arc-file-changed-p
 
-(defcustom arc-ignore-patterns-files '(".gitignore" ".ignore" ".rgignore")
-  "Files with patterns to ignore during file parsing."
+(defcustom arc-ignore-patterns-files '(".gitignore" ".ignore" ".rgignore" ".arcignore")
+  "Files with patterns to ignore during file parsing.
+`.arcignore' is arc's own, and is the one to reach for when an
+exclusion should apply to indexing and to nothing else: the `home'
+collection is rooted at $HOME and must skip `docs/org' -- which
+`vault' already owns, with the org chunker -- without that exclusion
+also changing what ripgrep and every other tool that honours
+`.ignore' can see."
   :type '(repeat string) :group 'arc)
 
 (defcustom arc-ignore-invisible-files t
@@ -109,7 +115,8 @@ as a raw-byte character once decoded) now both mark FILENAME binary."
 	  (kill-buffer)))))
 
 (defcustom arc-secret-denylist
-  '("*.age" "*.gpg" "*.pem" "*.key" "*_ed25519" "id_rsa" "id_ed25519" ".env")
+  '("*.age" "*.gpg" "*.pem" "*.key" "*_ed25519" "id_rsa" "id_ed25519" ".env"
+    "*.sqlite" "*.sqlite-wal" "*.sqlite-shm")
   "Path/extension patterns always excluded from `arc--file-list',
 regardless of what any ignore file says or does not say.
 `arc--text-file-p' already keeps a WHOLLY BINARY secret (an agenix
@@ -123,7 +130,16 @@ heuristic.  Uses the same pattern language as
 `arc-ignore-patterns-files' (see `arc--ignore-pattern-to-regexp'): a
 bare name (no slash, e.g. `id_rsa') matches as a path component at any
 depth; a glob (e.g. `*.age') matches a whole path component ending
-that way, likewise at any depth."
+that way, likewise at any depth.
+
+The `*.sqlite' patterns are not about secrecy but about cost and
+recursion: arc's own database lives under `arc-db-directory', which
+defaults inside `user-emacs-directory' -- inside the `emacs'
+collection.  It is a 467 MB file, and `arc--text-file-p' reads a
+candidate whole into a buffer to look for a null byte, so indexing
+would load all 467 MB per run purely to conclude `binary'.  A
+`.arcignore' entry covers today's layout; this covers every layout,
+because `arc-db-directory' can be set anywhere."
   :type '(repeat string) :group 'arc)
 
 (defun arc--denylisted-p (file)
