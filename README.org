@@ -64,8 +64,9 @@ same index as plain search with no model in the path.
   re-scopes.
 
 Results are *documents*, not chunks. arc's corpus mixes one-chunk sources (nix
-options, Info nodes) with sources that split into dozens (vault notes,
-dotfiles), so a chunk-level result list lets one long note fill every slot.
+options, Info nodes) with sources that split into dozens (vault notes, long
+configuration files, agent transcripts), so a chunk-level result list lets one
+long note fill every slot.
 ~arc-rollup-function~ chooses how a document's score is aggregated from its
 chunks'; see ~docs/design/2026-09-13-rollup-measurement.md~ for the sweep that
 picked the default.
@@ -78,7 +79,7 @@ there is no second process to babysit. Symlink it onto ~PATH~:
 
 #+begin_src sh
 ln -s /path/to/arc/bin/arc ~/.local/bin/arc
-arc search "disk layout" --scope dotfiles --json
+arc search "disk layout" --scope home --json
 #+end_src
 
 Exit status is 0 on success, 1 on error, and 2 specifically when the Emacs
@@ -346,7 +347,7 @@ defaults to only ~("builtin manuals")~, regardless of what
 ~arc-reindex-all~ just built. Add your own collections to it, e.g.:
 
 #+begin_src elisp
-(setopt arc-enabled-collections '("builtin manuals" "dotfiles" "vault"))
+(setopt arc-enabled-collections '("builtin manuals" "home" "vault"))
 #+end_src
 
 *** 5. Bind arc's commands
@@ -452,7 +453,7 @@ In-buffer keys" below) re-asks the same question at a different scope,
 picked with ~completing-read~ from ~arc-scope-presets~ (in
 ~arc-scope.el~) -- an alist of ~(NAME . SCOPE-PLIST)~ that defaults to
 ~"everything"~ (~(:all t)~, see above), ~"vault"~, ~"options"~ and
-~"dotfiles"~, and that you can add your own named scopes to.
+~"home"~, and that you can add your own named scopes to.
 
 A scope that matches nothing is not a smaller answer -- it is a
 refusal. When retrieval returns no candidates at all, the model is
@@ -631,7 +632,7 @@ a set survives being read on another machine:
   :expect ((:kind "hm-option" :option-name "services.syncthing.enable")))
 
  (:question "which models does ollama pre-pull on this machine"
-  :scope (:collections ("dotfiles"))
+  :scope (:collections ("home"))
   :expect ((:kind "file" :path-suffix "ioshi/i-intelligence/ollama.nix"))))
 #+end_src
 
@@ -763,7 +764,7 @@ remove departed sources:
 
 #+begin_src elisp
 (arc-reindex-all)                  ; every collection in `arc-index-plan'
-(arc-reindex-all '("dotfiles"))     ; just one collection
+(arc-reindex-all '("home"))        ; just one collection
 #+end_src
 
 *** Emptying a collection's only source leaves it indexed

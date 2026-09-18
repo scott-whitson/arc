@@ -860,7 +860,7 @@ citation can name the line it actually came from."
 Accepts three shapes, because `arc-ask' is public and its documented
 second argument used to be a plain list of collection names:
   nil                     -- `arc-enabled-collections'
-  (\"vault\" \"dotfiles\")    -- those collections
+  (\"vault\" \"home\")        -- those collections
   (:collections (\"vault\")) -- a scope plist, used as-is
 A list of strings is unambiguous here: a scope plist's first element
 is always a keyword."

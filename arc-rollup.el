@@ -12,9 +12,9 @@
 ;;
 ;; The conversion matters because arc's corpus is two shapes wearing one
 ;; schema.  Options and Info nodes are one chunk per document; vault
-;; notes and dotfiles are twenty-four to forty-six.  At a chunk-level
-;; limit of ten, one well-matched note can take every slot and hide five
-;; other documents that also matched.
+;; notes and long configuration files are twenty-four to forty-six.  At a
+;; chunk-level limit of ten, one well-matched note can take every slot and
+;; hide five other documents that also matched.
 
 ;;; Code:
 
@@ -25,7 +25,7 @@
             document length, but it discards the signal in a document
             that matched in twelve places rather than one.
 `top-n'  -- the sum of the best `arc-rollup-top-n' scores.  Bounded, so
-            a forty-six-chunk dotfile cannot run away with the ranking.
+            a forty-six-chunk file cannot run away with the ranking.
 `sum'    -- every chunk.  Expected to lose, and provided so the eval
             harness can demonstrate that rather than this docstring
             asserting it: summing rewards documents for being long, so

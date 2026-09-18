@@ -1,7 +1,7 @@
 ;;; test-arc-rollup.el --- chunk scores to ranked documents -*- lexical-binding: t; -*-
 ;;
 ;; arc's corpus is two shapes in one schema: nix options and Info manuals are
-;; one chunk per document, the vault and dotfiles are 24-46.  A chunk-level
+;; one chunk per document, the vault and long configuration files are 24-46.  A chunk-level
 ;; result set therefore lets one long note consume every slot.  Rollup groups
 ;; chunks back into documents, and the choice of aggregation is exactly where
 ;; that asymmetry can be re-introduced by accident -- see

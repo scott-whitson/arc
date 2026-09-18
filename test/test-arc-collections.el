@@ -145,5 +145,44 @@ rather than refuse: an overlap is a misconfiguration, not a corruption."
         (arc-reindex-all))
       (should (null warnings)))))
 
+;;; --- Final review I2: no live reference to a retired collection ------
+
+(defconst acl-retired-collection-exempt-basenames
+  '("arc-scope.el" "arc-source-nixopt.el" "test-arc-collections.el")
+  "Files that name the retired collection ON PURPOSE.
+`arc-scope.el' records why the \"dotfiles\" preset became \"home\" and
+what the old corpus's nearest neighbours looked like; `arc-source-nixopt.el'
+uses `dotfiles' as what it still is, a DIRECTORY (`arc-nixopt-flake');
+and this file asserts about the name rather than using it.")
+
+(ert-deftest acl-no-live-reference-to-a-retired-collection ()
+  "Task 3 deleted the `dotfiles' collection and a fix round caught
+`arc-scope-presets' alone.  Six live references survived it, including
+the README's only bin/arc example -- which errored with `unknown scope
+\"dotfiles\"' -- an `arc-reindex-all' example that had become a silent
+no-op, and an `arc-enabled-collections' example that set up exactly the
+silently-empty scope `arc-scope-presets' warns about.
+
+The name is only a defect when it names a COLLECTION, which in elisp
+and in the README means the quoted string or a `--scope' argument; it
+remains a perfectly good directory name, which is why the pattern is
+narrow and the exemptions are by basename."
+  (let ((offenders '()))
+    (dolist (file (append (directory-files acl-root t "\\.el\\'")
+                          (list (expand-file-name "README.org" acl-root))))
+      (when (and (file-regular-p file)
+                 (not (member (file-name-nondirectory file)
+                              acl-retired-collection-exempt-basenames)))
+        (with-temp-buffer
+          (insert-file-contents file)
+          (goto-char (point-min))
+          ;; The optional backslashes catch the name quoted INSIDE a
+          ;; docstring, which is where arc.el's stale example lived.
+          (while (re-search-forward "\\\\?\"dotfiles\\\\?\"\\|--scope +dotfiles" nil t)
+            (push (format "%s:%d" (file-relative-name file acl-root)
+                          (line-number-at-pos))
+                  offenders)))))
+    (should (equal offenders '()))))
+
 (provide 'test-arc-collections)
 ;;; test-arc-collections.el ends here
