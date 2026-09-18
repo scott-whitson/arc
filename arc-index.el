@@ -123,25 +123,33 @@ outright, and does so audibly via `message', not silently."
 The stored chunk is unaffected either way -- only the vector changes, so
 what the model is shown and what citations quote never move.
 
-MEASURED, controlled: the dotfiles collection was reindexed twice from an
-identical starting state, so the only difference was the embedding input.
-Over the eight dotfiles-scoped eval questions:
+THE FINDING: embedding the locator improves RANKING and not FINDING --
+the same candidates, better ordered -- which is exactly what an
+embedding change should look like, and the gain sat entirely below
+`arc-limit'.  At a limit of 10 the model already receives all ten
+chunks, so a 40-minute re-embed of the corpus bought nothing
+measurable at k=10.  That is why this is off.
 
-  text only          recall@3 0.12  @5 0.25  @10 0.75  6/8 found
-  locator embedded   recall@3 0.38  @5 0.38  @10 0.75  6/8 found
+THE NUMBERS ARE HISTORICAL.  They were measured over the `dotfiles'
+collection and its eight scoped eval questions -- recall@3 0.12, @5
+0.25, @10 0.75 text-only against 0.38 / 0.38 / 0.75 with the locator
+embedded, 6 of 8 found either way.  That collection no longer exists:
+this branch replaced it with `home', on a corpus roughly five times the
+size (310,767 chunks, measured 2026-09-17), against a different eval
+set.  Treat the figures as the record of where the finding came from,
+not as a current measurement of anything -- nothing has been measured
+on the corpus arc actually has.
 
-So it improves RANKING and not FINDING -- the same candidates, better
-ordered -- which is exactly what an embedding change should look like.
-And that is why it is off: `arc-limit' is 10, the model already receives
-all ten chunks, and the gain sits entirely below the cutoff arc uses. A
-40-minute re-embed of the corpus buys nothing measurable at k=10.
+WHERE THEY GET RE-MEASURED: the four-arm embedding bake-off, which
+runs every arm over the new corpus in one pass.  Until it does, the
+default stands on the SHAPE of the old finding (a ranking gain below
+the cutoff) rather than on any number here.
 
-Turn it on if `arc-limit' ever drops to 5 or 3, where the ranking gain
-lands inside the cutoff. And note what the number cannot say: recall@k
+Turn it on if `arc-limit' ever drops to 5 or 3, where a ranking gain
+would land inside the cutoff.  And note what recall@k cannot say: it
 measures retrieval, not answer quality, so better ordering WITHIN the
 context window may help a model that attends more to early content.
-This instrument cannot see that, which is a limit of the measurement
-rather than evidence of no effect.
+That is a limit of the instrument, not evidence of no effect.
 
 Changing this requires re-embedding; `arc-index-rebuild-fts' will not do
 it, because embeddings are not derived data."
@@ -167,9 +175,8 @@ happened to embed their own name already, which is why options fared
 better than files.
 
 FTS5's default tokenizer splits on non-alphanumerics, so a path needs no
-transformation: /home/u/dotfiles/ioshi/i-intelligence/syncthing.nix
-tokenizes to home, scott, dotfiles, ioshi, i, intelligence, syncthing,
-nix.
+transformation: /home/u/config/hosts/hardware/disko.nix tokenizes to
+home, u, config, hosts, hardware, disko, nix.
 
 Deliberately NOT added to the embedded text: that would need a full
 re-embed of the corpus, and the free half is worth measuring first."
