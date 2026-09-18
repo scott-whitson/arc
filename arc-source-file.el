@@ -139,24 +139,30 @@ anchors a pattern to the whole matched string (\\=`...\\=', not a
 substring search), so a bare filename in an ignore file -- e.g.
 `b.txt' -- would otherwise need DIRECTORY's entire absolute path
 prefix to be absent for it to ever match, and would silently never
-exclude anything.  The invisible-file patterns are unanchored
-substring regexps written to look for a `/.' inside a path, so they
-keep matching the absolute path instead, where that substring is
-always present for a dotfile.  `arc-secret-denylist' is checked
-unconditionally, independent of any ignore file, invisibility, or
-`arc--text-file-p''s content-based verdict."
+exclude anything.  `arc-secret-denylist' is checked unconditionally,
+independent of any ignore file, invisibility, or
+`arc--text-file-p''s content-based verdict.  The invisible-file
+patterns run against the relative path with a `/' prefixed, NOT the
+absolute path: they used to match the absolute path, which meant a
+collection rooted at a dotted directory -- `~/.config/emacs',
+`~/.claude' -- excluded every one of its own files, because their
+absolute paths all contain `/.config' or `/.claude'.  The `/' prefix
+is what still catches a dotfile sitting at the root of a collection,
+whose bare relative name has no leading slash for `/\\.[^/]*' to
+match."
   (let ((ignore-regexps (arc--read-ignore-file-regexps directory))
         (invisible-regexps (when arc-ignore-invisible-files
                               (list "$\\.[^/]*" "/\\.[^/]*"))))
     (seq-filter (lambda (file)
-		  (and (not (seq-some (lambda (regexp)
-					 (string-match-p
-                                          regexp (file-relative-name file directory)))
-				       ignore-regexps))
-                       (not (seq-some (lambda (regexp) (string-match-p regexp file))
-                                      invisible-regexps))
-                       (not (arc--denylisted-p file))
-		       (arc--text-file-p file)))
+		  (let ((relative (file-relative-name file directory)))
+                    (and (not (seq-some (lambda (regexp)
+					  (string-match-p regexp relative))
+				        ignore-regexps))
+                         (not (seq-some (lambda (regexp)
+                                          (string-match-p regexp (concat "/" relative)))
+                                        invisible-regexps))
+                         (not (arc--denylisted-p file))
+		         (arc--text-file-p file))))
 		(directory-files-recursively directory ".*"))))
 
 (defun arc-file-hash (path)
