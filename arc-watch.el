@@ -28,7 +28,6 @@
 
 ;;; Code:
 
-(require 'cl-lib)
 (require 'arc)
 (require 'arc-index)
 
@@ -53,15 +52,52 @@ off, so the whole mutable corpus is covered across several ticks."
 
 (defun arc-watch--collection-for (path)
   "Return the collection PATH belongs to, or nil.
-A file is arc's business only if it is inside a directory arc indexes."
-  (car (cl-find-if
-        (lambda (cell)
-          (let ((dir (file-name-as-directory (expand-file-name (cdr cell)))))
-            (string-prefix-p dir (expand-file-name path))))
-        arc-collection-directory-alist)))
+A file is arc's business only if it is inside a directory arc indexes
+AND `arc-index-plan' actually builds that collection.
+
+Two rules, and this took the first-matching entry of
+`arc-collection-directory-alist' instead of either.
+
+LONGEST match, not first.  `home' is $HOME itself, so its directory is
+a string prefix of every other collection's, and a first-match lookup
+answered `home' for everything.  The walk, meanwhile, attributes
+~/.config/emacs to `emacs', and `arc--replace-source-chunks' deletes
+and reinserts a source's rows under whatever collection it is handed
+-- so a file MIGRATED between collections depending on whether the
+watcher or the walk wrote last, and a scope on `emacs' intermittently
+lost it.  The longest matching root is the one that actually owns the
+file, and it is the one the walk uses.
+
+PLANNED collections only, and an unplanned root SHADOWS rather than
+falls through.  `arc-collection-directory-alist' deliberately
+configures directories the plan does not build -- `mail' is
+$HOME/.mail, and its own docstring says indexing mail must be
+something the operator turns on, never something that happens because
+a default changed.  Under a first-match lookup every mail file
+resolved to `home' and was indexed with the `file' chunker, which is
+exactly the thing that was not supposed to happen; under longest-match
+alone it still would, because $HOME encloses ~/.mail.  So the longest
+matching root is picked FIRST, from every CONFIGURED collection, and
+only then asked whether the plan builds it.  Configuring a directory
+and leaving it out of the plan therefore means \"never index this\",
+which is what it reads as.
+
+`arc-watch--chunker-for' has the same exposure and is what answers the
+planned question here, so the two cannot disagree."
+  (let ((path (expand-file-name path))
+        (best nil)
+        (best-length -1))
+    (dolist (cell arc-collection-directory-alist)
+      (let* ((dir (file-name-as-directory (expand-file-name (cdr cell))))
+             (len (length dir)))
+        (when (and (> len best-length) (string-prefix-p dir path))
+          (setq best (car cell) best-length len))))
+    (and best (arc-watch--chunker-for best) best)))
 
 (defun arc-watch--chunker-for (collection)
-  "Return the chunker COLLECTION is built with, or nil."
+  "Return the chunker COLLECTION is built with, or nil.
+Nil for a collection `arc-index-plan' does not build, which is also how
+`arc-watch--collection-for' refuses to resolve one."
   (alist-get collection arc-index-plan nil nil #'equal))
 
 (defun arc-watch-reindex-path (path &optional quiet)

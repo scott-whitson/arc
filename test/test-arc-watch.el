@@ -127,3 +127,81 @@ never fires `after-save-hook'."
     (arc-watch-mode -1)
     (should-not (memq #'arc-watch--after-save after-save-hook))
     (should-not arc-watch--timer)))
+
+;;; --- Final review C1: which collection a saved path belongs to -------
+;; `home' is $HOME, so its directory is a string prefix of every other
+;; collection's.  A first-match lookup over `arc-collection-directory-alist'
+;; therefore answered `home' for everything -- including ~/.mail, which
+;; `arc-index-plan' deliberately does not build.
+
+(defmacro awa-with-home-shaped-plan (&rest body)
+  "Bind `home' to a $HOME-shaped tree with three collection roots under it:
+`home' at the top, `emacs' at .config/emacs, and `mail' at .mail --
+configured but, like the real plan, not built."
+  (declare (indent 0))
+  `(let* ((home (make-temp-file "awa-home" t))
+          (arc-collection-directory-alist
+           (list (cons "home" home)
+                 (cons "emacs" (expand-file-name ".config/emacs" home))
+                 (cons "mail" (expand-file-name ".mail" home))))
+          (arc-index-plan '(("home" . file) ("emacs" . file))))
+     (unwind-protect (progn ,@body)
+       (delete-directory home t))))
+
+(ert-deftest awa-a-mail-path-resolves-to-no-collection ()
+  "`mail' is configured and deliberately unplanned.  Resolving a mail
+path to `home' indexes the operator's mail -- precisely what
+`arc-collection-directory-alist''s docstring says must only happen when
+the operator turns it on."
+  (awa-with-home-shaped-plan
+    (should (null (arc-watch--collection-for
+                   (expand-file-name ".mail/inbox/1" home))))))
+
+(ert-deftest awa-a-dotted-collection-root-wins-over-home ()
+  "The walk files ~/.config/emacs under `emacs'.  The watcher must agree:
+`arc--replace-source-chunks' reinserts a source's rows under whatever
+collection it is handed, so disagreeing makes files migrate between
+collections depending on which wrote last."
+  (awa-with-home-shaped-plan
+    (should (equal "emacs" (arc-watch--collection-for
+                            (expand-file-name ".config/emacs/init.el" home))))))
+
+(ert-deftest awa-collection-lookup-does-not-depend-on-alist-order ()
+  "Longest match, not first -- so reordering the alist cannot change the
+answer."
+  (awa-with-home-shaped-plan
+    (let ((arc-collection-directory-alist (reverse arc-collection-directory-alist)))
+      (should (equal "emacs" (arc-watch--collection-for
+                              (expand-file-name ".config/emacs/init.el" home))))
+      (should (null (arc-watch--collection-for
+                     (expand-file-name ".mail/inbox/1" home)))))))
+
+(ert-deftest awa-an-ordinary-home-file-still-resolves-to-home ()
+  "The narrowing must not cost `home' its own files."
+  (awa-with-home-shaped-plan
+    (should (equal "home" (arc-watch--collection-for
+                           (expand-file-name "notes/todo.txt" home))))))
+
+(ert-deftest awa-saving-a-mail-file-indexes-nothing ()
+  "End to end: the whole point of the lookup.
+`arc-ignore-invisible-files' is bound off here on purpose.  It happens
+to exclude ~/.mail as well, being a dotted directory, and leaving it on
+would let that rule pass this test while the collection lookup was
+still wrong -- which is exactly the state the corpus was in."
+  (let* ((arc-embedding-size 3)
+         (arc-ignore-invisible-files nil)
+         (home (make-temp-file "awa-home" t))
+         (mail (expand-file-name ".mail/inbox/1" home)))
+    (unwind-protect
+        (arc-test-with-temp-db
+         (let ((arc-collection-directory-alist
+                (list (cons "home" home)
+                      (cons "mail" (expand-file-name ".mail" home))))
+               (arc-index-plan '(("home" . file))))
+           (make-directory (file-name-directory mail) t)
+           (with-temp-file mail (insert "Subject: private\n\nbody\n"))
+           (cl-letf (((symbol-function 'llm-embedding) (lambda (_p _t) [0.1 0.2 0.3])))
+             (should (null (arc-watch-reindex-path mail)))
+             (should (= 0 (caar (sqlite-select
+                                 (arc-db) "SELECT count(*) FROM sources;")))))))
+      (delete-directory home t))))
