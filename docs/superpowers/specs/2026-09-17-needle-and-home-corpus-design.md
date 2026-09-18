@@ -184,7 +184,7 @@ through Nix, and maintaining an FFI. Revisit once the measurement justifies it.
 `arc-ignore-invisible-files` defaults to `t` (`arc-source-file.el:26`), so a
 `home` collection rooted at `~` already excludes every dotted directory:
 `~/.cache`, `~/.local` (124,521 files, 14 GB), `~/.pi` (41,982 files, 1.1 GB),
-`~/.mail`, browser and Bitwarden caches. Blanket `~` does not drag those in.
+`~/.mail`, browser and password-manager caches. Blanket `~` does not drag those in.
 `.gitignore`/`.ignore`/`.rgignore` handling and `arc-secret-denylist`
 (`*.age`, `*.gpg`, `*.pem`, `id_rsa`, `.env`) apply on top.
 

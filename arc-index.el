@@ -427,16 +427,19 @@ Derived from $HOME -- never hardcode an absolute home path here.
 
 `home' is $HOME itself.  That is safe rather than reckless because
 `arc-ignore-invisible-files' defaults to t, so every dotted directory
-is excluded from it -- ~/.cache, ~/.local (124,521 files, 14 GB),
-~/.pi (41,982 files) and the browser and password-manager caches never
-enter the corpus.  Its overlap with `vault' is excluded through
+is excluded from it -- ~/.cache, ~/.local, the per-tool state
+directories, and the browser and password-manager caches never enter
+the corpus.  On a developer's machine those hold tens of thousands of
+files and several gigabytes between them, essentially none of it
+prose; measure your own rather than trusting a number from someone
+else's.  Its overlap with `vault' is excluded through
 ~/.arcignore; see `arc-ignore-patterns-files'.
 
 That same exclusion is why `emacs', `claude' and `agent-shell' are
 separate entries: they hold data, they live under dotted roots, and
 `home' cannot see them.  Turning `arc-ignore-invisible-files' off
-globally to reach them is not the alternative -- that would admit all
-14 GB of ~/.local.
+globally to reach them is not the alternative -- that would admit
+every byte of cache under every dotted directory along with them.
 
 `mail' is configured but deliberately absent from `arc-index-plan'.
 Indexing mail should be something the operator turns on, not something

@@ -146,7 +146,7 @@ doubled single quote means anything.  `arc-sqlite-escape' used to map
 came back with it doubled.  Storing this text and reading it back via
 a real round trip through `arc-db' must reproduce it byte-identical."
   (arc-test-with-temp-db
-   (let* ((text "C:\\Users\\swhitson, a \"quote\", and it's got an apostrophe")
+   (let* ((text "C:\\Users\\someone, a \"quote\", and it's got an apostrophe")
           (id (arc-source-upsert '(:kind "file" :path "/tmp/rt.nix"))))
      (sqlite-execute
       (arc-db)

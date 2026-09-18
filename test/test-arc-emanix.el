@@ -9,21 +9,36 @@
 ;; records, and 2026-08-29-design.md is ABOUT a hardcoded-path bug, so rewriting
 ;; it would destroy the evidence.
 ;;
-;; Two files are exempt from the scan below by basename, not by directory,
+;; The rest of docs/ IS scanned, which it was not when that sentence was first
+;; written -- the comment claimed docs/design/ was the exemption while the scan
+;; reached no docs/ file at all, so the one directory named as special was the
+;; only one covered by the rule either way.
+;;
+;; Four files are exempt from the scan below by basename, not by directory,
 ;; because each asserts ABOUT the retired name rather than reintroducing it:
 ;; this file necessarily contains the literal string "eminix" in both its
-;; own `search-forward' call and this explanatory comment, and
+;; own `search-forward' call and this explanatory comment;
 ;; test-arc-collections.el legitimately asserts
-;; `(should-not (assoc "eminix" arc-collection-directory-alist))'.  The
-;; exemption is scoped to exactly those two basenames; every other .el file,
-;; README.org and every fixture stays in scope, and the search itself is not
-;; weakened.
+;; `(should-not (assoc "eminix" arc-collection-directory-alist))'; and the
+;; 2026-09-17 spec and plan are the documents that SPECIFY the rename, which
+;; they cannot do without naming what is being renamed.  The exemption is
+;; scoped to exactly those four basenames; every other .el file, README.org,
+;; every fixture and every other docs/ file stays in scope, and the search
+;; itself is not weakened.
 (require 'ert)
 (defvar aem-root (expand-file-name ".." (file-name-directory
                                          (or load-file-name buffer-file-name))))
-(defconst aem-exempt-basenames '("test-arc-emanix.el" "test-arc-collections.el")
+(defconst aem-exempt-basenames
+  '("test-arc-emanix.el" "test-arc-collections.el"
+    "2026-09-17-needle-and-home-corpus-design.md"
+    "2026-09-17-home-corpus.md")
   "Basenames of files that assert ABOUT the retired `eminix' name rather
 than using it, and so must contain the literal string on purpose.")
+
+(defconst aem-exempt-directory "docs/design/"
+  "Directory exempt from the scan: dated records, not live documentation.
+`docs/design/2026-08-29-design.md' is ABOUT a hardcoded-path bug, so
+rewriting it would destroy the evidence it exists to preserve.")
 
 (ert-deftest aem-no-stale-distribution-name ()
   "Live code, docs, tests and fixtures say emanix."
@@ -33,9 +48,13 @@ than using it, and so must contain the literal string on purpose.")
                           (list (expand-file-name "README.org" aem-root))
                           (directory-files (expand-file-name "test" aem-root) t "\\.el\\'")
                           (directory-files-recursively
-                           (expand-file-name "test/fixtures" aem-root) "\\.org\\'")))
+                           (expand-file-name "test/fixtures" aem-root) "\\.org\\'")
+                          (directory-files-recursively
+                           (expand-file-name "docs" aem-root) "\\.md\\'")))
       (when (and (file-regular-p file)
-                 (not (member (file-name-nondirectory file) aem-exempt-basenames)))
+                 (not (member (file-name-nondirectory file) aem-exempt-basenames))
+                 (not (string-prefix-p aem-exempt-directory
+                                       (file-relative-name file aem-root))))
         (with-temp-buffer
           (insert-file-contents file)
           (goto-char (point-min))

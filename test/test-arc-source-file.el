@@ -324,3 +324,19 @@ collection's business however indexable it looks on its own."
            (with-temp-file outside (insert "elsewhere\n"))
            (should-not (arc-indexable-file-p outside root)))
        (delete-file outside)))))
+
+;;; --- Final review M1: the ceiling is exclusive, as its own name says -
+
+(ert-deftest asf-a-file-of-exactly-the-ceiling-size-is-text ()
+  "`arc-text-file-size-ceiling' says \"files LARGER than this\", and the
+code agrees (`<='); only `arc--text-file-p''s docstring said \"at or
+above\".  Pinned so the three cannot drift again."
+  (let ((f (make-temp-file "arc-ceiling")))
+    (unwind-protect
+        (progn
+          (with-temp-file f (insert (make-string 16 ?a)))
+          (let ((arc-text-file-size-ceiling 16))
+            (should (arc--text-file-p f)))
+          (let ((arc-text-file-size-ceiling 15))
+            (should-not (arc--text-file-p f))))
+      (delete-file f))))

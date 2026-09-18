@@ -11,10 +11,20 @@
 ;; would instead block the whole session on a modal prompt mid-run.
 ;;
 ;; `arc--text-file-p' no longer calls `find-file-noselect' at all -- it
-;; reads a bounded prefix via `insert-file-contents' with
-;; `coding-system-for-read' pinned to `utf-8', which removes the
-;; detection step that could ever ask anyone anything, and wraps the
-;; read in `ignore-errors' so one bad file can never abort a walk.
+;; reads a bounded prefix with `insert-file-contents-literally' and
+;; decodes those bytes itself, explicitly, via `decode-coding-string'
+;; as `utf-8'.  Both halves matter and the difference from an earlier
+;; version of this fix is load-bearing: that one used plain
+;; `insert-file-contents' with `coding-system-for-read' pinned, which
+;; removes the coding-system PROMPT but keeps the rest of the
+;; machinery a non-literal read carries -- including transparent
+;; decompression of a `.gz'-shaped candidate, which means reading and
+;; inflating a whole archive to decide whether it is text.  The
+;; literal read carries none of it; see `arc--text-file-p''s own
+;; docstring.  The read is wrapped in `ignore-errors' so one bad file
+;; can never abort a walk, and gated on `file-regular-p' so a named
+;; pipe can never block it in `open(2)' -- a block `ignore-errors'
+;; could not catch.
 ;;
 ;; Multiple attempts to synthesize content that reproduces the actual
 ;; interactive prompt under this Emacs (mixed high bytes, UTF-16

@@ -202,9 +202,11 @@ succeeds for it, so `file-attributes' returns a size and this function
 proceeds normally into the read below, which then fails and is caught
 there.)
 
-At or above `arc-text-file-size-ceiling', FILENAME is declared binary
-without being read at all -- see that variable's docstring for why.
-Below it, at most `arc-text-file-probe-size' bytes (plus a small
+LARGER THAN `arc-text-file-size-ceiling', FILENAME is declared binary
+without being read at all -- see that variable's docstring for why.  A
+file of exactly the ceiling size is text: the check is `<=', matching
+that variable's own \"larger than this many bytes\" wording.  At or
+below it, at most `arc-text-file-probe-size' bytes (plus a small
 margin, see `arc--utf8-max-tail-bytes') are read into a temporary
 buffer, decoded the same way `arc-chunk-file' actually will -- not
 literal -- because that mismatch is precisely the bug the undecodable-
