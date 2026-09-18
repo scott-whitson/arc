@@ -147,5 +147,61 @@ this test, made concrete."
                                    (make-string 3 ?a))
       (should-not (arc--text-file-p f)))))
 
+;;; --- Fix round 2: three findings from review of the round-1 fix ----
+;;
+;; C1 -- the size check sat outside `ignore-errors', so a file that
+;; vanishes between `arc--file-list''s directory walk and this check
+;; (an ordinary race on a live $HOME) made `file-attributes' return
+;; nil, and `(<= nil ceiling)' signalled `wrong-type-argument' instead
+;; of being caught.  I2 -- the `get-file-buffer' fast path had been
+;; moved inside the size-gated `or', so a file with a live visiting
+;; buffer larger than the ceiling stopped being treated as text, only
+;; because of its size.  I3 -- the bounded read cut off a UTF-8
+;; character at the byte boundary, decoding its tail as a raw-byte
+;; artifact indistinguishable from a real undecodable byte.
+
+(ert-deftest atn-vanished-file-returns-nil-without-signalling ()
+  "A file that vanishes between the directory walk and this check must
+come back nil, not signal `wrong-type-argument' on a nil size."
+  (let ((f (make-temp-file "arc-vanished")))
+    (delete-file f)
+    (should (eq nil (arc--text-file-p f)))))
+
+(ert-deftest atn-get-file-buffer-bypasses-the-size-ceiling ()
+  "A file with a live visiting buffer is text regardless of
+`arc-text-file-size-ceiling': checking a buffer costs no I/O, so
+gating that check behind the file's on-disk size served no protective
+purpose and would reclassify a file the caller is actively editing as
+binary purely because of its size."
+  (let ((arc-text-file-size-ceiling 4))
+    (atn-with-temp-file f (make-string 4096 ?a) ; far bigger than the ceiling
+      (let ((buf (find-file-noselect f t)))
+        (unwind-protect
+            (should (eq t (arc--text-file-p f)))
+          (kill-buffer buf))))))
+
+(ert-deftest atn-valid-utf8-character-at-probe-boundary-is-still-text ()
+  "A multi-byte UTF-8 character straddling the probe boundary must not
+be mistaken for an undecodable byte: 7 plain ASCII bytes, then an
+accented e (2 bytes in UTF-8) whose first byte lands exactly at the
+edge of an 8-byte probe window, then more ASCII past it."
+  (let ((arc-text-file-probe-size 8))
+    (atn-with-temp-file f (encode-coding-string
+                            (concat (make-string 7 ?a) "é" "more ascii tail")
+                            'utf-8)
+      (should (eq t (arc--text-file-p f))))))
+
+(ert-deftest atn-genuine-undecodable-byte-at-end-of-probe-window-is-still-binary ()
+  "A byte that is genuinely invalid UTF-8 -- not merely truncated -- at
+the very last position of the probe window must still mark the file
+binary, even though the file continues well past the window. This is
+the case the boundary fix above must not abuse to hide a real
+undecodable byte: unlike the previous test, nothing here would ever
+decode successfully no matter how much further is read."
+  (let ((arc-text-file-probe-size 8))
+    (atn-with-temp-file f (concat (make-string 7 ?a) (unibyte-string ?\xff)
+                                   (make-string 8 ?a))
+      (should-not (arc--text-file-p f)))))
+
 (provide 'test-arc-text-file-noninteractive)
 ;;; test-arc-text-file-noninteractive.el ends here

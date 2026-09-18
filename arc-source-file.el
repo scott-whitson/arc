@@ -129,22 +129,99 @@ comfortably larger than any format's magic-number/header region while
 staying far below `arc-text-file-size-ceiling'."
   :type 'natnum :group 'arc)
 
+(defconst arc--utf8-max-tail-bytes 3
+  "Extra bytes read past `arc-text-file-probe-size' so a multi-byte
+UTF-8 character starting inside the probe window, but extending past
+it, can still be decoded to completion rather than cut off mid-
+sequence.  A UTF-8 character is at most 4 bytes, so once its first
+byte is known to be in the window, at most 3 more can still be
+missing; reading this many further guarantees that.  Characters this
+margin resolves are still excluded from the budget check below --
+`arc--decoded-window-marks-binary-p' only reads them to tell a
+genuinely undecodable byte apart from one that only looks that way
+because the window ended mid-character.")
+
+(defun arc--decoded-window-marks-binary-p (decoded budget)
+  "Non-nil if DECODED holds a null byte or an undecodable byte within
+its first BUDGET original bytes.  DECODED is a file's bytes decoded as
+UTF-8, and may extend a little past BUDGET bytes' worth (see
+`arc--utf8-max-tail-bytes') so a character starting right at the
+boundary decodes correctly instead of being cut off.  This walks
+DECODED once, tracking how many original bytes have been accounted
+for; a character that starts within budget but whose full byte cost
+would cross it is excluded whole, never partially -- which is what
+keeps a read-boundary artifact from ever being mistaken for a genuine
+undecodable byte, and, symmetrically, keeps a genuine undecodable byte
+that truly sits at the edge of the window from being excluded along
+with it: only content past the boundary is ever dropped, never
+content actually within it. A run of plain, non-null ASCII -- the
+common case for ordinary text -- is skipped in one `string-match'
+rather than character by character, since every such character always
+costs exactly one original byte; only a null byte or a non-ASCII
+character (ordinary multi-byte or raw-byte alike) is priced
+individually, via `encode-coding-string', to find out how many
+original bytes it actually stands for."
+  (let ((pos 0) (used 0) (len (length decoded)))
+    (catch 'done
+      (while (< pos len)
+        ;; Bulk-skip a run of plain, non-null ASCII.
+        (let* ((next (or (string-match "[^\x01-\x7f]" decoded pos) len))
+               (run (- next pos)))
+          (when (> (+ used run) budget) (throw 'done nil))
+          (setq used (+ used run) pos next))
+        (when (< pos len)
+          (let ((ch (aref decoded pos)))
+            (if (eq ch ?\0)
+                (throw 'done (< used budget))
+              (let ((cost (length (encode-coding-string (string ch) 'utf-8))))
+                (when (> (+ used cost) budget) (throw 'done nil))
+                (when (and (>= ch #x3FFF80) (<= ch #x3FFFFF)) (throw 'done t))
+                (setq used (+ used cost) pos (1+ pos)))))))
+      nil)))
+
 (defun arc--text-file-p (filename)
   "Check if FILENAME contains text.
-Reads at most `arc-text-file-probe-size' bytes of FILENAME into a
-temporary buffer, decoded the same way `arc-chunk-file' actually will
--- not literal -- because that mismatch is precisely the bug the
-undecodable-byte check below closes.  A previous version opened
-FILENAME with RAWFILE (unibyte, no decoding attempted) and only
-checked for a null byte; an agenix `.age' secret's ciphertext payload
-contains no null byte but is never valid UTF-8, so it passed as
-\"text\" here, then failed to decode when `arc-chunk-file' read it
-normally for real, producing Emacs's internal `eight-bit' raw-byte
-characters in the chunked text.  Those cannot be JSON-encoded for the
-embeddings API, so indexing crashed on the first such file it met --
-far from FILENAME, and far from this function.  A null byte OR any
-undecodable byte (surfacing as a raw-byte character once decoded) now
-both mark FILENAME binary, exactly as they did then.
+`get-file-buffer' is checked first, unconditionally: if FILENAME has a
+live visiting buffer, it is assumed text without any read here at
+all, regardless of `arc-text-file-size-ceiling'.  That is a deliberate
+restore of the behaviour from before that ceiling existed -- checking
+a live buffer costs no I/O no matter how large the file on disk claims
+to be, so gating it behind a `file-attributes' call served no
+protective purpose, and it kept a file the caller may be actively
+editing (an open, oversized log, say) from being reclassified as
+binary purely because of its size.
+
+Past that, `file-attributes' is consulted for FILENAME's size.  A file
+that has vanished between `arc--file-list''s directory walk and this
+call -- an ordinary race on a live $HOME, not a contrived case -- has
+no attributes at all; that is treated as \"not text\" directly, not
+routed into the size comparison, which would otherwise signal
+`wrong-type-argument' on a nil size and abort the whole walk that
+called this.  (A dangling symlink is a different case: `lstat' still
+succeeds for it, so `file-attributes' returns a size and this function
+proceeds normally into the read below, which then fails and is caught
+there.)
+
+At or above `arc-text-file-size-ceiling', FILENAME is declared binary
+without being read at all -- see that variable's docstring for why.
+Below it, at most `arc-text-file-probe-size' bytes (plus a small
+margin, see `arc--utf8-max-tail-bytes') are read into a temporary
+buffer, decoded the same way `arc-chunk-file' actually will -- not
+literal -- because that mismatch is precisely the bug the undecodable-
+byte check below closes.  A previous version opened FILENAME with
+RAWFILE (unibyte, no decoding attempted) and only checked for a null
+byte; an agenix `.age' secret's ciphertext payload contains no null
+byte but is never valid UTF-8, so it passed as \"text\" here, then
+failed to decode when `arc-chunk-file' read it normally for real,
+producing Emacs's internal `eight-bit' raw-byte characters in the
+chunked text.  Those cannot be JSON-encoded for the embeddings API, so
+indexing crashed on the first such file it met -- far from FILENAME,
+and far from this function.  A null byte OR any undecodable byte
+(surfacing as a raw-byte character once decoded) now both mark
+FILENAME binary, exactly as they did then -- see
+`arc--decoded-window-marks-binary-p' for how a byte right at the probe
+boundary is told apart from one that only looks undecodable because
+the window ended mid-character.
 
 A later version read FILENAME whole via `find-file-noselect', which
 brought back two of its own defects: no bound on how much it read (see
@@ -155,49 +232,47 @@ attached to and dies with `(end-of-file \"Error reading from stdin\")';
 in the operator's live Emacs daemon, the one arc actually indexes
 under, it would instead block the entire session on a modal
 `Select coding system' prompt in the middle of an index run, with
-nothing on screen to explain why.  `insert-file-contents' is used
-instead of `find-file-noselect' now specifically because it carries
-none of the machinery a visited buffer gets -- no major mode, no
-local variables, no auto-detected coding system -- and
-`coding-system-for-read' is bound here to pin the decode to a fixed
-coding system, `utf-8', rather than letting Emacs choose one, which is
-what removes the detection step that could ever ask anyone anything.
-Content that is genuinely UTF-8 decodes exactly as it would have
-before; content in some other real text encoding decodes with
-raw-byte characters standing in for whatever does not fit UTF-8 and is
-therefore -- like any other undecodable content -- marked binary. That
-is a narrowing of what counts as \"text\" relative to letting Emacs
-detect the actual encoding, but arc's corpus is overwhelmingly UTF-8,
-and the alternative is the prompt this rewrite exists to remove.
+nothing on screen to explain why.  `insert-file-contents-literally' is
+used instead of `find-file-noselect' now specifically because it
+carries none of the machinery a visited buffer gets -- no major mode,
+no local variables, no auto-detected or interactively resolved coding
+system, and no transparent decompression of a `.gz'-shaped candidate
+either, which the plain, non-literal `insert-file-contents' used by an
+earlier version of this fix still triggered.  The bytes it reads are
+decoded here, explicitly, as `utf-8' -- a fixed coding system chosen
+up front, never detected -- which is what removes the step that could
+ever ask anyone anything.  Content that is genuinely UTF-8 decodes
+exactly as it would have before; content in some other real text
+encoding decodes with raw-byte characters standing in for whatever
+does not fit UTF-8 and is therefore -- like any other undecodable
+content -- marked binary.  That is a narrowing of what counts as
+\"text\" relative to letting Emacs detect the actual encoding, but
+arc's corpus is overwhelmingly UTF-8, and the alternative is the
+prompt this rewrite exists to remove.  `arc-chunk-file', which reads
+an accepted file for real, still auto-detects its coding system rather
+than pinning `utf-8' the way this function now does, so the two can in
+principle disagree about a borderline non-UTF-8 file that slips past
+this check; that mismatch is unchanged from before this task and is
+not what it set out to fix.
 
 Any error signalled while reading FILENAME -- unreadable permissions,
-a symlink that vanishes between the directory walk and this read, or
-any decoding failure narrower than the two checked above -- is caught
-and treated as \"not text\": one bad file must never abort a whole
-directory walk.
-
-`get-file-buffer' is still checked first and, if it returns a buffer,
-FILENAME is assumed text without being read here at all: an already
-open buffer is not reached through the path this rewrite changes (no
-`find-file-noselect' call, so no size, boundedness, or prompt risk from
-that check), and dropping it would mean re-reading a file the caller
-may be actively editing purely to re-derive a verdict `arc-watch.el'
-already has cheaper access to.
-
-Below `arc-text-file-size-ceiling', that logic runs exactly as above,
-unchanged.  At or above it, FILENAME is declared binary without being
-read at all -- see that variable's docstring for why."
-  (and (<= (file-attribute-size (file-attributes filename))
-           arc-text-file-size-ceiling)
-       (or (and (get-file-buffer filename) t) ;; if file opened assume it text
-           (ignore-errors
-             (let ((coding-system-for-read 'utf-8))
-               (with-temp-buffer
-                 (insert-file-contents filename nil 0 arc-text-file-probe-size)
-                 (not (save-excursion
-                        (goto-char (point-min))
-                        (or (search-forward "\0" nil t 1)
-                            (re-search-forward "[\x3FFF80-\x3FFFFF]" nil t))))))))))
+a symlink that vanishes between the `file-attributes' call above and
+this read, or any decoding failure narrower than the two checked above
+-- is caught and treated as \"not text\": one bad file must never
+abort a whole directory walk."
+  (or (and (get-file-buffer filename) t) ;; if file opened assume it text
+      (let ((size (file-attribute-size (file-attributes filename))))
+        (and size
+             (<= size arc-text-file-size-ceiling)
+             (ignore-errors
+               (let* ((budget (min size arc-text-file-probe-size))
+                      (window-end (min size (+ arc-text-file-probe-size
+                                                arc--utf8-max-tail-bytes))))
+                 (with-temp-buffer
+                   (insert-file-contents-literally filename nil 0 window-end)
+                   (not (arc--decoded-window-marks-binary-p
+                         (decode-coding-string (buffer-string) 'utf-8)
+                         budget)))))))))
 
 (defcustom arc-secret-denylist
   '("*.age" "*.gpg" "*.pem" "*.key" "*_ed25519" "id_rsa" "id_ed25519" ".env"
