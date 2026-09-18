@@ -217,3 +217,48 @@ depth, the same as an ordinary gitignore bare name."
             (should (member "a.nix" paths))
             (should-not (member "keys/id_rsa" paths))))
       (delete-directory dir t))))
+
+;;; --- Final review C3: a named pipe must be rejected, never blocked on --
+
+(ert-deftest asf-a-named-pipe-is-rejected-without-blocking ()
+  "`directory-files-recursively' hands FIFOs and sockets to the walk like
+any other name.  A FIFO's `file-attributes' reports size 0, so
+`arc-text-file-size-ceiling' never fires for one, and
+`insert-file-contents-literally' then blocks in `open(2)' waiting for a
+writer that may never come.  That block signals no error, so
+`ignore-errors' cannot catch it, and `C-g' cannot interrupt it either --
+in a live Emacs daemon it wedges the whole session.
+
+The probe therefore runs in a CHILD Emacs under a wall-clock deadline:
+a regression fails this test when the deadline passes, instead of
+hanging the whole suite the way the defect hangs a daemon."
+  (skip-unless (executable-find "mkfifo"))
+  (let* ((dir (make-temp-file "arc-fifo" t))
+         (fifo (expand-file-name "pipe" dir))
+         (out (generate-new-buffer " *arc-fifo-probe*"))
+         (proc nil))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "note.txt" dir) (insert "ordinary text\n"))
+          (should (eq 0 (call-process "mkfifo" nil nil nil fifo)))
+          (setq proc
+                (start-process
+                 "arc-fifo-probe" out
+                 (expand-file-name invocation-name invocation-directory)
+                 "-Q" "-batch" "-L" asf-root
+                 "-l" (expand-file-name "arc-source-file.el" asf-root)
+                 "--eval"
+                 (format "(princ (format \"VERDICT:%%S COUNT:%%d\" (arc--text-file-p %S) (length (arc--file-list %S))))"
+                         fifo dir)))
+          (let ((deadline (+ (float-time) 20)))
+            (while (and (process-live-p proc) (< (float-time) deadline))
+              (accept-process-output proc 0.1)))
+          ;; Still alive means it is blocked in `open(2)' on the FIFO.
+          (should-not (process-live-p proc))
+          (let ((output (with-current-buffer out (buffer-string))))
+            (should (string-match-p "VERDICT:nil" output))
+            ;; and the walk keeps the ordinary file beside it
+            (should (string-match-p "COUNT:1" output))))
+      (when (process-live-p proc) (kill-process proc))
+      (kill-buffer out)
+      (delete-directory dir t))))

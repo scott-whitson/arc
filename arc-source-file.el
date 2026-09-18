@@ -259,20 +259,33 @@ Any error signalled while reading FILENAME -- unreadable permissions,
 a symlink that vanishes between the `file-attributes' call above and
 this read, or any decoding failure narrower than the two checked above
 -- is caught and treated as \"not text\": one bad file must never
-abort a whole directory walk."
+abort a whole directory walk.
+
+`file-regular-p' gates all of that, because `ignore-errors' cannot
+catch a BLOCK.  `directory-files-recursively' returns FIFOs and
+sockets along with ordinary files, and a FIFO's `file-attributes'
+reports size 0 -- so `arc-text-file-size-ceiling' never fires for one,
+and `insert-file-contents-literally' then blocks in `open(2)' waiting
+for a writer that may never come.  Nothing recovers from that: no
+error is signalled to catch, and `C-g' cannot interrupt it either, so
+in a live Emacs daemon one named pipe under $HOME wedges the whole
+session -- strictly worse than the oversized-video hang the size
+ceiling exists for.  `file-attribute-type' does not distinguish a FIFO
+from a regular file (it is nil for both); `file-regular-p' does."
   (or (and (get-file-buffer filename) t) ;; if file opened assume it text
-      (let ((size (file-attribute-size (file-attributes filename))))
-        (and size
-             (<= size arc-text-file-size-ceiling)
-             (ignore-errors
-               (let* ((budget (min size arc-text-file-probe-size))
-                      (window-end (min size (+ arc-text-file-probe-size
-                                                arc--utf8-max-tail-bytes))))
-                 (with-temp-buffer
-                   (insert-file-contents-literally filename nil 0 window-end)
-                   (not (arc--decoded-window-marks-binary-p
-                         (decode-coding-string (buffer-string) 'utf-8)
-                         budget)))))))))
+      (and (file-regular-p filename)
+           (let ((size (file-attribute-size (file-attributes filename))))
+             (and size
+                  (<= size arc-text-file-size-ceiling)
+                  (ignore-errors
+                    (let* ((budget (min size arc-text-file-probe-size))
+                           (window-end (min size (+ arc-text-file-probe-size
+                                                    arc--utf8-max-tail-bytes))))
+                      (with-temp-buffer
+                        (insert-file-contents-literally filename nil 0 window-end)
+                        (not (arc--decoded-window-marks-binary-p
+                              (decode-coding-string (buffer-string) 'utf-8)
+                              budget))))))))))
 
 (defcustom arc-secret-denylist
   '("*.age" "*.gpg" "*.pem" "*.key" "*_ed25519" "id_rsa" "id_ed25519" ".env"
