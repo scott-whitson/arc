@@ -12,6 +12,7 @@
                                          (or load-file-name buffer-file-name))))
 (add-to-list 'load-path acl-root)
 (require 'arc-index)
+(require 'arc-scope)
 
 (ert-deftest acl-every-planned-collection-has-a-directory ()
   "A plan entry with no directory signals at index time; catch it here."
@@ -48,6 +49,15 @@ which `arc-eval''s :org-id matching depends on."
   "This repo is public; every path derives from $HOME."
   (dolist (cell arc-collection-directory-alist)
     (should (string-prefix-p (expand-file-name "~") (cdr cell)))))
+
+(ert-deftest acl-scope-presets-name-only-planned-collections ()
+  "A preset naming a collection outside `arc-index-plan' matches nothing
+and signals nothing -- see `arc-scope-presets''s docstring.  This is the
+generalisation of the `dotfiles' bug: any future collection rename must
+not leave a preset pointing at a name the plan no longer builds."
+  (dolist (preset arc-scope-presets)
+    (dolist (name (plist-get (cdr preset) :collections))
+      (should (assoc name arc-index-plan)))))
 
 (provide 'test-arc-collections)
 ;;; test-arc-collections.el ends here

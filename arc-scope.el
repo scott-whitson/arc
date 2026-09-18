@@ -142,13 +142,19 @@ silently pick a wrong retrieval strategy rather than error."
   '(("everything" . (:all t))
     ("vault"      . (:collections ("vault")))
     ("options"    . (:collections ("nix options" "hm options")))
-    ("dotfiles"   . (:collections ("dotfiles"))))
+    ("home"       . (:collections ("home"))))
   "Named scopes offered by `arc-ui-change-scope'.
 Each entry is (NAME . SCOPE-PLIST).  \"everything\" is `(:all t)'
 rather than nil: see `arc-scope''s docstring for why a bare nil here
 would not survive `arc-ask-normalize-scope' as \"the whole corpus\".
 These are the scopes a reader can reach from inside an answer;
-`arc-ask' itself accepts any scope plist."
+`arc-ask' itself accepts any scope plist.
+
+A preset naming a collection that `arc-index-plan' does not build
+matches nothing and signals nothing -- the query simply returns no
+results, silently.  This is why the \"dotfiles\" entry became \"home\"
+when the collection of that name was retired: these names have to
+track the plan, not just whatever they were called historically."
   :type '(alist :key-type string :value-type sexp)
   :group 'arc)
 

@@ -644,7 +644,7 @@
     (should (equal asked-scope (alist-get "vault" arc-scope-presets nil nil #'equal)))))
 
 (ert-deftest eu-presets-cover-the-documented-scopes ()
-  (dolist (name '("everything" "vault" "options" "dotfiles"))
+  (dolist (name '("everything" "vault" "options" "home"))
     (should (assoc name arc-scope-presets))))
 
 (ert-deftest eu-everything-preset-actually-searches-the-whole-corpus ()
