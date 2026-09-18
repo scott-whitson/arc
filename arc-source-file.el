@@ -320,39 +320,65 @@ because `arc-db-directory' can be set anywhere."
   (seq-some (lambda (regexp) (string-match-p regexp file))
             (delq nil (mapcar #'arc--ignore-pattern-to-regexp arc-secret-denylist))))
 
+(defun arc--path-indexable-p (file root ignore-regexps)
+  "Return non-nil when FILE's PATH alone admits it to ROOT's corpus.
+FILE is an absolute path; ROOT is the COLLECTION ROOT it is indexed
+under, and every pattern here is resolved relative to that root rather
+than to whatever directory FILE happens to sit in.  IGNORE-REGEXPS are
+ROOT's, from `arc--read-ignore-file-regexps' -- the caller passes them
+in so that a whole walk reads the ignore files once rather than once
+per candidate.
+
+Content is deliberately not consulted here; `arc--file-indexable-p'
+adds that.  Splitting the two is what lets a caller ask whether a path
+that does not exist WOULD be walked -- which is how
+`arc-index--collection-overlaps' checks one collection root against
+another's exclusions.
+
+Patterns from an ignore file are matched against FILE's path relative
+to ROOT, not its absolute path: `wildcard-to-regexp' anchors a pattern
+to the whole matched string (\\=`...\\=', not a substring search), so a
+bare filename in an ignore file -- e.g. `b.txt' -- would otherwise
+need ROOT's entire absolute path prefix to be absent for it to ever
+match, and would silently never exclude anything.  `arc-secret-denylist'
+is checked unconditionally, independent of any ignore file or
+invisibility rule.  The invisible-file pattern runs against the
+relative path with a `/' prefixed, NOT the absolute path: it used to
+match the absolute path, which meant a collection rooted at a dotted
+directory -- `~/.config/emacs', `~/.claude' -- excluded every one of
+its own files, because their absolute paths all contain `/.config' or
+`/.claude'.  The `/' prefix is what still catches a dotfile sitting at
+the root of a collection, whose bare relative name has no leading
+slash for `/\\.[^/]*' to match.  A second pattern, `$\\.[^/]*', once
+sat beside that one for the same job and never did it: a leading `$'
+is literal in a regexp, so it matched no hidden file at all, while
+false-excluding any path containing the two characters `$.'."
+  (let ((relative (file-relative-name file root)))
+    (and (not (seq-some (lambda (regexp) (string-match-p regexp relative))
+                        ignore-regexps))
+         (not (and arc-ignore-invisible-files
+                   (string-match-p "/\\.[^/]*" (concat "/" relative))))
+         (not (arc--denylisted-p file)))))
+
+(defun arc--file-indexable-p (file root ignore-regexps)
+  "Return non-nil when FILE belongs in the collection rooted at ROOT.
+`arc--path-indexable-p' plus `arc--text-file-p''s content verdict --
+the whole per-file predicate, for exactly one file and without
+enumerating any directory.  `arc--file-list' is a walk filtered
+through this and `arc-indexable-file-p' is this for a single path, so
+the walk and the watcher cannot drift apart on what belongs in the
+corpus.  IGNORE-REGEXPS are ROOT's; see `arc--path-indexable-p'."
+  (and (arc--path-indexable-p file root ignore-regexps)
+       (arc--text-file-p file)))
+
 (defun arc--file-list (directory)
   "List of files to parse in DIRECTORY.
-Patterns from an ignore file are matched against each file's path
-relative to DIRECTORY, not its absolute path: `wildcard-to-regexp'
-anchors a pattern to the whole matched string (\\=`...\\=', not a
-substring search), so a bare filename in an ignore file -- e.g.
-`b.txt' -- would otherwise need DIRECTORY's entire absolute path
-prefix to be absent for it to ever match, and would silently never
-exclude anything.  `arc-secret-denylist' is checked unconditionally,
-independent of any ignore file, invisibility, or
-`arc--text-file-p''s content-based verdict.  The invisible-file
-patterns run against the relative path with a `/' prefixed, NOT the
-absolute path: they used to match the absolute path, which meant a
-collection rooted at a dotted directory -- `~/.config/emacs',
-`~/.claude' -- excluded every one of its own files, because their
-absolute paths all contain `/.config' or `/.claude'.  The `/' prefix
-is what still catches a dotfile sitting at the root of a collection,
-whose bare relative name has no leading slash for `/\\.[^/]*' to
-match."
-  (let ((ignore-regexps (arc--read-ignore-file-regexps directory))
-        (invisible-regexps (when arc-ignore-invisible-files
-                              (list "$\\.[^/]*" "/\\.[^/]*"))))
-    (seq-filter (lambda (file)
-		  (let ((relative (file-relative-name file directory)))
-                    (and (not (seq-some (lambda (regexp)
-					  (string-match-p regexp relative))
-				        ignore-regexps))
-                         (not (seq-some (lambda (regexp)
-                                          (string-match-p regexp (concat "/" relative)))
-                                        invisible-regexps))
-                         (not (arc--denylisted-p file))
-		         (arc--text-file-p file))))
-		(directory-files-recursively directory ".*"))))
+A walk plus a filter over `arc--file-indexable-p', which is where every
+rule about what belongs in the corpus now lives.  DIRECTORY's ignore
+files are read once for the whole walk rather than once per candidate."
+  (let ((ignore-regexps (arc--read-ignore-file-regexps directory)))
+    (seq-filter (lambda (file) (arc--file-indexable-p file directory ignore-regexps))
+                (directory-files-recursively directory ".*"))))
 
 (defun arc-file-hash (path)
   "Return the SHA-1 of PATH's contents."
@@ -373,15 +399,30 @@ would drift, and the one used by the rarer path would drift unnoticed."
                                       (file-attributes path))))
         :chunks (arc-chunk-file path)))
 
-(defun arc-indexable-file-p (path)
-  "Return non-nil when PATH is a file arc would index on a directory walk.
-Asks `arc--file-list' about PATH's own directory rather than
-reimplementing the ignore rules and the secret denylist, which is how a
-watcher would otherwise start indexing an SSH key that the walk
-correctly skips."
-  (let ((path (expand-file-name path)))
+(defun arc-indexable-file-p (path root)
+  "Return non-nil when a walk of ROOT would index PATH.
+ROOT is PATH's COLLECTION directory -- `arc-collection-directory''s
+answer for the collection PATH resolved to -- not the directory PATH
+itself happens to sit in.  Both halves of that matter, and both were
+once wrong here.
+
+This used to call `arc--file-list' on `(file-name-directory PATH)' and
+ask whether PATH came back.  For a file directly in $HOME that
+enumerated the ENTIRE home tree -- measured at 17.4 seconds warm --
+synchronously, inside `after-save-hook', and `arc-watch-sweep' could
+pay it up to `arc-watch-sweep-batch' times on a single idle tick.  It
+was also wrong, not merely slow: `arc--file-list' reads ignore files
+from the directory it is handed, so `.arcignore' at the COLLECTION
+ROOT -- the only thing keeping `home' out of `vault''s territory --
+was never consulted on this path, and the watcher indexed files the
+walk correctly excludes.  Resolving both the ignore files and the
+relative path against ROOT is what makes the watcher and the walk
+answer the same question."
+  (let ((path (expand-file-name path))
+        (root (file-name-as-directory (expand-file-name root))))
     (and (file-readable-p path)
-         (member path (arc--file-list (file-name-directory path))))))
+         (string-prefix-p root path)
+         (arc--file-indexable-p path root (arc--read-ignore-file-regexps root)))))
 
 (defun arc-file-sources (directory)
   "Return a source plist for every indexable file under DIRECTORY.

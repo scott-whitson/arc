@@ -1,5 +1,6 @@
 ;;; test-arc-source-file.el --- file walking and change detection -*- lexical-binding: t; -*-
 (require 'ert)
+(require 'cl-lib)
 (defvar asf-root (expand-file-name ".." (file-name-directory
                                          (or load-file-name buffer-file-name))))
 (add-to-list 'load-path asf-root)
@@ -262,3 +263,64 @@ hanging the whole suite the way the defect hangs a daemon."
       (when (process-live-p proc) (kill-process proc))
       (kill-buffer out)
       (delete-directory dir t))))
+
+;;; --- Final review C2: one path, no directory walk, root's ignore files
+
+(defmacro asf-with-collection-root (&rest body)
+  "Bind `root' to a collection root with a .arcignore, a kept file and a
+file the ignore file excludes (`keep' and `junk', both absolute)."
+  `(let* ((root (make-temp-file "arc-collection-root" t))
+          (keep (expand-file-name "notes/keep.txt" root))
+          (junk (expand-file-name "downloads/junk.txt" root)))
+     (unwind-protect
+         (progn
+           (with-temp-file (expand-file-name ".arcignore" root)
+             (insert "downloads/\n"))
+           (make-directory (file-name-directory keep) t)
+           (make-directory (file-name-directory junk) t)
+           (with-temp-file keep (insert "kept\n"))
+           (with-temp-file junk (insert "excluded\n"))
+           ,@body)
+       (delete-directory root t))))
+
+(ert-deftest asf-indexable-file-p-reads-the-collection-roots-ignore-file ()
+  "The watcher must see the exclusion the walk sees.
+`.arcignore' lives at the COLLECTION ROOT, and it is the only thing
+keeping `home' (rooted at $HOME) out of the directories other
+collections own.  Resolving it from the file's OWN directory never
+finds it, so the watcher indexed exactly what the walk excludes."
+  (asf-with-collection-root
+   (should (arc-indexable-file-p keep root))
+   (should-not (arc-indexable-file-p junk root))
+   ;; the walk agrees, which is the whole point of sharing the predicate
+   (should (member keep (arc--file-list root)))
+   (should-not (member junk (arc--file-list root)))
+   ;; and this is what the superseded lookup did instead: resolved from
+   ;; the file's own directory, the exclusion is invisible and the
+   ;; watcher admits the file.
+   (let ((own-dir (file-name-directory junk)))
+     (should (arc--file-indexable-p
+              junk own-dir (arc--read-ignore-file-regexps own-dir))))))
+
+(ert-deftest asf-indexable-file-p-enumerates-no-directory ()
+  "For a file directly in $HOME the old implementation walked the whole
+home tree -- 17.4 seconds warm -- synchronously inside
+`after-save-hook', once per saved file and up to
+`arc-watch-sweep-batch' times per idle tick."
+  (asf-with-collection-root
+   (cl-letf (((symbol-function 'directory-files-recursively)
+              (lambda (&rest _)
+                (error "arc-indexable-file-p enumerated a directory"))))
+     (should (arc-indexable-file-p keep root))
+     (should-not (arc-indexable-file-p junk root)))))
+
+(ert-deftest asf-indexable-file-p-rejects-a-path-outside-the-root ()
+  "ROOT is the collection's directory, so a path outside it is not the
+collection's business however indexable it looks on its own."
+  (asf-with-collection-root
+   (let ((outside (make-temp-file "arc-outside" nil ".txt")))
+     (unwind-protect
+         (progn
+           (with-temp-file outside (insert "elsewhere\n"))
+           (should-not (arc-indexable-file-p outside root)))
+       (delete-file outside)))))

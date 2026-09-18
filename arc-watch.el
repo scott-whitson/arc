@@ -74,7 +74,8 @@ Returns the collection it was indexed into, or nil.  Only `file' and
               (chunker (arc-watch--chunker-for collection))
               ((memq chunker '(file org))))
     (let ((sources (pcase chunker
-                     ('file (and (arc-indexable-file-p path)
+                     ('file (and (arc-indexable-file-p
+                                  path (arc-collection-directory collection))
                                  (list (arc-file-source path))))
                      ('org (and (string-suffix-p ".org" path)
                                 (arc-org-nodes-in-file path))))))

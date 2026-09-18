@@ -718,10 +718,16 @@ examines ~arc-watch-sweep-batch~ sources per tick and resumes where it stopped,
 because a sweep that rehashed every mutable source in one tick would be the
 reason someone turned it off.
 
-A saved file is re-indexed only if it lives under a directory in
-~arc-collection-directory-alist~ AND ~arc-indexable-file-p~ agrees -- which asks
-the directory walk rather than reimplementing its ignore rules, so the
-watcher cannot start indexing an SSH key that the walk correctly skips.
+A saved file is re-indexed only if it lives under a *planned* collection's
+directory AND ~arc-indexable-file-p~ agrees -- which shares its predicate with
+the directory walk rather than reimplementing the ignore rules, so the watcher
+cannot start indexing an SSH key that the walk correctly skips. "Planned"
+matters because ~arc-collection-directory-alist~ deliberately configures
+directories the plan does not build (~mail~): saving a file there must index
+nothing at all. And because ~home~ is rooted at ~$HOME~ and is therefore a
+prefix of every other collection's directory, the match is the *longest*
+one -- otherwise a file under ~~/.config/emacs~ would land in ~home~ when saved
+and in ~emacs~ when walked, and migrate between the two.
 
 *** Derived collections are never reindexed automatically
 
