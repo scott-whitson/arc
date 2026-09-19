@@ -72,8 +72,8 @@
 ;; writer just gets SQLITE_BUSY, it does not corrupt anything), but the
 ;; parent process in `arc--async-do''s own pattern keeps its handle
 ;; open across the whole child run and only closes and reopens it in
-;; the done callback -- so an interactive read in the parent (`arc-ask',
-;; say) racing the child's write is a real scenario that pattern has
+;; the done callback -- so interactive retrieval in the parent racing the
+;; child's write is a real scenario that pattern has
 ;; never had to prove safe, because nothing before this ever ran a
 ;; write that long while the parent might still be reading.  Keeping
 ;; everything on arc's one existing `arc-db' connection in the one
@@ -395,12 +395,12 @@ second Emacs, or a batch job.  Set to 0 to disable caching entirely."
   "Cached `arc-index-stats' answer as (GENERATION TIMESTAMP STATS), or nil.")
 
 (defun arc-index-stats-cached ()
-  "Like `arc-index-stats', but reuse a recent answer.
-The header line calls this on every redisplay, and the underlying
+  "Like `arc-index-stats', but reuse a recent result.
+The tool and search callers ask for stats repeatedly, and the underlying
 GROUP BY is not cheap once the corpus is real: measured on a
 63,302-chunk / 327 MB index it took about 30 ms warm and 810 ms cold,
-against 3.5 ms on the 7,405-chunk index it was written for.  At that
-size an uncached `:eval' header line makes the buffer feel broken.
+against 3.5 ms on the 7,405-chunk index it was written for.  Caching
+keeps those status surfaces responsive without weakening freshness.
 
 Invalidated by `arc-index--write-generation' (every write this Emacs
 makes) or by `arc-index-stats-cache-ttl' elapsing (writes it cannot
@@ -1271,11 +1271,73 @@ report nobody reads is the thing this replaces."
                       ", ")))))))))
    arc-index-plan))
 
+(defun arc-freshness-report-metadata-only ()
+  "Return freshness rows without reading source contents.
+This is the lifecycle-report variant of `arc-freshness-report'.  Mutable
+sources use existence and recorded modification times only; they are not
+hashed.  A changed timestamp is actionable `stale', while a missing
+recorded timestamp is `unknown'.  Derived collections still compare their
+single recorded provenance value, as the normal freshness report does."
+  (mapcar
+   (lambda (cell)
+     (let* ((name (car cell))
+            (chunker (cdr cell))
+            (indexed (caar (sqlite-select
+                            (arc-db)
+                            (format "SELECT count(*) FROM sources s
+                                     JOIN data d ON d.source_id = s.id
+                                     WHERE d.collection_id =
+                                       (SELECT id FROM collections WHERE name = %s);"
+                                    (arc--sql-quote name)))))
+            (want (arc-collection-provenance-now chunker)))
+       (cond
+        ((or (null indexed) (zerop indexed))
+         (list name chunker 'absent "never indexed"))
+        (want
+         (let ((have (arc-collection-provenance name)))
+           (cond ((null have) (list name chunker 'unknown "no provenance recorded"))
+                 ((equal have want) (list name chunker 'fresh nil))
+                 (t (list name chunker 'stale "input changed")))))
+        (t
+         (let ((rows (sqlite-select
+                      (arc-db)
+                      (format "SELECT DISTINCT s.path, s.mtime
+                               FROM sources s
+                               JOIN data d ON d.source_id = s.id
+                              WHERE s.path IS NOT NULL AND d.collection_id =
+                                (SELECT id FROM collections WHERE name = %s);"
+                              (arc--sql-quote name))))
+               (gone 0) (changed 0) (unknown 0))
+           (dolist (row rows)
+             (let* ((path (nth 0 row))
+                    (recorded (nth 1 row))
+                    (attrs (and (file-exists-p path) (file-attributes path)))
+                    (current (and attrs
+                                  (truncate (float-time
+                                             (file-attribute-modification-time attrs))))))
+               (cond ((null attrs) (setq gone (1+ gone)))
+                     ((null recorded) (setq unknown (1+ unknown)))
+                     ((not (= recorded current)) (setq changed (1+ changed))))))
+           (cond
+            ((and (zerop gone) (zerop changed) (zerop unknown))
+             (list name chunker 'fresh nil))
+            ((and (zerop gone) (zerop changed))
+             (list name chunker 'unknown
+                   (format "%d source(s) missing modification time" unknown)))
+            (t (list name chunker 'stale
+                     (string-join
+                      (delq nil
+                            (list (and (> changed 0) (format "%d changed" changed))
+                                  (and (> gone 0) (format "%d gone" gone))
+                                  (and (> unknown 0) (format "%d unknown" unknown))))
+                      ", ")))))))))
+   arc-index-plan))
+
 (defun arc-freshness-summary ()
   "Return a compact summary of `arc-freshness-report', or nil if all fresh.
-Counts rather than names: the header line already carries a per-kind
-chunk count, and appending six collection names made it unreadable.
-`M-x arc-freshness' has the detail."
+Counts rather than names: stats and search callers need a compact status,
+and appending six collection names made it unreadable.  `M-x arc-freshness'
+has the detail."
   (let* ((report (arc-freshness-report))
          (n (lambda (state) (cl-count-if (lambda (r) (eq (nth 2 r) state)) report)))
          (stale (funcall n 'stale))
@@ -1307,10 +1369,10 @@ chunk count, and appending six collection names made it unreadable.
       (pop-to-buffer (current-buffer)))))
 
 (defcustom arc-freshness-cache-ttl 30
-  "Seconds `arc-freshness-summary-cached' may reuse an answer.
+  "Seconds `arc-freshness-summary-cached' may reuse a result.
 Longer than `arc-index-stats-cache-ttl' because the per-source half
 re-hashes every mutable source -- 656 files on this corpus -- and the
-header line asks on every redisplay. Staleness that is 30 seconds out of
+status callers ask repeatedly.  Staleness that is 30 seconds out of
 date is still staleness you can see."
   :type 'number :group 'arc)
 

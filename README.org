@@ -3,25 +3,26 @@
 [[http://www.gnu.org/licenses/gpl-3.0.txt][file:https://img.shields.io/badge/license-GPL_3-green.svg]]
 
 arc (Artificial Reference Companion) is a local, offline, config-aware
-oracle for Emacs. It answers Emacs, Elisp, Linux, NixOS and org-roam
-questions grounded in this machine's actual configuration, using a
-Retrieval Augmented Generation (RAG) approach, and cites the sources
-you can jump to.
+retrieval engine for Emacs. It indexes this machine's files, manuals,
+org-roam notes, and NixOS/Home-Manager options; searches them with a
+hybrid of keyword and vector retrieval; and returns ranked source records
+with citations you can jump to. arc does not generate prose: an external
+agent or caller owns any language-model response.
 
 arc is a fork of [[http://github.com/s-kostyaev/elisa][ELISA]] by Sergey Kostyaev.
 
 ** Network access
 
-At query time, arc makes no outbound *internet* requests. It talks to
-a local [[https://ollama.com][Ollama]] instance for embeddings and chat completion, and,
-only when ~arc-reranker-enabled~ is non-nil (it is nil, i.e. off, by
-default), to a reranker service at ~arc-reranker-url~. Both are
-loopback by default (Ollama on ~localhost:11434~, the reranker's
-default ~arc-reranker-url~ is ~http://127.0.0.1:8787/~), but
-~arc-reranker-url~ is a plain user-settable string -- arc will POST to
-whatever it is set to, so if you point it at a non-loopback address,
-that stops being a local-only request. There is no web search and no
-remote document-conversion service anywhere in the package.
+With the default configuration, query-time retrieval makes no outbound
+*internet* requests: embeddings use a local [[https://ollama.com][Ollama]] instance
+and ~arc-reranker-enabled~ is nil, so no reranker request is made. A custom
+~arc-embeddings-provider~ may be remote, and enabling the reranker can POST to
+whatever ~arc-reranker-url~ names; both are loopback by default (Ollama on
+~localhost:11434~, the reranker's default ~arc-reranker-url~ is
+~http://127.0.0.1:8787/~), but a non-loopback setting is not local-only. The
+keyword arm (for example, ~bin/arc search ... --arm keyword~) skips embedding
+calls entirely. There is no web search or remote document-conversion service
+built into the package.
 
 *Indexing* is a separate matter: building the ~nix-option~ and
 ~hm-option~ collections runs ~nix build~ against a flake, and that
@@ -41,14 +42,14 @@ arc indexes five kinds of source:
 + *nix-option* :: NixOS module options.
 + *hm-option* :: Home Manager module options.
 
-Every parse creates or updates a named collection. arc searches the
-enabled collections, adds the relevant quotes to context, and lets the
-LLM answer the query.
+Every parse creates or updates a named collection. arc searches the enabled
+collections and returns the relevant documents, passages, scores, and
+navigable source links to the caller.
 
 ** Search
 
-In addition to ~arc-ask~, which answers with a local model, arc exposes the
-same index as plain search with no model in the path.
+arc exposes the index through an interactive document search surface and
+through a JSON tool interface; neither path generates prose.
 
 + ~M-x arc-search~ :: minibuffer search. Types on the BM25 arm, which needs no
   embedding call and returns in tens of milliseconds, then -- once you pause --
@@ -73,14 +74,34 @@ picked the default.
 
 *** As a tool
 
-~bin/arc~ exposes ~search~, ~scopes~ and ~stats~ to anything outside Emacs,
-through ~emacsclient~ and the running daemon -- so the database stays warm and
-there is no second process to babysit. Symlink it onto ~PATH~:
+~bin/arc~ exposes ~search~, ~scopes~, ~stats~, ~preview~, ~lifecycle~, and
+~mcp~ to anything outside Emacs, through ~emacsclient~ and the running daemon
+-- so the database stays warm and there is no second index process to babysit.
+Symlink it onto ~PATH~:
 
 #+begin_src sh
 ln -s /path/to/arc/bin/arc ~/.local/bin/arc
-arc search "disk layout" --scope home --json
+arc search "disk layout" --scope home --kind file --json
+arc preview 42 --json
+arc lifecycle --json
 #+end_src
+
+~search~ returns ranked documents and matching passages. ~preview~ retrieves
+bounded passages plus source metadata for a stable ~source_id~ returned by
+search. ~scopes~ enumerates named presets; ~stats~ reports corpus counts,
+provenance, indexing times, and freshness; ~lifecycle~ is a read-only report
+of missing, stale, phantom, and orphaned records. The typed search filters
+(~--collection~, ~--kind~, ~--tag~, and ~--path-prefix~) are compiled into an
+intersection, not a free-form query language; an ambiguous preset/filter
+combination is rejected rather than broadened silently.
+
+~mcp~ starts a local stdio MCP server. It exposes the same five read-only
+operations -- search, preview, scopes, stats, and lifecycle -- to an MCP
+client as a local subprocess. The subprocess itself has no URL or cloud
+dependency, but a search using a custom remote embedding provider or an
+enabled remote reranker follows that provider's network behavior; the
+keyword arm skips embedding calls. See [[file:docs/mcp.md][docs/mcp.md]] for
+the configuration example and the retrieved-data trust boundary.
 
 Exit status is 0 on success, 1 on error, and 2 specifically when the Emacs
 daemon is not running -- the one failure mode this transport has that the
@@ -91,11 +112,11 @@ own model; arc's job here is retrieval.
 
 ** Models
 
-arc talks to a local [[https://ollama.com][Ollama]] instance and expects these models to be
-pulled already:
-
-+ ~qwen2.5-coder:3b~ or ~qwen2.5:7b~ for chat.
-+ ~nomic-embed-text~ for embeddings.
+The retrieval engine does not require a chat model. The default embedding
+provider is local [[https://ollama.com][Ollama]] with ~nomic-embed-text~; callers may
+configure another, potentially remote, embedding provider. The optional
+reranker is a separate service and is disabled by default. Keyword-only
+retrieval skips embedding calls.
 
 ** Installation
 
@@ -218,30 +239,24 @@ to know either way.
 
 *** What's built and what isn't
 
-This is a phase 1–4-and-5-pending project. Indexing, retrieval and
-answering all work end to end, ~arc-ask~ renders straight into arc's
-own answer buffer, ~*arc*~, and, as of this phase, a single query can
-be scoped to a subset of collections, kinds, org tags or a path prefix
--- see "Scoping a question" below. What phase 5 still has to add:
-hooks that reindex a source automatically when it changes on disk, and
-an automated evaluation harness -- both designed (see ~docs/design/~)
-but not built. The ~*arc*~ buffer's header line reports the corpus's
-size, not its freshness -- see step 6 below -- and that stays true
-until phase 5's freshness tracking lands.
+Indexing, retrieval, freshness tracking, evaluation, document search, and
+the agent-facing tool surface are implemented. A query can be scoped to a
+subset of collections, kinds, org tags, or a path prefix. ARC returns
+retrieval results; a caller that needs prose supplies its own model. The
+prose/chat layer was deliberately removed so the package has one clear
+responsibility: make local evidence easy to retrieve, inspect, and navigate.
 
-*** 1. Pull the Ollama models
+*** 1. Prepare the embedding provider
 
-arc expects an already-running local [[https://ollama.com][Ollama]] and these models pulled:
+The default embedding provider is local [[https://ollama.com][Ollama]]. Pull the embedding
+model before indexing:
 
 #+begin_src sh
-ollama pull qwen2.5-coder:3b   # or: ollama pull qwen2.5:7b
 ollama pull nomic-embed-text
 #+end_src
 
-~qwen2.5-coder:3b~ is ~arc-chat-provider~'s default chat model,
-~nomic-embed-text~ is both providers' embedding model (see
-~arc-embeddings-provider~ and ~arc-chat-provider~ in ~arc-db.el~); set
-either defcustom to point at a different Ollama model instead.
+Set ~arc-embeddings-provider~ if the machine uses another provider. No
+chat model is installed or contacted by ARC.
 
 *** 2. Point arc at your own files, not the author's
 
@@ -322,14 +337,14 @@ misconfiguration, not a corruption -- but an unheeded one costs you a doubled
 (arc-reindex-all)          ; synchronous: blocks Emacs until done
 #+end_src
 
-Do this once, from Lisp (~M-:~ or a scratch buffer), before you ever
-try ~arc-ask~ -- there is nothing to retrieve until this has run at
-least once. A first full index over real corpora (all of NixOS's and
-Home-Manager's options, plus every configured directory) is genuinely
-slow: 20–40 minutes of sustained CPU/GPU is normal, dominated by
-computing one embedding per chunk. ~arc-index-nixopt-cap~ and
-~arc-index-hmopt-cap~ can shrink this drastically for a quick first
-try -- set either to a small number like 300 before reindexing.
+Do this once, from Lisp (~M-:~ or a scratch buffer), before searching --
+there is nothing to retrieve until the index has been built. A first full
+index over real corpora (all of NixOS's and Home-Manager's options, plus
+every configured directory) is genuinely slow: 20–40 minutes of sustained
+CPU/GPU is normal, dominated by computing one embedding per chunk.
+~arc-index-nixopt-cap~ and ~arc-index-hmopt-cap~ can shrink this drastically
+for a quick first try -- set either to a small number like 300 before
+reindexing.
 
 Calling ~M-x arc-reindex-all~ *interactively* instead runs the
 asynchronous path: it returns immediately and reports progress via
@@ -342,8 +357,8 @@ disappeared from a collection; see "Known limitations" below.
 
 *** 4. Enable the collections you actually want searched
 
-~arc-enabled-collections~ -- what ~arc-ask~ actually searches --
-defaults to only ~("builtin manuals")~, regardless of what
+~arc-enabled-collections~ -- the collections used when a caller supplies
+no scope -- defaults to only ~("builtin manuals")~, regardless of what
 ~arc-reindex-all~ just built. Add your own collections to it, e.g.:
 
 #+begin_src elisp
@@ -352,199 +367,145 @@ defaults to only ~("builtin manuals")~, regardless of what
 
 *** 5. Bind arc's commands
 
-arc is a library and does not bind any key for you. It ships
-~arc-command-map~, a prefix keymap -- bind that prefix to whatever key
-you like, e.g.:
+arc is a library and does not bind any key for you. Bind the retrieval
+entry points according to the surrounding Emacs configuration, e.g.:
 
 #+begin_src elisp
-(keymap-set global-map "C-c i" arc-command-map)
+(global-set-key (kbd "C-c i s") #'arc-search-show)
+(global-set-key (kbd "C-c i R") #'arc-reindex-all)
+(global-set-key (kbd "C-c i c") #'arc-reindex-cancel)
 #+end_src
 
-| Key | Command                 | Effect                                                |
-|-----+--------------------------+--------------------------------------------------------|
-| ~i~ | ~arc-ask~               | Ask a question against ~arc-enabled-collections~ (or an explicit scope from Lisp). |
-| ~n~ | ~arc-ask-vault~         | Ask a question scoped to ~arc-vault-collections~ (the vault only). |
-| ~o~ | ~arc-ask-options~       | Ask a question scoped to ~arc-option-collections~ (NixOS and Home-Manager options only). |
-| ~m~ | ~arc-toggle-chat-model~ | Cycle ~arc-chat-provider~'s model through ~arc-chat-models~. |
-| ~R~ | ~arc-reindex-all~       | Reindex (synchronous from Lisp, asynchronous when called interactively -- see step 3 above). |
-| ~c~ | ~arc-reindex-cancel~    | Cancel an in-progress asynchronous reindex. |
+| Command | Effect |
+|---------+--------|
+| ~arc-search-show~ | Prompt for a query and render ranked documents in ~*arc-search*~. |
+| ~arc-search~ | Optional Consult minibuffer search; keyword results settle into hybrid ranking. |
+| ~arc-reindex-all~ | Rebuild one or more collections (asynchronous when called interactively). |
+| ~arc-reindex-cancel~ | Cancel an in-progress asynchronous reindex. |
+| ~arc-freshness~ | Show which collections have drifted from their indexed inputs. |
 
-~arc-transient~ (in ~arc-ui.el~) offers the same commands as a
-~transient~ menu, for whoever prefers that to a keymap.
+The search buffer uses ~TAB~ to expand passages, ~g~ to rerun, ~s~ to change
+scope, and ~RET~ to visit the best-matching source location.
 
-*** 6. Ask arc something
+*** 6. Search the corpus
 
 #+begin_src
-M-x arc-ask RET How do I enable syncthing in home-manager? RET
+M-x arc-search-show RET disk layout RET
 #+end_src
 
-~arc-ask~ takes a question (a plain string; interactively it just
-prompts "Ask arc: "), finds similar quotes in the enabled collections,
-and streams the answer straight into arc's own buffer, ~*arc*~ --
-no ellama, no separate chat package. The question becomes a heading,
-the streamed answer appears under it, and a ~Sources~ subtree lists
-every retrieved citation as an org link; put point on one and press
-~RET~ (~arc-ui-follow-citation~) to jump to it. Call ~arc-ask~ from
-Lisp with an explicit collections list to search a one-off set instead
-of ~arc-enabled-collections~: ~(arc-ask "prompt" '("vault"))~.
+~arc-search-show~ renders one line per matching document in ~*arc-search*~,
+with the best-matching passages beneath it. The result buffer carries the
+source identity and passage metadata needed to visit a file, Info node,
+org-roam node, NixOS option, or Home-Manager option. It never asks a chat
+model to rewrite the result. For a fast interactive front door, use
+~arc-search~ when Consult is installed; it paints the keyword arm first and
+then replaces it with the fused ranking.
 
-The ~*arc*~ buffer's header line reports the corpus's size -- a chunk
-count per kind, e.g. "arc · 6855 chunks · file 6427 · org-node 428" --
-so you can see at a glance whether an index exists at all. It does
-not report /freshness/ (whether the corpus is still up to date with
-what is on disk); that tracking is phase 5.
+*** Scoping a search
 
-*** Scoping a question
-
-By default ~arc-ask~ searches ~arc-enabled-collections~, but a single
-question can be scoped more narrowly along four dimensions, all
-defined by ~arc-scope~ (in ~arc-scope.el~):
+By default a search uses ~arc-enabled-collections~, but a query can be
+scoped more narrowly along four dimensions, all defined by ~arc-scope~ in
+~arc-scope.el~. The same dimensions are available to ~bin/arc search~ as
+validated typed flags and to the MCP ~arc_search~ tool:
 
 + ~:collections~ -- a list of collection names, e.g. ~("vault")~.
 + ~:kinds~ -- a list of source kinds (~"file"~, ~"info"~, ~"org-node"~,
   ~"nix-option"~, ~"hm-option"~).
-+ ~:tags~ -- a list of org tags. Matched the way org itself writes
-  them, colon-delimited and colon-anchored, so a tag match cannot
-  accidentally match a longer tag with the same ending.
++ ~:tags~ -- a list of org tags, matched colon-delimited and colon-anchored.
 + ~:path-prefix~ -- a directory or path prefix string.
 
-~(arc-scope :collections '("vault") :tags '("infra"))~ builds a scope
-combining any of these (all given restrictions apply, ANDed together);
-~(arc-scope)~, with no keys, and ~nil~ both mean the whole corpus --
-*when ~arc-scope-empty-p~ or ~arc-scope-predicate~ look at them
-directly.* ~arc-ask~'s second argument is a different story: a bare
-~nil~ passed there is ambiguous, because it is also the historical
-"caller didn't specify a scope" value, so ~arc-ask-normalize-scope~
-treats it as "use ~arc-enabled-collections~", not "search everything".
-For the one case where you actually want the whole corpus regardless
-of ~arc-enabled-collections~, pass ~:all~ instead: ~(arc-scope :all
-t)~ is a non-nil plist whose first element is a keyword, so
-~arc-ask-normalize-scope~ passes it through unchanged rather than
-substituting ~arc-enabled-collections~, while ~arc-scope-empty-p~
-still reports it empty (it names no actual restriction), so it
-retrieves against the whole corpus exactly like ~(arc-scope)~ does
-when nothing rewrites it first. This is what the ~"everything"~ preset
-below uses, precisely so pressing ~s~ and picking ~"everything"~ isn't
-quietly narrowed to ~arc-enabled-collections~.
+~(arc-scope :collections '("vault") :tags '("infra"))~ combines restrictions
+with AND. ~arc-scope-normalize~ accepts nil (use the enabled collections),
+a plain collection-name list, or a scope plist. Use ~(:all t)~ when an
+explicit whole-corpus scope is required. A scope that matches nothing
+returns no documents; callers can use that empty result as a refusal rather
+than turning an empty context into a guessed answer.
 
-Pass a scope as ~arc-ask~'s second argument to search it instead of
-~arc-enabled-collections~ for that one question.
+*~:tags~ scoping needs a reindex.* ~sources.tags~ is populated when an
+org-node source is parsed. Reindex the relevant collection before relying on
+tag filtering.
 
-The older, simpler calling convention still works unchanged:
-~(arc-ask "prompt" '("vault"))~ -- a plain list of collection-name
-strings -- is normalised into an equivalent ~:collections~ scope by
-~arc-ask-normalize-scope~, so nothing that already calls ~arc-ask~
-this way needs to change.
+*** Deterministic priority rules
 
-Two commands wrap the common cases: ~arc-ask-vault~ scopes to
-~arc-vault-collections~ (the vault only, ~("vault")~ by default) and
-~arc-ask-options~ scopes to ~arc-option-collections~ (~("nix options"
-"hm options")~ by default) -- see the key table above (~n~ and ~o~).
-Both refuse with a ~user-error~, naming the offending variable, if
-that variable has been customized to ~nil~, rather than silently
-widening to the whole corpus: ~(:collections nil)~ is, like plain
-~nil~, an empty scope as far as ~arc-scope-empty-p~ is concerned, so
-without this check a nil-ed ~arc-vault-collections~ would make
-"ask the vault" search everything instead -- the opposite of what it
-promises.
+~arc-search-priority-rules~ is an optional, explicit list of query/source
+boosts. It is nil by default and never learns from clicks, opened results, or
+browsing history. A rule matches a query regexp plus one source identity
+constraint (path prefix, kind, option name, org ID, or Info node), then adds a
+fixed numeric boost before the document limit is applied. Ties remain
+stable. Keep the rules disabled when running retrieval evaluation so the
+baseline stays measurable.
 
-From inside an existing answer, ~s~ (~arc-ui-change-scope~, see "8.
-In-buffer keys" below) re-asks the same question at a different scope,
-picked with ~completing-read~ from ~arc-scope-presets~ (in
-~arc-scope.el~) -- an alist of ~(NAME . SCOPE-PLIST)~ that defaults to
-~"everything"~ (~(:all t)~, see above), ~"vault"~, ~"options"~ and
-~"home"~, and that you can add your own named scopes to.
-
-A scope that matches nothing is not a smaller answer -- it is a
-refusal. When retrieval returns no candidates at all, the model is
-never called; the ~*arc*~ buffer gets an explicit message instead,
-naming the scope, e.g. "arc: not enough data — nothing in vault
-matched this question." That is deliberate: handing an empty context
-block to a chat model and hoping its prompt talks it out of answering
-is exactly the failure the refusal contract exists to prevent.
-
-*~:tags~ scoping needs a reindex.* ~sources.tags~ is populated only
-when an org-node source is parsed -- from ~#+filetags~ and each
-heading's own tags (see ~arc-source-org.el~) -- and only at index
-time. An index built before this phase has the ~tags~ column (schema
-migrations add it) but no values in it, so ~:tags~ scoping against
-that index silently matches nothing, with no error, until the
-collection is reindexed. Run ~(arc-reindex-all '("vault"))~ (or
-whichever collection holds the org-node sources you want tag-scoped)
-to populate it.
-
-*** 7. Capture an answer to your vault
-
-arc does not guess where your notes live -- that is exactly the kind
-of assumption that let the phase 2 path bug ship a hardcoded location
-and silently index nothing for six weeks. ~arc-ui-capture-function~
-defaults to ~nil~, and pressing ~w~ (~arc-ui-capture~) in the ~*arc*~
-buffer with it unset just reports that it is unconfigured rather than
-writing anywhere. Set it to a function of one argument -- the answer
-subtree at point, as a string, question heading and ~Sources~ link
-list included -- to actually file answers, e.g. wired to
-~org-capture~:
+For example, a consuming configuration can prefer the local Emanix source for
+syncthing questions without changing the underlying retrieval scores:
 
 #+begin_src elisp
-(add-to-list 'org-capture-templates
-             '("a" "arc answer"
-               entry (file+headline "~/docs/org/refile.org" "Captured answers")
-               "%i" :immediate-finish t))
-
-(setopt arc-ui-capture-function
-        (lambda (text) (org-capture-string text "a")))
+(setopt arc-search-priority-rules
+        '((:query "syncthing"
+           :path-prefix "ioshi/i-intelligence/"
+           :boost 1000)))
 #+end_src
 
-With point anywhere inside an answer -- its body or its ~Sources~
-subtree, in a buffer that may hold several answers -- ~w~ files just
-that answer, not the whole buffer.
+The rule is a display preference, not an authority claim: source provenance,
+freshness, and the retrieved-data trust boundary still apply.
 
-*** 8. In-buffer keys
+*** 7. Search as a tool
 
-~arc-answer-mode~ (the major mode of ~*arc*~, derived from ~org-mode~)
-binds these keys, acting on the answer or citation at point -- except
-~r~, which always re-asks the most recently asked question in this
-buffer, not necessarily the one at point:
+The retrieval engine is also callable by an external agent through the warm
+Emacs daemon:
 
-| Key   | Command                    | Effect                                              |
-|-------+-----------------------------+------------------------------------------------------|
-| ~RET~ | ~arc-ui-follow-citation~   | Jump to the citation link at point; does nothing off a link. |
-| ~TAB~ | ~org-cycle~                | Fold/unfold the answer or Sources subtree at point (plain org behaviour). |
-| ~f~   | ~arc-ui-follow-up~        | Prompt for a follow-up question and ask it, at the buffer's current scope, with the answer subtree *at point* (its own question heading, body and Sources) quoted in as context, as a new answer appended to the buffer. |
-| ~r~   | ~arc-ui-reask~            | Ask the most recently asked question in this buffer again, at the same scope, retrieving afresh -- useful after a bad sampling or a model swap, without retyping. |
-| ~s~   | ~arc-ui-change-scope~     | Re-ask the most recently asked question in this buffer at a different scope, picked from ~arc-scope-presets~ (see "Scoping a question" above). |
-| ~w~   | ~arc-ui-capture~          | File the answer at point via ~arc-ui-capture-function~ (see above); reports that it is unconfigured rather than writing anywhere if that is unset. |
-| ~q~   | ~arc-ui-quit~             | Bury the ~*arc*~ buffer. |
+#+begin_src sh
+arc search "disk layout" --scope home --kind file --json
+arc preview 42 --json
+arc scopes --json
+arc stats --json
+arc lifecycle --json
+#+end_src
 
-~r~ reads ~arc-ui--last-question~ -- the most recently *asked* question
-in this buffer -- and re-asks exactly that, regardless of where point
-is; that is the right source for "ask the last question again". ~f~
-is deliberately different: a multi-answer buffer invites scrolling
-back to an earlier answer before following up on it, so ~f~ builds its
-prompt entirely from the answer subtree at point via
-~arc-ui-answer-at-point~ -- which already opens with its own
-~** question~ heading -- rather than naming the question separately
-from ~arc-ui--last-question~, which would risk pairing one answer's
-text with a different (and possibly much later) question. ~s~ is
-deliberately re-asking the same question at a new scope for the same
-reason ~r~ does: it reads ~arc-ui--last-question~, not the answer at
-point.
+~bin/arc search~ returns ranked documents, matching passages, a stable
+~source_id~, source identity, and an explicit retrieved-data trust marker.
+~preview~ follows that identifier to bounded source metadata and passages;
+callers should search first and preview only the sources they need. ~scopes~
+enumerates the names instead of making a caller guess. ~stats~ reports corpus
+counts, provenance, per-collection indexing times, and freshness states.
+~lifecycle~ is read-only: it reports drift and structural leftovers but never
+deletes or reindexes anything. Exit status 2 means the Emacs daemon is not
+running; status 1 is an ordinary command error.
 
-~r~ and ~f~ both also read ~arc-ui--last-scope~ -- the scope the
-buffer's most recent answer was actually retrieved at -- and pass it
-straight back to ~arc-ask~, so re-asking or following up stays at
-whatever scope ~s~ (or the entry point that started the buffer, ~i~,
-~n~ or ~o~) last put the buffer at. Passing ~nil~ there instead would
-not mean "the same scope again" -- as with ~arc-ask~ generally (see
-"Scoping a question" above), ~nil~ means "fall back to
-~arc-enabled-collections~" -- so without this, asking with ~n~ (the
-vault) and then pressing ~r~ would silently re-ask against
-~arc-enabled-collections~ instead of staying in the vault.
+The JSON surface is deliberately retrieval-only. An external agent is already
+the component that can synthesize prose, while ARC supplies local evidence and
+source identity. Retrieved text is data, not instructions: a caller must not
+execute commands, broaden scope, disclose secrets, or invoke another tool
+because a passage tells it to.
 
-All three -- ~f~, ~r~ and ~s~ -- guard on
-~arc-ui--last-question~ being non-nil before doing anything, and
-signal a ~user-error~ in a buffer that has never had ~arc-ask~ render
-an answer into it.
+*** 8. Freshness and evaluation
+
+~M-x arc-freshness~ reports which collections have drifted from their indexed
+inputs. ~arc-watch-mode~ reindexes changed file and org-node sources after a
+save and during bounded idle sweeps. Derived option and manual collections are
+reported stale rather than rebuilt automatically: a full re-embedding run is
+too expensive to start silently.
+
+~M-x arc-eval~ runs the private retrieval question set and reports recall at
+the configured cutoffs. It never calls a chat model. The harness can compare
+the fused, semantic, and keyword arms, and can measure document-level recall
+and rollup strategies. Use this measurement before changing an embedding
+provider, retrieval limit, or rollup function.
+
+The prose-generation layer and chat-model reranker have been removed. ARC now
+has one responsibility: index, search, measure, and expose citable local
+evidence. Applications that need prose should call the search/tool surfaces
+and provide their own writer.
+
+#+BEGIN: arc-migration-note
+*** Migration from the prose interface
+
+The old prose commands ~arc-ask~, ~arc-ask-vault~, ~arc-ask-options~, and
+~arc-toggle-chat-model~ were removed. Use ~arc-search-show~, ~arc-tool-search~,
+or ~bin/arc search~ for retrieval; the caller owns any prose response. The
+former ~arc-ask-normalize-scope~ name remains as an obsolete compatibility alias
+for ~arc-scope-normalize~ so existing callers can migrate without a silent
+break.
+#+END: arc-migration-note
 
 *** Retrieval strategy and its knobs
 
@@ -593,7 +554,7 @@ default unless the parent explicitly captures the live value and hands
 it across with ~async-inject-variables~. ~arc-knn-candidates~ and
 ~arc-scope-bruteforce-max~ are on that injection list, along with
 ~arc-limit~ and ~arc-reranker-limit~ (read via ~arc-get-limit~, which
-picks the answer context size) and ~arc-embedding-size~ (read when the
+picks the retrieval candidate limit) and ~arc-embedding-size~ (read when the
 child opens its own database connection, which it always does, having
 no cached one to inherit) -- so customizing any of these in your init
 file does change retrieval in the real, asynchronous path, not just in
@@ -686,11 +647,18 @@ and now has a way to find out whether it earns its service.
 Thirty-three questions cannot resolve anything finer than this. Growing the set
 is worth more than another sweep of the same one.
 
-** Freshness
+** Freshness and lifecycle
 
 ~M-x arc-freshness~ reports which collections have drifted from what is on
-disk, and the ~*arc*~ header line carries a compact summary so rot is visible
-without asking. ~arc-watch-mode~ keeps the mutable half current on its own.
+disk, and ~arc-tool-stats~ exposes freshness to external callers. ~arc-watch-mode~
+keeps the mutable half current on its own.
+
+~arc-tool-lifecycle~ and ~bin/arc lifecycle~ add a bounded, read-only report
+for missing indexed files, stale or absent freshness, phantom sources, and
+orphaned data rows. The report is an inspection aid for an operator or agent;
+it never deletes, prunes, or reindexes. A synchronous ~arc-reindex-all~ remains
+the explicit operation that can reconcile departed sources, while the
+interactive asynchronous path intentionally avoids silent destructive cleanup.
 
 *** Two mechanisms, because the corpus has two kinds of source
 

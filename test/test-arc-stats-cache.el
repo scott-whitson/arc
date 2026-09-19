@@ -66,24 +66,6 @@ or a batch job -- which the generation counter alone would miss."
       (arc-index-stats-cached)
       (should (= calls 2)))))
 
-(ert-deftest asc-header-line-uses-the-cached-variant ()
-  "A header line calling the uncached query is the defect; assert the
-call actually goes through the cache rather than trusting the source."
-  (require 'arc-ui)
-  (asc-with-counted-stats calls
-    (let ((arc-index-stats-cache-ttl 60))
-      (dotimes (_ 5) (arc-ui-header-line))
-      (should (= calls 1))
-      (should (string-match-p "chunks" (arc-ui-header-line))))))
-
-(ert-deftest asc-header-line-still-survives-a-broken-index ()
-  "It must never break the buffer it heads."
-  (require 'arc-ui)
-  (let ((arc-index--stats-cache nil))
-    (cl-letf (((symbol-function 'arc-index-stats)
-               (lambda () (error "no such table: sources"))))
-      (should (string-match-p "corpus unavailable" (arc-ui-header-line))))))
-
 (ert-deftest asc-indexing-a-source-bumps-the-generation ()
   "Integration: the counter is only useful if the real write path moves it."
   (let ((arc-embedding-size 3))

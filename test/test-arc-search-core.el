@@ -81,6 +81,68 @@
    (asr--index-file "/tmp/a.txt" "test" "alpha")
    (should (null (arc-search-documents "zzzznomatch" '(:all t) 'keyword)))))
 
+(ert-deftest asr-priority-rules-nil-preserve-baseline ()
+  "Disabled personalization leaves the measured document order untouched."
+  (arc-test-with-temp-db
+   (asr--index-file "/tmp/a.txt" "test" "alpha")
+   (asr--index-file "/tmp/b.txt" "test" "alpha")
+   (let ((arc-search-priority-rules nil)
+         (arc-rollup-function 'max))
+     (should (equal
+              (mapcar (lambda (d) (plist-get d :path))
+                      (arc-search-documents "alpha" '(:all t) 'keyword))
+              '("/tmp/a.txt" "/tmp/b.txt"))))))
+
+(ert-deftest asr-priority-rule-promotes-a-matching-source ()
+  "A configured source can enter the final limited result set."
+  (arc-test-with-temp-db
+   (asr--index-file "/tmp/a.txt" "test" "alpha")
+   (asr--index-file "/tmp/b.txt" "test" "alpha")
+   (let* ((arc-search-limit 1)
+          (arc-rollup-function 'max)
+          (arc-search-priority-rules
+           '((:query "alpha" :path-prefix "/tmp/b" :boost 100)))
+          (doc (car (arc-search-documents "alpha" '(:all t) 'keyword))))
+     (should (equal (plist-get doc :path) "/tmp/b.txt"))
+     (should (= (plist-get doc :priority-boost) 100))
+     (should (numberp (plist-get doc :retrieval-score)))
+     (should (> (plist-get doc :score) (plist-get doc :retrieval-score))))))
+
+(ert-deftest asr-priority-rule-nonmatches-do-not-change-docs ()
+  (arc-test-with-temp-db
+   (asr--index-file "/tmp/a.txt" "test" "alpha")
+   (asr--index-file "/tmp/b.txt" "test" "alpha")
+   (let* ((arc-rollup-function 'max)
+          (arc-search-priority-rules
+           '((:query "beta" :path-prefix "/tmp/b" :boost 100)))
+          (docs (arc-search-documents "alpha" '(:all t) 'keyword)))
+     (should-not (plist-member (car docs) :priority-boost))
+     (should (equal (mapcar (lambda (d) (plist-get d :path)) docs)
+                    '("/tmp/a.txt" "/tmp/b.txt"))))))
+
+(ert-deftest asr-priority-rules-reject-malformed-data ()
+  (dolist (rules
+           '((( :query "alpha" :boost 0 :kind "file"))
+             ((:query "[" :boost 1 :kind "file"))
+             ((:query "alpha" :boost 1))
+             ((:query "alpha" :boost 1 :unknown "x"))
+             ((:query "alpha" :boost 1 :kind nil))))
+    (let ((arc-search-priority-rules rules))
+      (should-error
+       (arc-search--apply-priority-rules "alpha" nil)))))
+
+(ert-deftest asr-priority-rule-ties-use-source-id ()
+  "Equal boosted scores use the rollup comparator's final stable tie-break."
+  (arc-test-with-temp-db
+   (asr--index-file "/tmp/a.txt" "test" "alpha")
+   (asr--index-file "/tmp/b.txt" "test" "alpha")
+   (let* ((arc-rollup-function 'max)
+          (arc-search-priority-rules
+           '((:query "alpha" :kind "file" :boost 100)))
+          (docs (arc-search-documents "alpha" '(:all t) 'keyword)))
+     (should (equal (mapcar (lambda (d) (plist-get d :path)) docs)
+                    '("/tmp/a.txt" "/tmp/b.txt"))))))
+
 (ert-deftest asr-deep-pool-does-not-flip-the-vector-plan ()
   "The clamp's whole purpose, pinned so the clamp actually engages.
 

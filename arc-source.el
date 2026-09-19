@@ -3,8 +3,9 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;; Commentary:
 ;; One invariant carries arc's whole navigation feature: every chunk knows
-;; how to render itself as an org link.  Because the answer buffer derives
-;; from org-mode, that is all the navigation code there is.
+;; how to render itself as an org link.  Search results and callers can reuse
+;; that renderer directly, so navigation stays in the source layer rather
+;; than in a prose-generation surface.
 ;;
 ;; The `arc' customize group is declared in arc.el; this file's two
 ;; defcustoms attach to it via :group so nothing here re-declares it.

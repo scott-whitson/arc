@@ -1,26 +1,20 @@
-# arc — design
+# arc — documentation
 
-arc is a local, offline, config-aware oracle for Emacs: it answers questions
-about this machine's own configuration and notes, and cites sources you can
-jump to. It is a hard fork of ELISA by Sergey Kostyaev.
+ARC is a local, offline, config-aware retrieval engine for Emacs. It indexes
+this machine's configuration and notes, returns ranked source records, and
+keeps citations navigable. It is a hard fork of ELISA by Sergey Kostyaev.
 
-## design/
+The package README is the current behavior guide. This directory contains
+historical design records plus the live MCP integration note below.
 
-- `2026-08-29-design.md` — the approved design. Covers the five source kinds,
-  the `sources`+`data` schema, the org-link citation invariant, and the
-  refusal contract. Also records what was evaluated and **rejected**
-  (Cactus/Needle 2, turbovec, fine-tuning) so those are not re-litigated.
-- `2026-08-29-plan-phases-1-2.md` — the implementation plan for phases 1 and 2
-  (foundation and corpus), as executed.
+## Live documentation
 
-Phases 3–5 — scoped retrieval, the `arc-answer-mode` UI, and freshness plus an
-eval harness — are designed but not built.
+- [`mcp.md`](mcp.md) — local stdio MCP configuration, the five read-only tools,
+source preview workflow, and the retrieved-data trust boundary.
 
-## Status
+## Historical design records
 
-Phases 1–2 complete: 164 tests across 16 suites, and a working index verified
-answering real questions with citations confirmed at file and line.
-
-The per-task implementation reports and the execution ledger from the phases 1–2
-build are kept locally rather than published: they quote indexed source material
-verbatim as evidence, including private notes.
+The dated files under `design/` and `superpowers/` record decisions and plans
+at the time they were written. They are intentionally not rewritten to match
+today's implementation: some describe the former prose-answer surface or
+rejected alternatives. Use `README.org` and `mcp.md` for current behavior.

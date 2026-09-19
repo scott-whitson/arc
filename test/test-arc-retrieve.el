@@ -42,14 +42,8 @@
   (arc-test-with-temp-db
    (should (null (arc--retrieve-rows nil)))))
 
-;; ar-add-context-row-* and ar-retrieve-ask-is-no-longer-guarded used to
-;; live here, exercising `arc--add-context-row' and `arc-retrieve-ask'.
-;; Task 6 deleted both functions outright -- they existed only to feed
-;; ellama's buffer and context, and `arc-ask' (see test-arc-ui.el) replaced
-;; the whole path they fed -- so the tests that dispatched fake
-;; `ellama-context-add-*' calls through them, and the one asserting
-;; `arc-retrieve-ask' was no longer in the migration guard list, went with
-;; them rather than being left to assert against void functions.
+;; The former answer/context tests belonged to the deleted prose path. This
+;; suite now covers only schema-aware retrieval and scope normalization.
 
 (ert-deftest ar-rerank-request-query-shape-matches-the-real-schema ()
   "`arc--rerank-request' selected `rowid, data FROM data' -- the `data'
@@ -77,37 +71,16 @@ so it cannot rot silently again, reranker on or not."
 
 (ert-deftest er-normalize-scope-accepts-a-name-list ()
   "README documents (arc-ask \"prompt\" '(\"vault\")).  That must keep working."
-  (should (equal (arc-ask-normalize-scope '("vault"))
+  (should (equal (arc-scope-normalize '("vault"))
                  (arc-scope :collections '("vault"))))
-  (should (equal (arc-ask-normalize-scope '("a" "b"))
+  (should (equal (arc-scope-normalize '("a" "b"))
                  (arc-scope :collections '("a" "b")))))
 
 (ert-deftest er-normalize-scope-passes-a-plist-through ()
   (let ((s (arc-scope :kinds '("org-node"))))
-    (should (equal (arc-ask-normalize-scope s) s))))
+    (should (equal (arc-scope-normalize s) s))))
 
 (ert-deftest er-normalize-scope-nil-uses-enabled-collections ()
   (let ((arc-enabled-collections '("builtin manuals")))
-    (should (equal (arc-ask-normalize-scope nil)
+    (should (equal (arc-scope-normalize nil)
                    (arc-scope :collections '("builtin manuals"))))))
-
-(ert-deftest er-no-sources-refuses-without-calling-the-model ()
-  "The single behaviour most worth protecting: a config oracle that
-confabulates a NixOS option is worse than no oracle."
-  (let ((model-called nil)
-        (rendered ""))
-    (cl-letf (((symbol-function 'arc-answer-request)
-               (lambda (&rest _) (setq model-called t)))
-              ((symbol-function 'arc-find-similar)
-               (lambda (_text _scope on-done &optional _on-error) (funcall on-done "SELECT 1 WHERE 0")))
-              ((symbol-function 'arc--retrieve-ids) (lambda (&rest _) nil))
-              ((symbol-function 'arc--retrieve-rows) (lambda (&rest _) nil))
-              ((symbol-function 'arc-ui-begin-answer) (lambda (_q) (cons 1 1)))
-              ((symbol-function 'arc-ui-buffer) (lambda () (current-buffer)))
-              ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil))
-              ((symbol-function 'arc-ui-stream-answer)
-               (lambda (_a text) (setq rendered text))))
-      (arc-ask "anything" (arc-scope :collections '("vault")))
-      (should-not model-called)
-      (should (string-match-p "not enough data" rendered))
-      (should (string-match-p "vault" rendered)))))

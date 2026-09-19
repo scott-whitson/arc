@@ -1,4 +1,4 @@
-;;; arc.el --- Local config-aware oracle for emanix -*- lexical-binding: t -*-
+;;; arc.el --- Local config-aware retrieval for emanix -*- lexical-binding: t -*-
 
 ;; Copyright (C) 2024, 2025 Free Software Foundation, Inc.
 ;; Copyright (C) 2026 Scott Whitson
@@ -31,17 +31,20 @@
 ;; backend was ported from sqlite-vss to sqlite-vec; the schema gained a
 ;; `sources' table carrying per-chunk source identity; web search, Apache
 ;; Tika and pandoc extraction were removed; org-roam node, NixOS option and
-;; Home-Manager option source kinds were added; the answer UI was replaced;
-;; the ellama-based chat/context path (its buffer, its session-aware prompt
-;; rewriting, and the query that fed its context) was removed once arc
-;; gained `arc-ask' and its own answer buffer, and the `ellama' dependency
-;; was dropped entirely.
+;; Home-Manager option source kinds were added; hybrid document search,
+;; freshness tracking, evaluation, and a JSON tool surface were added; and
+;; the prose-answer/chat path was removed so callers can supply the model
+;; that writes prose.  The `ellama' dependency was dropped entirely.
 
 ;;; Commentary:
 ;;
-;; arc is a local, offline, config-aware oracle.  It answers Emacs, Elisp,
-;; Linux, NixOS and org-roam questions grounded in this machine's actual
-;; configuration, and cites sources you can jump to.
+;; arc is a local, offline, config-aware retrieval engine.  It indexes this
+;; machine's files, manuals, notes, and NixOS/Home-Manager options; searches
+;; them with keyword and vector retrieval; and returns ranked, citable source
+;; records.  Its Emacs search surface and JSON tool interface are intended to
+;; be called by a user or by an agent that owns any prose generation.  arc does
+;; not generate prose itself: retrieval and language-model writing are
+;; separate jobs, and keeping that boundary makes the evidence inspectable.
 
 ;;; Code:
 (require 'cl-lib)
@@ -58,20 +61,13 @@
 ;; of retrieval join against.  Required unconditionally here, like every
 ;; other module in this file, rather than left for a caller to require
 ;; separately -- `arc-scope-predicate' with no scope at all (nil) still
-;; has to work, so unscoped `arc-ask' keeps behaving exactly as before.
+;; has to work for unscoped retrieval.
 (require 'arc-scope)
 ;; `arc-index' is required unconditionally here, not left for some external
-;; setup function (`emanix/arc--setup', say) to require separately: nothing
-;; in this file called into it before, so `arc-index-stats' -- which
-;; `arc-ui-header-line' calls on every header-line redisplay -- was void
-;; the moment anyone required only `arc' and never happened to call
-;; `arc-reindex-all' (which lives in `arc-index.el') first.  The header
-;; line's own `condition-case' turned that into a message
-;; ("corpus unavailable (Symbol's function definition is void:
-;; arc-index-stats)") instead of a crash, which is exactly why it went
-;; unnoticed: nothing about that message looks like a missing require
-;; unless you already suspect one.  It is acyclic: `arc-index' requires
-;; `arc-db' and the chunkers, never `arc'.
+;; setup function (`emanix/arc--setup', say) to require separately: retrieval
+;; and the tool/search surfaces read its stats and freshness accessors, and
+;; those must be defined whenever `arc' is loaded.  It is acyclic:
+;; `arc-index' requires `arc-db' and the chunkers, never `arc'.
 (require 'arc-index)
 ;; arc-source's job -- rendering a citation as an org link, and (as of the
 ;; whole-branch fix round) registering the `nixopt:'/`hmopt:' link types as
@@ -84,11 +80,9 @@
 (require 'arc-source)
 (require 'arc-source-file) ; arc--file-list, for arc-parse-directory below
 (require 'arc-source-info) ; arc-find-executable, injected into async workers
-(require 'arc-ui)
-(require 'arc-answer)
 
 (defgroup arc nil
-  "Local, offline, config-aware RAG oracle."
+  "Local, offline, config-aware retrieval engine."
   :group 'tools)
 
 (defconst arc--unmigrated-functions
@@ -102,17 +96,13 @@ Task 4 replaced `data(path, hash, data)' and dropped the `files' table;
 these have not been rewritten yet.  Task 11 owns that work and deletes
 each guard as it goes.  `arc-parse-info-manual' was here too, until
 Task 10 rewrote it as a pure function (see `arc-source-info.el') and
-removed its guard.  The old query-and-context function that fed arc's
-former chat buffer was here too, until Task 11 rewrote its query across
+removed its guard.  The old query-and-context function that fed the
+former prose path was here too, until Task 11 rewrote its query across
 `data' and `sources' (see `arc--retrieve-rows' below) and removed its
-guard -- it was the query path, and arc could not answer a question
-while it stayed guarded; Task 6 later deleted that function and its
-context-feeding helper outright, once `arc-ask' replaced the whole
-answer path they fed and their only remaining purpose went with it.
-The remaining five are collection-management and bulk-reindex
+guard.  The remaining five are collection-management and bulk-reindex
 functions that `arc-index.el''s `arc-index-source' and
 `arc-reindex-all' already supersede; migrating them is not required to
-prove the corpus real or to answer a question, so they stay guarded.
+prove the corpus real or to serve retrieval, so they stay guarded.
 This list may only shrink.")
 
 (defun arc--not-yet-migrated (fn)
@@ -121,7 +111,7 @@ This list may only shrink.")
 (Task 10/11 owns this); it would fail against the current tables" fn))
 
 (defcustom arc-limit 10
-  "How many chunks retrieval hands the model.
+  "How many chunks retrieval hands the caller.
 
 10 rather than 5 because the expected source is frequently present but
 just below the old cutoff: measured over 33 questions at the current
@@ -182,39 +172,23 @@ sweeping of this one."
   "Function for semantic text split."
   :type 'function)
 
-(defcustom arc-chat-prompt-template
-  "Answer user query based on context above. \
-If you can answer it partially do it. \
-Provide list of open questions if any. \
-Say \"not enough data\" if you can't answer user \
-query based on provided context. User query:
-%s"
-  "Chat prompt template.
-Contains instructions to LLM to be more focused on data in
-context, be able to say \"I don't know\" etc. User query will be
-inserted at the end and all this result prompt will be sent to
-LLM together with context."
-  :type 'string)
-
 (defcustom arc-breakpoint-threshold-amount 0.4
   "Breakpoint threshold amount.
 Increase it if you need decrease semantic split granularity."
   :type 'number)
 
 (defcustom arc-reranker-enabled nil
-  "Enable reranker to improve retrieving quality.
-Reranker is a service to improve answer quality by mesure
-relevance of text chunks to user query and sort chunks by
-relevance.  See https://github.com/s-kostyaev/reranker for more
-details."
+  "Enable reranker to improve retrieval quality.
+Reranker is a service that measures relevance of text chunks to the
+query and sorts chunks by relevance.  See
+https://github.com/s-kostyaev/reranker for more details."
   :type 'boolean)
 
 (defcustom arc-reranker-url "http://127.0.0.1:8787/"
   "Reranker service url.
-Reranker is a service to improve answer quality by mesure
-relevance of text chunks to user query and sort chunks by
-relevance.  See https://github.com/s-kostyaev/reranker for more
-details."
+Reranker measures relevance of text chunks to the query and sorts
+chunks by relevance.  See https://github.com/s-kostyaev/reranker for
+more details."
   :type 'string)
 
 (defcustom arc-reranker-similarity-threshold nil
@@ -237,31 +211,6 @@ one by intuition is how a retrieval layer quietly starts refusing
 answers it had.  The mechanism lives here so phase 5 sets a number
 rather than building a feature."
   :type '(choice (const nil) number)
-  :group 'arc)
-
-(defcustom arc-enabled-collections '("builtin manuals")
-  "Enabled collections for arc chat.
-Used to default to `(\"builtin manuals\" \"external manuals\")', but
-nothing in `arc-index-plan' has ever created an \"external manuals\"
-collection -- it matches no `collections.name' row and silently
-retrieves nothing, same failure mode as a stale directory-path entry."
-  :type '(repeat string))
-
-(defcustom arc-vault-collections '("vault")
-  "Collections `arc-ask-vault' searches."
-  :type '(repeat string)
-  :group 'arc)
-
-(defcustom arc-option-collections '("nix options" "hm options")
-  "Collections `arc-ask-options' searches."
-  :type '(repeat string)
-  :group 'arc)
-
-(defcustom arc-chat-models '("qwen2.5-coder:3b" "qwen2.5:7b")
-  "Chat models `arc-toggle-chat-model' cycles through, in order.
-The 3B model answers fast enough to keep a question conversational;
-the 7B one is the practical ceiling on 14 GiB with no swap."
-  :type '(repeat string)
   :group 'arc)
 
 (defcustom arc-batch-embeddings-enabled nil
@@ -363,7 +312,7 @@ semantic_search AS (
 )" (arc-fts-query text) arc-knn-candidates))
 
 (defun arc--find-similar (text scope &optional arm scored)
-  "Return the SQL selecting chunks in SCOPE similar to TEXT.
+"Return the SQL selecting chunks in SCOPE similar to TEXT.
 SCOPE is a scope plist (see `arc-scope'); nil means the whole corpus.
 The scope reaches the search rather than filtering its results: both
 the vector side and the FTS side join against the `scoped' CTE.
@@ -377,9 +326,9 @@ retrieval is \"bad\".  Only `fused' and `semantic' embed TEXT; the
 keyword arm skips that work entirely.
 
 SCORED, when non-nil, adds a second column to every row: the score the
-ranking already computed.  It is additive on purpose -- `arc-ask' and
-`arc-eval' both consume the single-column shape, so the default return
-must not move.  For the single-arm cases, which have a rank but no RRF
+ranking already computed.  It is additive on purpose -- the standard
+retrieval and evaluation paths consume the single-column shape, so the
+default return must not move.  For the single-arm cases, which have a rank but no RRF
 score, the score is `1.0 / (arc-rrf-k + rank)': the same shape and the
 same magnitude as a one-sided fused score."
   ;; For collection scoping specifically, the previous version's inlined
@@ -768,8 +717,8 @@ Called with the question and the candidate ids, and must return at most
 
 The seam exists because no such service is packaged: nixpkgs has none,
 Ollama serves no rerank endpoint, and running a cross-encoder means a
-second resident model.  `arc-rerank-llm' in arc-rerank-llm.el reranks
-with the chat model already installed instead."
+second resident model.  A future provider can be supplied through
+`arc-reranker-function' without coupling retrieval to a chat model."
   :type '(choice (const nil) function) :group 'arc)
 
 (defun arc-rerank (prompt ids)
@@ -792,7 +741,7 @@ with the chat model already installed instead."
 		    data)))))
 
 (defun arc-get-limit ()
-  "Limit for arc hybrid search."
+  "Return the retrieval candidate limit for the active search path."
   (if arc-reranker-enabled
       arc-reranker-limit
     arc-limit))
@@ -809,8 +758,8 @@ is invalid syntax.
 The ordering is not decoration.  This used to be a bare
 `WHERE d.id IN (...)' with no ORDER BY, so SQLite returned rows in
 rowid order and every trace of the hybrid ranking was thrown away
-between the search and the answer.  The consequences were not
-cosmetic: the model received its context in essentially arbitrary
+between retrieval and its caller.  The consequences were not
+cosmetic: the caller received its context in essentially arbitrary
 order, citations were listed by rowid rather than relevance, and
 `arc-eval' recall@k measured \"is the expected source among the k
 lowest rowids\" -- which is why asking for 20 candidates instead of 10
@@ -821,7 +770,7 @@ without changing which columns come back."
     ;; `delete-dups' keeps the FIRST occurrence, so the best-ranked position of
     ;; a repeated id wins.  The old `IN (...)' form deduplicated implicitly;
     ;; the ordinal join does not, and a duplicated id would otherwise hand the
-    ;; same chunk to the model twice.
+    ;; same chunk to the caller twice.
     (setq ids (delete-dups (copy-sequence ids)))
     (sqlite-select
      (arc-db)
@@ -855,137 +804,13 @@ citation can name the line it actually came from."
         (arc-rerank prompt raw)
       (take arc-limit raw))))
 
-(defun arc-ask-normalize-scope (scope)
-  "Return SCOPE as a scope plist.
-Accepts three shapes, because `arc-ask' is public and its documented
-second argument used to be a plain list of collection names:
-  nil                     -- `arc-enabled-collections'
-  (\"vault\" \"home\")        -- those collections
-  (:collections (\"vault\")) -- a scope plist, used as-is
-A list of strings is unambiguous here: a scope plist's first element
-is always a keyword."
-  (cond
-   ((null scope) (arc-scope-from-collections arc-enabled-collections))
-   ((keywordp (car scope)) scope)
-   (t (arc-scope-from-collections scope))))
-
-;;;###autoload
-(defun arc-ask (question &optional scope heading)
-  "Ask arc QUESTION, grounded in SCOPE, rendering into the arc buffer.
-QUESTION is what is sent to retrieval and to the model.  HEADING, when
-non-nil, is what is rendered as the answer's heading and recorded as
-`arc-ui--last-question' instead of QUESTION.
-
-A caller that folds earlier context into QUESTION -- `arc-ui-follow-up'
-does, so the model sees the earlier exchange -- passes its own plain,
-one-line follow-up text as HEADING, so the buffer heading (and
-anything a later `arc-ui-reask' resends) stays that one line rather
-than the whole quoted exchange QUESTION carries.  `arc-ui-begin-answer'
-enforces that whatever ends up as the heading is a single line, no
-matter which of QUESTION or HEADING that turns out to be.
-
-Both retrieval failure (an unreachable embedding endpoint, most
-commonly) and model failure render into the answer buffer rather than
-leaving it invisible -- retrieval failure never even reaches
-`arc-answer-request', which is why it needs an error path of its own
-here rather than reusing that function's.
-
-SCOPE is a scope plist (see `arc-scope'), a plain list of collection
-names, or nil for `arc-enabled-collections'.  It is normalised by
-`arc-ask-normalize-scope'.
-
-When retrieval returns nothing at all, the model is never called: the
-buffer gets `arc-answer-refusal' instead.  Handing an empty context
-block to a chat model and hoping its prompt talks it out of answering
-is exactly the failure the spec's refusal contract exists to prevent."
-  (interactive "sAsk arc: ")
-  (let* ((scope (arc-ask-normalize-scope scope))
-         (display (or heading question)))
-    (arc-find-similar
-     question scope
-     (lambda (query)
-       (let* ((ids (arc--retrieve-ids query question))
-              (sources (mapcar #'arc-row-to-source (arc--retrieve-rows ids)))
-              (answer (arc-ui-begin-answer display)))
-         (pop-to-buffer (arc-ui-buffer))
-         (setq arc-ui--last-question display)
-         (setq arc-ui--last-sources sources)
-         (setq arc-ui--last-scope scope)
-         (if (null sources)
-             (arc-ui-stream-answer answer (arc-answer-refusal scope))
-           (arc-answer-request
-            question sources
-            (lambda (text) (arc-ui-stream-answer answer text))
-            (lambda (text)
-              (arc-ui-stream-answer answer text)
-              (arc-ui-render-sources answer sources))
-            (lambda (_sym msg)
-              (arc-ui-stream-answer answer (format "arc: request failed: %s" msg)))))))
-     (lambda (_sym msg)
-       (let ((answer (arc-ui-begin-answer display)))
-         (pop-to-buffer (arc-ui-buffer))
-         (setq arc-ui--last-question display)
-         (setq arc-ui--last-sources nil)
-         (setq arc-ui--last-scope scope)
-         (arc-ui-stream-answer answer (format "arc: retrieval failed: %s" msg)))))))
-
-;;;###autoload
-(defun arc-ask-vault (question)
-  "Ask arc QUESTION against the org-roam vault only.
-Refuses with a `user-error' naming `arc-vault-collections' when that
-variable has been customized to nil, rather than silently searching
-the whole corpus: `arc-ask-normalize-scope' treats `(:collections nil)'
-as an empty, unrestricted scope (the same way plain nil is), so
-passing it through unchecked would make a nil-ed `arc-vault-collections'
-answer the opposite of what \"vault only\" promises."
-  (interactive "sAsk arc (vault): ")
-  (unless arc-vault-collections
-    (user-error "arc: `arc-vault-collections' is nil -- refusing to search \
-the whole corpus instead of the vault"))
-  (arc-ask question (arc-scope :collections arc-vault-collections)))
-
-;;;###autoload
-(defun arc-ask-options (question)
-  "Ask arc QUESTION against the NixOS and Home-Manager options only.
-Refuses with a `user-error' naming `arc-option-collections' when that
-variable has been customized to nil; see `arc-ask-vault' for why
-searching everything instead would be the worst available answer."
-  (interactive "sAsk arc (options): ")
-  (unless arc-option-collections
-    (user-error "arc: `arc-option-collections' is nil -- refusing to search \
-the whole corpus instead of just the options"))
-  (arc-ask question (arc-scope :collections arc-option-collections)))
-
-;;;###autoload
-(defun arc-toggle-chat-model ()
-  "Switch `arc-chat-provider' to the next model in `arc-chat-models'.
-A model not in the list -- or an `arc-chat-provider' the user has set
-to something other than an Ollama provider -- is not silently worked
-around: the first case starts the cycle over, the second is a
-`user-error' naming the variable, because rebuilding an arbitrary
-provider is not this command's business."
-  (interactive)
-  (unless (cl-typep arc-chat-provider 'llm-ollama)
-    (user-error "arc: `arc-chat-provider' is not an Ollama provider; \
-`arc-toggle-chat-model' cannot switch its model"))
-  (let* ((current (llm-ollama-chat-model arc-chat-provider))
-         (rest (cdr (member current arc-chat-models)))
-         (next (or (car rest) (car arc-chat-models))))
-    (setf (llm-ollama-chat-model arc-chat-provider) next)
-    (message "arc: chat model is now %s" next)
-    next))
-
 ;;;###autoload
 (defvar arc-command-map
   (let ((m (make-sparse-keymap)))
-    (define-key m (kbd "i") #'arc-ask)
-    (define-key m (kbd "n") #'arc-ask-vault)
-    (define-key m (kbd "o") #'arc-ask-options)
-    (define-key m (kbd "m") #'arc-toggle-chat-model)
     (define-key m (kbd "R") #'arc-reindex-all)
     (define-key m (kbd "c") #'arc-reindex-cancel)
     m)
-  "Prefix map for arc's entry points; bind it where you like.
+  "Prefix map for arc's remaining entry points; bind it where you like.
 arc is a library and does not claim a global key for you -- bind this
 map to whatever prefix you like, e.g.:
 

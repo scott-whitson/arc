@@ -123,33 +123,3 @@
     (arc-test-with-temp-db
      (let ((arc-index-plan nil))
        (should (null (arc-freshness-summary)))))))
-
-(ert-deftest afr-header-line-shows-staleness-and-caches-it ()
-  (require 'arc-ui)
-  (let ((calls 0)
-        (arc--freshness-cache nil)
-        (arc-index--stats-cache nil)
-        (arc-index--write-generation 0)
-        (arc-freshness-cache-ttl 60))
-    (cl-letf (((symbol-function 'arc-index-stats) (lambda () '(("file" . 3))))
-              ((symbol-function 'arc-freshness-summary)
-               (lambda () (setq calls (1+ calls)) "dotfiles stale")))
-      (should (string-match-p "dotfiles stale" (arc-ui-header-line)))
-      (dotimes (_ 5) (arc-ui-header-line))
-      (should (= calls 1)))))
-
-(ert-deftest afr-header-line-says-fresh-when-it-is ()
-  (require 'arc-ui)
-  (let ((arc--freshness-cache nil) (arc-index--stats-cache nil))
-    (cl-letf (((symbol-function 'arc-index-stats) (lambda () '(("file" . 3))))
-              ((symbol-function 'arc-freshness-summary) (lambda () nil)))
-      (should (string-match-p "fresh" (arc-ui-header-line))))))
-
-(ert-deftest afr-header-line-survives-a-freshness-error ()
-  "It must never break the buffer it heads."
-  (require 'arc-ui)
-  (let ((arc--freshness-cache nil) (arc-index--stats-cache nil))
-    (cl-letf (((symbol-function 'arc-index-stats) (lambda () '(("file" . 3))))
-              ((symbol-function 'arc-freshness-summary)
-               (lambda () (error "no such column"))))
-      (should (string-match-p "unknown" (arc-ui-header-line))))))

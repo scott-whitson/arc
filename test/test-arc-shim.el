@@ -97,8 +97,28 @@ Return (STATUS . OUTPUT), OUTPUT being combined stdout+stderr."
 ;; than reaching the daemon as `void-variable' or, worse, an arbitrary
 ;; form to evaluate.
 
+(ert-deftest ash-shim-rejects-a-non-numeric-preview-source-id ()
+  (let ((result (ash-shim-call '("preview" "abc"))))
+    (should (= (car result) 1))
+    (should (string-match-p "positive integer SOURCE_ID" (cdr result)))))
+
+(ert-deftest ash-shim-rejects-zero-preview-source-id ()
+  (let ((result (ash-shim-call '("preview" "0"))))
+    (should (= (car result) 1))
+    (should (string-match-p "positive integer SOURCE_ID" (cdr result)))))
+
 (ert-deftest ash-shim-rejects-a-non-numeric---limit ()
   (let ((result (ash-shim-call '("search" "foo" "--limit" "abc"))))
+    (should (= (car result) 1))
+    (should (string-match-p "positive integer" (cdr result)))))
+
+(ert-deftest ash-shim-rejects-a-zero---limit ()
+  (let ((result (ash-shim-call '("search" "foo" "--limit" "0"))))
+    (should (= (car result) 1))
+    (should (string-match-p "positive integer" (cdr result)))))
+
+(ert-deftest ash-shim-rejects-a-negative---limit ()
+  (let ((result (ash-shim-call '("search" "foo" "--limit" "-1"))))
     (should (= (car result) 1))
     (should (string-match-p "positive integer" (cdr result)))))
 
@@ -138,6 +158,238 @@ and exits STATUS, prepended onto PATH for the duration."
             (with-temp-buffer
               (let ((status (apply #'call-process ash-shim nil '(t t) nil args)))
                 (cons status (buffer-string))))))
+      (delete-directory dir t))))
+
+(defun ash-shim-with-fake-emacsclient-output (output status args)
+  "Run the shim against a stub that writes successful OUTPUT to stdout.
+OUTPUT is the quoted elisp string `emacsclient -e' would print."
+  (let* ((dir (make-temp-file "ash-fake-emacsclient-output" t))
+         (stub (expand-file-name "emacsclient" dir)))
+    (unwind-protect
+        (progn
+          (with-temp-file stub
+            (insert (format "#!/usr/bin/env bash\nprintf '%%s' %s\nexit %d\n"
+                            (shell-quote-argument output) status)))
+          (set-file-modes stub #o755)
+          (let ((process-environment
+                 (cons (format "PATH=%s:%s" dir (getenv "PATH"))
+                       process-environment)))
+            (with-temp-buffer
+              (let ((status (apply #'call-process ash-shim nil '(t t) nil args)))
+                (cons status (buffer-string))))))
+      (delete-directory dir t))))
+
+(ert-deftest ash-shim-rejects-an-invalid---kind-before-transport ()
+  (let ((result (ash-shim-call '("search" "foo" "--kind" "bogus"))))
+    (should (= (car result) 1))
+    (should (string-match-p "--kind" (cdr result)))))
+
+(ert-deftest ash-shim-rejects-a-duplicate---path-prefix ()
+  (let ((result (ash-shim-call '("search" "foo" "--path-prefix" "/a"
+                                "--path-prefix" "/b"))))
+    (should (= (car result) 1))
+    (should (string-match-p "only once" (cdr result)))))
+
+(ert-deftest ash-shim-transports-typed-filter-options ()
+  "The parser accepts repeatable filters and safely builds the daemon form."
+  (let ((result (ash-shim-with-fake-emacsclient-output
+                 "\"{}\"" 0
+                 '("search" "foo" "--scope" "everything"
+                   "--collection" "vault" "--collection" "home"
+                   "--kind" "file" "--tag" "work"
+                   "--path-prefix" "/home/" "--json"))))
+    (should (= (car result) 0))
+    (should (equal (string-trim (cdr result)) "{}"))))
+
+(ert-deftest ash-shim-lifecycle-successfully-transports-json ()
+  "The lifecycle command unwraps daemon JSON without changing its exit code."
+  (let ((result (ash-shim-with-fake-emacsclient-output
+                 "\"{\\\"read_only\\\":true}\""
+                 0 '("lifecycle" "--limit" "3" "--json"))))
+    (should (= (car result) 0))
+    (should (equal (string-trim (cdr result))
+                   "{\"read_only\":true}"))))
+
+(ert-deftest ash-shim-lifecycle-rejects-zero-limit ()
+  (let ((result (ash-shim-call '("lifecycle" "--limit" "0"))))
+    (should (= (car result) 1))
+    (should (string-match-p "positive integer" (cdr result)))))
+
+(ert-deftest ash-shim-preview-successfully-transports-json ()
+  "The happy preview path unwraps emacsclient's quoted string output."
+  (let ((result (ash-shim-with-fake-emacsclient-output
+                 "\"{\\\"source_id\\\":7,\\\"passages\\\":[]}\""
+                 0 '("preview" "7" "--json"))))
+    (should (= (car result) 0))
+    (should (equal (string-trim (cdr result))
+                   "{\"source_id\":7,\"passages\":[]}"))))
+
+(ert-deftest ash-shim-mcp-reads-newline-delimited-json-rpc ()
+  "The MCP loop emits one response per non-empty input line and no logs.
+A fake emacsclient stands in for the daemon; the real protocol dispatcher is
+covered by `test-arc-tool.el'."
+  (let* ((dir (make-temp-file "ash-fake-mcp-emacsclient" t))
+         (stub (expand-file-name "emacsclient" dir))
+         (input (make-temp-file "ash-mcp-input"))
+         (output ""))
+    (unwind-protect
+        (progn
+          (with-temp-file stub
+            (insert "#!/usr/bin/env bash\nprintf '%s\\n' '\"{}\"'\n"))
+          (set-file-modes stub #o755)
+          (let ((process-environment
+                 (cons (format "PATH=%s:%s" dir (getenv "PATH"))
+                       process-environment)))
+            (with-temp-buffer
+              (insert "{\"jsonrpc\":\"2.0\",\"id\":1}\n")
+              (should (= (call-process-region (point-min) (point-max)
+                                               ash-shim t '(t t) nil "mcp")
+                          0))
+              (setq output (buffer-string))))
+          (should (= (length (split-string (string-trim output) "\\n" t)) 1))
+          (should-not (string-match-p "Error:" output)))
+      (when (file-exists-p input) (delete-file input))
+      (delete-directory dir t))))
+
+(ert-deftest ash-shim-mcp-suppresses-all-notification-lines-and-keeps-reading ()
+  "Notifications must not leak `nil' or stop the persistent stdio loop."
+  (let* ((dir (make-temp-file "ash-fake-mcp-notifications" t))
+         (stub (expand-file-name "emacsclient" dir))
+         (count (expand-file-name "count" dir))
+         (output ""))
+    (unwind-protect
+        (progn
+          (with-temp-file stub
+            (insert "#!/usr/bin/env bash\n"
+                    "n=0\n"
+                    "if [ -f \"" count "\" ]; then n=$(cat \"" count "\"); fi\n"
+                    "n=$((n + 1))\n"
+                    "printf '%s' \"$n\" > \"" count "\"\n"
+                    "if [ \"$n\" -lt 3 ]; then printf '%s\\n' '\"\"'; "
+                    "else printf '%s\\n' '\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":9,\\\"result\\\":{}}\"'; fi\n"))
+          (set-file-modes stub #o755)
+          (let ((process-environment
+                 (cons (format "PATH=%s:%s" dir (getenv "PATH"))
+                       process-environment)))
+            (with-temp-buffer
+              (insert "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n"
+                      "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n"
+                      "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n")
+              (should (= (call-process-region (point-min) (point-max)
+                                               ash-shim t '(t t) nil "mcp")
+                          0))
+              (setq output (buffer-string))))
+          (should (equal (string-trim output)
+                         "{\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{}}"))
+          (should-not (string-match-p "nil" output)))
+      (delete-directory dir t))))
+
+(ert-deftest ash-shim-mcp-keeps-line-order-across-invalid-and-valid-json-rpc ()
+  "The real stdio loop emits one JSON response per input and continues after errors.
+The fake daemon returns the responses in invocation order: the dispatcher
+coverage in `test-arc-tool.el' pins which input maps to each error, while this
+pins the shell transport's line-by-line continuation and ordering."
+  (let* ((dir (make-temp-file "ash-fake-mcp-errors" t))
+         (stub (expand-file-name "emacsclient" dir))
+         (output ""))
+    (unwind-protect
+        (progn
+          (with-temp-file stub
+            (insert "#!/usr/bin/env python3\n"
+                    "import json, os\n"
+                    "count = os.path.join(" (prin1-to-string dir) ", 'count')\n"
+                    "try:\n"
+                    "    n = int(open(count).read())\n"
+                    "except FileNotFoundError:\n"
+                    "    n = 0\n"
+                    "n += 1\n"
+                    "open(count, 'w').write(str(n))\n"
+                    "responses = [\n"
+                    "    {'jsonrpc': '2.0', 'id': None, 'error': {'code': -32600}},\n"
+                    "    {'jsonrpc': '2.0', 'id': None, 'error': {'code': -32600}},\n"
+                    "    {'jsonrpc': '2.0', 'id': None, 'error': {'code': -32600}},\n"
+                    "    {'jsonrpc': '2.0', 'id': None, 'error': {'code': -32600}},\n"
+                    "    {'jsonrpc': '2.0', 'id': None, 'error': {'code': -32700}},\n"
+                    "    {'jsonrpc': '2.0', 'id': 6, 'result': {'ok': True}},\n"
+                    "]\n"
+                    "print(json.dumps(json.dumps(responses[n - 1], separators=(',', ':'))))\n"))
+          (set-file-modes stub #o755)
+          (let ((process-environment
+                 (cons (format "PATH=%s:%s" dir (getenv "PATH"))
+                       process-environment)))
+            (with-temp-buffer
+              (insert "[]\n"
+                      "[\"x\"]\n"
+                      "null\n"
+                      "{\"jsonrpc\":\"2.0\"}\n"
+                      "not-json\n"
+                      "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"ping\"}\n")
+              (should (= (call-process-region (point-min) (point-max)
+                                               ash-shim t '(t t) nil "mcp")
+                          0))
+              (setq output (buffer-string))))
+          (should (equal (split-string (string-trim output) "\n" t)
+                         '("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600}}"
+                           "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600}}"
+                           "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600}}"
+                           "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600}}"
+                           "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700}}"
+                           "{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"ok\":true}}")))
+          (should-not (string-match-p "nil" output)))
+      (delete-directory dir t))))
+
+(ert-deftest ash-shim-mcp-continues-after-invalid-id-and-params-shapes ()
+  "The stdio loop preserves ordering across invalid requests and a valid one."
+  (let* ((dir (make-temp-file "ash-fake-mcp-shapes" t))
+         (stub (expand-file-name "emacsclient" dir))
+         (output ""))
+    (unwind-protect
+        (progn
+          (with-temp-file stub
+            (insert "#!/usr/bin/env python3\n"
+                    "import json, os\n"
+                    "count = os.path.join(" (prin1-to-string dir) ", 'count')\n"
+                    "try:\n"
+                    "    n = int(open(count).read())\n"
+                    "except FileNotFoundError:\n"
+                    "    n = 0\n"
+                    "n += 1\n"
+                    "open(count, 'w').write(str(n))\n"
+                    "responses = [\n"
+                    "    {'jsonrpc': '2.0', 'id': None, 'error': {'code': -32600}},\n"
+                    "    {'jsonrpc': '2.0', 'id': None, 'error': {'code': -32600}},\n"
+                    "    {'jsonrpc': '2.0', 'id': None, 'error': {'code': -32600}},\n"
+                    "    {'jsonrpc': '2.0', 'id': 4, 'error': {'code': -32600}},\n"
+                    "    {'jsonrpc': '2.0', 'id': 5, 'error': {'code': -32600}},\n"
+                    "    {'jsonrpc': '2.0', 'id': 6, 'error': {'code': -32600}},\n"
+                    "    {'jsonrpc': '2.0', 'id': 7, 'result': {}}\n"
+                    "]\n"
+                    "print(json.dumps(json.dumps(responses[n - 1], separators=(',', ':'))))\n"))
+          (set-file-modes stub #o755)
+          (let ((process-environment
+                 (cons (format "PATH=%s:%s" dir (getenv "PATH"))
+                       process-environment)))
+            (with-temp-buffer
+              (insert "{\"jsonrpc\":\"2.0\",\"id\":true,\"method\":\"ping\"}\n"
+                      "{\"jsonrpc\":\"2.0\",\"id\":[],\"method\":\"ping\"}\n"
+                      "{\"jsonrpc\":\"2.0\",\"id\":{},\"method\":\"ping\"}\n"
+                      "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"ping\",\"params\":null}\n"
+                      "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"ping\",\"params\":false}\n"
+                      "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"ping\",\"params\":0}\n"
+                      "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\",\"params\":[]}\n")
+              (should (= (call-process-region (point-min) (point-max)
+                                               ash-shim t '(t t) nil "mcp")
+                          0))
+              (setq output (buffer-string))))
+          (should (equal (split-string (string-trim output) "\n" t)
+                         '("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600}}"
+                           "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600}}"
+                           "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600}}"
+                           "{\"jsonrpc\":\"2.0\",\"id\":4,\"error\":{\"code\":-32600}}"
+                           "{\"jsonrpc\":\"2.0\",\"id\":5,\"error\":{\"code\":-32600}}"
+                           "{\"jsonrpc\":\"2.0\",\"id\":6,\"error\":{\"code\":-32600}}"
+                           "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}")))
+          (should-not (string-match-p "nil" output)))
       (delete-directory dir t))))
 
 (ert-deftest ash-shim-reports-a-signalled-lisp-error-as-exit-1-not-a-dead-daemon ()

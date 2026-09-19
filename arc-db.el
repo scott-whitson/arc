@@ -26,13 +26,6 @@
   :type '(sexp :validate llm-standard-provider-p)
   :group 'arc)
 
-(defcustom arc-chat-provider (make-llm-ollama
-			       :chat-model "qwen2.5-coder:3b"
-			       :embedding-model "nomic-embed-text")
-  "Chat provider."
-  :type '(sexp :validate llm-standard-provider-p)
-  :group 'arc)
-
 (defcustom arc-db-directory (file-truename
 			       (file-name-concat
 				user-emacs-directory "arc"))

@@ -5,10 +5,10 @@
 
 ;;; Commentary:
 
-;; arc's retrieval was built to feed an LLM: `arc-ask' asks for ten
-;; chunks and hands them to a model.  This file is the other consumer of
-;; the same machinery -- ranked documents, no model, no network beyond
-;; the embedding call the fused arm already makes.
+;; This file consumes arc's retrieval machinery as ranked documents rather
+;; than prose.  It is the LLM-free search surface: no model is needed for
+;; keyword search, and the fused arm makes only the embedding call needed to
+;; rank the documents.
 ;;
 ;; Two things happen here that rollup cannot do for itself.  The
 ;; candidate pool is deepened, because ten chunks cannot yield ten
@@ -48,6 +48,115 @@ it for scopes where depth would change the query plan."
 (defcustom arc-search-limit 10
   "How many documents a search returns."
   :type 'integer :group 'arc)
+
+(defcustom arc-search-priority-rules nil
+  "Explicit deterministic boosts applied after rollup and before the limit.
+
+Each rule is a plist with a non-empty `:query' regexp, a positive numeric
+`:boost', and at least one source matcher.  Supported matchers are
+`:path-prefix', `:kind', `:option-name', `:org-id' and `:info-node'.  All
+matchers present on one rule must match the document; boosts from every
+matching rule are added.  Rules are data, not click history, and remain
+outside the retrieval eval path.
+
+Example:
+
+  '((:query \"disk layout\" :path-prefix \"ioshi/\" :boost 100))
+
+The default nil leaves the measured retrieval order unchanged.
+Malformed rules signal an error naming the invalid field rather than being
+silently ignored.
+
+Priority rules are deliberately applied only to the document search surface.
+The retrieval eval harness binds this variable to nil so its measurements
+continue to describe the baseline ranker, not operator personalization."
+  :type '(repeat plist) :group 'arc)
+
+(defconst arc-search--priority-matcher-keys
+  '(:path-prefix :kind :option-name :org-id :info-node)
+  "Source fields allowed in `arc-search-priority-rules'.")
+
+(defun arc-search--validate-priority-rule (rule)
+  "Validate and return one explicit priority RULE.
+A rule's query and source matcher values are strings, its boost is positive,
+and all matchers on the rule are ANDed.  Signal a descriptive error for
+unknown keys or malformed data so a typo cannot silently alter ranking."
+  (unless (and (listp rule) (zerop (% (length rule) 2)))
+    (error "arc: priority rule must be an even-length plist: %S" rule))
+  (let ((allowed (append '(:query :boost) arc-search--priority-matcher-keys)))
+    (cl-loop for (key _value) on rule by #'cddr
+             unless (memq key allowed)
+             do (error "arc: unknown priority rule key %S" key)))
+  (let ((query (plist-get rule :query))
+        (boost (plist-get rule :boost)))
+    (unless (and (stringp query) (not (string-empty-p query)))
+      (error "arc: priority rule :query must be a non-empty regexp: %S" query))
+    (condition-case err
+        (string-match-p query "")
+      (invalid-regexp
+       (error "arc: priority rule :query is not a valid regexp %S: %s"
+              query (error-message-string err))))
+    (unless (and (numberp boost) (> boost 0))
+      (error "arc: priority rule :boost must be positive: %S" boost)))
+  (unless (cl-some (lambda (key) (plist-member rule key))
+                   arc-search--priority-matcher-keys)
+    (error "arc: priority rule needs a source matcher: %S" rule))
+  (dolist (key arc-search--priority-matcher-keys)
+    (when (plist-member rule key)
+      (unless (and (stringp (plist-get rule key))
+                   (not (string-empty-p (plist-get rule key))))
+        (error "arc: priority rule %S matcher must be a non-empty string: %S"
+               key (plist-get rule key)))))
+  rule)
+
+(defun arc-search--priority-source-match-p (rule doc)
+  "Return non-nil when every source matcher in RULE matches DOC."
+  (cl-every
+   (lambda (key)
+     (if-let ((want (and (plist-member rule key) (plist-get rule key))))
+         (let ((have (plist-get doc (if (eq key :path-prefix) :path key))))
+           (if (eq key :path-prefix)
+               (and have (string-prefix-p want have))
+             (equal want have)))
+       t))
+   arc-search--priority-matcher-keys))
+
+(defun arc-search--priority-boost (query doc rules)
+  "Return the sum of RULES' boosts matching QUERY and DOC."
+  (cl-loop for rule in rules
+           when (and (string-match-p (plist-get rule :query) query)
+                     (arc-search--priority-source-match-p rule doc))
+           sum (plist-get rule :boost)))
+
+(defun arc-search--apply-priority-rules (query docs)
+  "Apply explicit priority boosts to DOCS for QUERY, before limiting.
+When `arc-search-priority-rules' is nil, return DOCS unchanged.  Otherwise
+validate all rules first, add matching boosts, and use the existing fully
+deterministic document comparator (score, chunk count, best rank, source id).
+The original score is retained as `:retrieval-score' whenever a boost was
+applied so callers can explain why a result moved."
+  (if (null arc-search-priority-rules)
+      docs
+    (let* ((rules (mapcar #'arc-search--validate-priority-rule
+                          arc-search-priority-rules))
+           (changed nil)
+           (adjusted
+            (mapcar
+             (lambda (doc)
+               (let ((boost (arc-search--priority-boost query doc rules)))
+                 (if (and boost (> boost 0))
+                     (progn
+                       (setq changed t)
+                       (let ((copy (copy-sequence doc)))
+                         (plist-put copy :retrieval-score (plist-get doc :score))
+                         (plist-put copy :priority-boost boost)
+                         (plist-put copy :score (+ (plist-get doc :score) boost))
+                         copy))
+                   doc)))
+             docs)))
+      (if changed
+          (sort adjusted #'arc-rollup--better-p)
+        docs))))
 
 (defun arc-search--minimum-pool (scope)
   "Return the shallowest pool that could yield `arc-search-limit' documents.
@@ -187,23 +296,28 @@ reimplemented here."
 (defun arc-search-documents (query &optional scope arm)
   "Search for QUERY in SCOPE, returning at most `arc-search-limit' documents.
 
-SCOPE takes any shape `arc-ask-normalize-scope' accepts; nil means
+SCOPE takes any shape `arc-scope-normalize' accepts; nil means
 `arc-enabled-collections'.  ARM is passed through to
 `arc--find-similar': `keyword' skips the embedding call entirely and is
 what the live-typing stage uses, nil or `fused' is the full hybrid.
 
 `arc-reranker-enabled' is bound off for the duration.  The reranker's
 limit would otherwise truncate the pool through `arc-get-limit' before
-rollup ever sees it, and the reranker is out of scope for search -- the
-seam stays exactly as it is for `arc-ask'."
-  (let* ((scope (arc-ask-normalize-scope scope))
+rollup ever sees it, and the provider-agnostic reranker seam remains
+separate from document search."
+  (let* ((scope (arc-scope-normalize scope))
          (pool (arc-search--effective-pool scope))
          (arc-reranker-enabled nil)
          (arc-knn-candidates pool)
          (arc-limit pool)
-         (rows (sqlite-select (arc-db) (arc--find-similar query scope arm t))))
-    (take arc-search-limit
-          (arc-search--hydrate (arc-rollup (arc-search--attach-sources rows))))))
+         (rows (sqlite-select (arc-db) (arc--find-similar query scope arm t)))
+         (docs (arc-search--hydrate
+                (arc-rollup (arc-search--attach-sources rows)))))
+    ;; Priority rules are a display-layer personalization applied before the
+    ;; final document limit.  This keeps an explicitly pinned source able to
+    ;; enter the result set while leaving the measured retrieval pool and eval
+    ;; ranker untouched.
+    (take arc-search-limit (arc-search--apply-priority-rules query docs))))
 
 (provide 'arc-search)
 ;;; arc-search.el ends here

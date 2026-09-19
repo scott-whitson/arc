@@ -105,15 +105,17 @@ not get."
 
 ;;; Run ---------------------------------------------------------------------
 
-(ert-deftest ae2-run-never-calls-the-chat-model ()
-  "Retrieval only, by design: a run must stay fast and deterministic."
-  (let ((model-called nil))
-    (cl-letf (((symbol-function 'arc-answer-request)
-               (lambda (&rest _) (setq model-called t)))
-              ((symbol-function 'arc-eval--retrieve)
-               (lambda (&rest _) '((:kind "nix-option" :option-name "services.example.enable")))))
-      (arc-eval-run (arc-eval-read-set ae2-sample))
-      (should-not model-called))))
+(ert-deftest ae2-run-uses-retrieval-only-results ()
+  "Retrieval-only runs consume the retrieval result for each question."
+  (let ((retrieved 0))
+    (cl-letf (((symbol-function 'arc-eval--retrieve)
+               (lambda (&rest _)
+                 (setq retrieved (1+ retrieved))
+                 '((:kind "nix-option" :option-name "services.example.enable")))))
+      (let* ((set (arc-eval-read-set ae2-sample))
+             (results (arc-eval-run set)))
+        (should (= retrieved (length results)))
+        (should (= retrieved (length set)))))))
 
 (ert-deftest ae2-run-reports-hits-and-misses ()
   (cl-letf (((symbol-function 'arc-eval--retrieve)
@@ -134,3 +136,17 @@ not get."
       (let ((arc-eval-k '(5 10 25)))
         (arc-eval-run (arc-eval-read-set ae2-sample)))
       (should (= asked 25)))))
+
+(ert-deftest ae2-document-recall-ignores-priority-rules ()
+  "Eval measures baseline retrieval, never explicit display personalization."
+  (let (seen)
+    (cl-letf (((symbol-function 'arc-search-documents)
+               (lambda (&rest _)
+                 (setq seen arc-search-priority-rules)
+                 '((:kind "file" :path "/tmp/expected.nix")))))
+      (let ((arc-search-priority-rules
+             '((:query "q" :path-prefix "/tmp" :boost 100)))
+            (set '((:question "q"
+                    :expect ((:kind "file" :path "/tmp/expected.nix"))))))
+        (should (= 1.0 (arc-eval-document-recall set 1)))
+        (should (null seen))))))

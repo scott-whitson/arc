@@ -66,7 +66,9 @@ order and the tests do not flake."
         (ca (plist-get a :chunk-count)) (cb (plist-get b :chunk-count)))
     (cond ((/= sa sb) (> sa sb))
           ((/= ca cb) (> ca cb))
-          (t (< (plist-get a :best-rank) (plist-get b :best-rank))))))
+          ((/= (plist-get a :best-rank) (plist-get b :best-rank))
+           (< (plist-get a :best-rank) (plist-get b :best-rank)))
+          (t (< (plist-get a :source-id) (plist-get b :source-id))))))
 
 (defun arc-rollup (chunks)
   "Group CHUNKS into ranked documents.

@@ -175,3 +175,58 @@ this reason."
                      (sqlite-select db (format "SELECT rowid FROM data_embeddings WHERE embedding MATCH %s AND k = %d;"
                                               q (1+ arc-vec0-k-ceiling))
                                     nil 'set))))))
+
+;;; --- the scope entry points now live here ---------------------------------
+;;
+;; `arc-ask-normalize-scope' was defined in arc.el and named for `arc-ask', a
+;; command that is being removed.  The retrieval consumers need the
+;; normalizer before that deletion, so it moved down here rather than dying
+;; with the answer path.  `arc-enabled-collections' came with it: the
+;; function's only other dependency, and a scope concept in its own right.
+
+(ert-deftest as-normalize-accepts-all-three-shapes ()
+  "nil, a bare list of names, and a scope plist."
+  (let ((arc-enabled-collections '("vault")))
+    (should (equal (arc-scope-normalize nil)
+                   (arc-scope :collections '("vault")))))
+  (should (equal (arc-scope-normalize '("vault" "home"))
+                 (arc-scope :collections '("vault" "home"))))
+  (let ((plist (arc-scope :collections '("home"))))
+    (should (equal (arc-scope-normalize plist) plist))))
+
+(ert-deftest as-normalize-is-reachable-without-loading-arc ()
+  "arc-scope.el loads without loading arc.el.
+This is a separate batch Emacs because this suite requires `arc' above for
+its database fixtures; checking `featurep' in this process would therefore
+only prove the test file's load order."
+  (let ((emacs (or (executable-find invocation-name) invocation-name))
+        (probe (concat
+                "(progn "
+                "(require 'arc-scope) "
+                "(if (and (featurep 'arc-scope) "
+                "         (fboundp 'arc-scope-normalize) "
+                "         (boundp 'arc-enabled-collections) "
+                "         (not (featurep 'arc))) "
+                "    (princ \"ok\") "
+                "  (kill-emacs 2)))")))
+    (with-temp-buffer
+      (should (= (call-process emacs nil (list t t) nil
+                               "-Q" "-batch" "-L" as-root
+                               "--eval" probe)
+                 0))
+      ;; Emacs 31 may print obsolete-macro warnings from `arc-scope.el'
+      ;; before the probe's sentinel.  The sentinel must still be the final
+      ;; non-whitespace output; warnings are not a failed probe.
+      (should (string-suffix-p "ok" (string-trim (buffer-string)))))))
+
+(ert-deftest as-old-normalize-name-is-obsolete-not-gone ()
+  "This package is public; a moved function keeps a deprecation path."
+  (should (fboundp 'arc-ask-normalize-scope))
+  (should (get 'arc-ask-normalize-scope 'byte-obsolete-info))
+  (let ((arc-enabled-collections '("vault")))
+    (should (equal (arc-ask-normalize-scope nil)
+                   (arc-scope :collections '("vault")))))
+  (should (equal (arc-ask-normalize-scope '("vault" "home"))
+                 (arc-scope :collections '("vault" "home"))))
+  (let ((scope (arc-scope :collections '("home"))))
+    (should (equal (arc-ask-normalize-scope scope) scope))))

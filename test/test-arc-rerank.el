@@ -10,6 +10,25 @@
 (require 'arc)
 (require 'arc-test-helpers)
 
+(ert-deftest ar-reranker-function-dispatches-with-prompt-and-ids ()
+  "A configured provider receives the query and candidate ids directly."
+  (let (received)
+    (let ((arc-reranker-function
+           (lambda (prompt ids)
+             (setq received (list prompt ids))
+             '(7 3))))
+      (should (equal (arc-rerank "question" '(1 2 3)) '(7 3))))
+    (should (equal received '("question" (1 2 3))))))
+
+(ert-deftest ar-reranker-enabled-selects-reranker-limit ()
+  "Enabling the reranker changes the candidate budget, not arc-limit."
+  (let ((arc-limit 4)
+        (arc-reranker-limit 12))
+    (let ((arc-reranker-enabled nil))
+      (should (= (arc-get-limit) 4)))
+    (let ((arc-reranker-enabled t))
+      (should (= (arc-get-limit) 12)))))
+
 (ert-deftest ar-request-body-selects-the-chunk-column ()
   "`data' has had no `data' column since the schema rewrite.  The
 reranker asked for one anyway, and nothing noticed for two phases

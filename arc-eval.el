@@ -165,7 +165,7 @@ is to measure what arc does, not a reimplementation of it.  ARM is
 passed to `arc--find-similar': nil for the real fused query, `semantic'
 or `keyword' to measure one arm alone."
   (let* ((arc-limit k)
-         (scope (arc-ask-normalize-scope scope))
+         (scope (arc-scope-normalize scope))
          (sql (arc--find-similar question scope arm))
          (ids (arc--retrieve-ids sql question)))
     (mapcar #'arc-row-to-source (arc--retrieve-rows ids))))
@@ -254,6 +254,10 @@ never a chunk."
     (dolist (q set)
       (setq n (1+ n))
       (let* ((arc-search-limit k)
+             ;; Explicit priority rules are presentation personalization, not
+             ;; retrieval quality.  Eval must always measure the baseline
+             ;; ranker, even when an operator has configured boosts.
+             (arc-search-priority-rules nil)
              (docs (arc-search-documents (plist-get q :question)
                                          (plist-get q :scope)
                                          arm)))

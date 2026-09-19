@@ -15,9 +15,14 @@ usage() {
   cat >&2 <<'USAGE'
 usage: arc <command> [options]
 
-  arc search QUERY [--scope NAME] [--limit N] [--arm keyword|fused] [--json]
+  arc search QUERY [--scope NAME] [--collection NAME ...] [--kind KIND ...]
+             [--tag TAG ...] [--path-prefix PREFIX] [--limit N]
+             [--arm keyword|fused] [--json]
+  arc preview SOURCE_ID [--limit N] [--json]
   arc scopes [--json]
   arc stats  [--json]
+  arc lifecycle [--limit N] [--json]
+  arc mcp                         # newline-delimited JSON-RPC over stdio
 
 Exit: 0 ok, 1 error, 2 emacs daemon not running.
 USAGE
@@ -70,6 +75,8 @@ command -v emacsclient >/dev/null 2>&1 || die "emacsclient not found on PATH"
 cmd="$1"; shift
 
 query=""; scope=""; limit=""; arm="nil"; json=0
+scope_set=0
+collections=(); kinds=(); tags=(); path_prefix=""; path_prefix_set=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --scope)
@@ -78,12 +85,32 @@ while [ $# -gt 0 ]; do
       # `set -e' is in effect to catch the failing shift), so `$#' never
       # decreases and the `while [ $# -gt 0 ]' loop above spins forever.
       [ $# -ge 2 ] || die "--scope needs a value"
-      scope="$2"; shift 2 ;;
+      [ "$scope_set" -eq 0 ] || die "--scope may be specified only once"
+      scope="$2"; scope_set=1; shift 2 ;;
+    --collection|--kind|--tag|--path-prefix)
+      [ $# -ge 2 ] || die "$1 needs a value"
+      case "$2" in
+        ''|*$'\n'*|*$'\r'*) die "$1 needs a non-empty single-line value" ;;
+      esac
+      case "$1" in
+        --collection) collections+=("$2") ;;
+        --kind)
+          case "$2" in
+            file|info|org-node|nix-option|hm-option) kinds+=("$2") ;;
+            *) die "--kind must be file, info, org-node, nix-option, or hm-option" ;;
+          esac ;;
+        --tag) tags+=("$2") ;;
+        --path-prefix)
+          [ "$path_prefix_set" -eq 0 ] || die "--path-prefix may be specified only once"
+          path_prefix="$2"; path_prefix_set=1 ;;
+      esac
+      shift 2 ;;
     --limit)
       [ $# -ge 2 ] || die "--limit needs a value"
       case "$2" in
         ''|*[!0-9]*) die "--limit must be a positive integer, got: $2" ;;
       esac
+      [ "$2" -gt 0 ] || die "--limit must be a positive integer, got: $2"
       limit="$2"; shift 2 ;;
     --arm)
       [ $# -ge 2 ] || die "--arm needs a value"
@@ -104,13 +131,62 @@ elisp_string() {
   printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
 }
 
+elisp_list() {
+  local item out="("
+  for item in "$@"; do
+    out+=" $(elisp_string "$item")"
+  done
+  out+=")"
+  printf '%s' "$out"
+}
+
+filter_form="nil"
+filter_parts=()
+if [ "${#collections[@]}" -gt 0 ]; then
+  filter_parts+=(":collections $(elisp_list "${collections[@]}")")
+fi
+if [ "${#kinds[@]}" -gt 0 ]; then
+  filter_parts+=(":kinds $(elisp_list "${kinds[@]}")")
+fi
+if [ "${#tags[@]}" -gt 0 ]; then
+  filter_parts+=(":tags $(elisp_list "${tags[@]}")")
+fi
+if [ "$path_prefix_set" -eq 1 ]; then
+  filter_parts+=(":path-prefix $(elisp_string "$path_prefix")")
+fi
+if [ "${#filter_parts[@]}" -gt 0 ]; then
+  filter_form="(${filter_parts[*]})"
+fi
+
 case "$cmd" in
   search)
     [ -n "$query" ] || die "search needs a query"
-    form="(decode-coding-string (progn (require 'arc-tool) (arc-tool-search $(elisp_string "$query") $( [ -n "$scope" ] && elisp_string "$scope" || printf nil ) ${limit:-nil} $arm)) 'utf-8)"
+    form="(decode-coding-string (progn (require 'arc-tool) (arc-tool-search-filtered $(elisp_string "$query") $( [ -n "$scope" ] && elisp_string "$scope" || printf nil ) ${limit:-nil} $arm $filter_form)) 'utf-8)"
     ;;
   scopes) form="(decode-coding-string (progn (require 'arc-tool) (arc-tool-scopes)) 'utf-8)" ;;
+  preview)
+    case "$query" in
+      ''|*[!0-9]*) die "preview needs a positive integer SOURCE_ID" ;;
+    esac
+    [ "$query" -gt 0 ] || die "preview needs a positive integer SOURCE_ID"
+    form="(decode-coding-string (progn (require 'arc-tool) (arc-tool-preview $query ${limit:-nil})) 'utf-8)"
+    ;;
   stats)  form="(decode-coding-string (progn (require 'arc-tool) (arc-tool-stats)) 'utf-8)" ;;
+  lifecycle) form="(decode-coding-string (progn (require 'arc-tool) (arc-tool-lifecycle ${limit:-nil})) 'utf-8)" ;;
+  mcp)
+    # MCP stdio is one JSON-RPC object per line. The Emacs dispatcher returns
+    # nil for notifications, so those produce no stdout line as required.
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      # A notification makes the Lisp dispatcher return nil. Wrap that as an
+      # empty string before emacsclient prints it, because printing Emacs's
+      # literal `nil' would put a non-JSON line on stdout and desynchronise
+      # every subsequent MCP message in this persistent loop.
+      form="(let ((response (progn (require 'arc-tool) (arc-tool-mcp-dispatch $(elisp_string "$line")))) (if response (decode-coding-string response 'utf-8) \"\"))"
+      out=$(evaluate "$form") || exit $?
+      [ -n "$out" ] && printf '%s\n' "$out"
+    done
+    exit 0 ;;
   --help|-h) usage ;;
   *) die "unknown command: $cmd" ;;
 esac
@@ -129,7 +205,9 @@ else
       # once per passage, repeating the header for every matched line.
       search) printf '%s' "$out" | jq -r '.results[] | "\(.path // .option_name // .info_node)  [\(.chunks) match(es), score \(.score|.*1000|round/1000)]", (.passages[] | "    \(.line_start // "-"): \(.text | gsub("[ \t\n]+"; " ") | .[0:160])")' ;;
       scopes) printf '%s' "$out" | jq -r '.scopes[] | "\(.name)  (\(.chunks) chunks)"' ;;
-      stats)  printf '%s' "$out" | jq -r '"chunks: \(.chunks)  sources: \(.sources)", (.kinds[] | "  \(.kind): \(.chunks)"), (.collections[] | "  \(.collection): \(.sources) source(s), \(.chunks) chunk(s), last indexed \(if .last_indexed_at then (.last_indexed_at|strflocaltime("%Y-%m-%d %H:%M")) else "never" end)"), (.freshness[] | "  \(.collection): \(.state)")' ;;
+      preview) printf '%s' "$out" | jq -r '"source \(.source_id)  \(.kind)  \(.source_link)", (.passages[] | "    \(.line_start // "-"): \(.text | gsub("[ \\t\\n]+"; " ") | .[0:160])")' ;;
+      stats)  printf '%s' "$out" | jq -r '"chunks: \(.chunks)  sources: \(.sources)", (.kinds[] | "  \(.kind): \(.chunks)"), (.collections[] | "  \(.collection)  \(.provenance // "")  (\(.sources) source(s), \(.chunks) chunk(s), last indexed \(if .last_indexed_at then (.last_indexed_at|strflocaltime("%Y-%m-%d %H:%M")) else "never" end))"), (.freshness[] | "  \(.collection): \(.state)")' ;;
+      lifecycle) printf '%s' "$out" | jq -r '"read-only: \(.read_only)  limit: \(.limit)", "missing file sources: \(.missing_file_sources.count)", "stale/absent freshness: \(.freshness.count)", "phantom sources: \(.phantom_sources.count)", "orphan data rows: \(.orphan_data.count)"' ;;
     esac
   else
     printf '%s\n' "$out"

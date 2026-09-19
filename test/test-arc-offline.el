@@ -25,13 +25,11 @@ localhost:11434 and the optional reranker's POST to 127.0.0.1 are
 both loopback-only and are intentionally left alone -- do not add
 them here.")
 
-(defconst ao-policed-files '("arc.el" "arc-ui.el" "arc-answer.el")
+(defconst ao-policed-files '("arc.el")
   "Files scanned for `ao-forbidden' identifiers.
-Used to be `arc.el' alone; `arc-ui.el' and `arc-answer.el' also talk
-to the model or render into the answer buffer and were entirely
-unpoliced by this guard, which is exactly the kind of place a
-reintroduced network dependency (an ellama-style chat package, say)
-would show up first.")
+The deleted answer and UI modules no longer need listing here; all live
+ARC code is covered by scanning `arc.el' and the dedicated no-back-glue
+absence tests.")
 
 (ert-deftest ao-no-network-identifiers ()
   (dolist (file ao-policed-files)

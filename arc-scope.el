@@ -53,17 +53,17 @@ nothing -- nil itself is exactly this, the empty plist, and means the
 whole corpus.
 
 :all exists because nil is ambiguous to some callers even though it
-is unambiguous here: `arc-ask-normalize-scope' treats a bare nil
-SECOND ARGUMENT to `arc-ask' as \"caller specified no scope, use
-`arc-enabled-collections'\" -- a different meaning than this
-function's own \"restricts nothing\". `(arc-scope :all t)' is a
+is unambiguous here: `arc-scope-normalize' treats a bare nil
+SECOND ARGUMENT to a public retrieval entry point as \"caller specified no
+scope, use `arc-enabled-collections'\" -- a different meaning than
+this function's own \"restricts nothing\". `(arc-scope :all t)' is a
 non-nil plist whose first element is a keyword, so it passes straight
-through `arc-ask-normalize-scope' unchanged, while still restricting
+through `arc-scope-normalize' unchanged, while still restricting
 nothing: `arc-scope-empty-p' still reports it empty, because :all
 names no actual restriction for `arc-scope-predicate' to compile. It
-is the one value a caller of `arc-ask' can pass to unambiguously mean
-\"the whole corpus\", which is what `arc-scope-presets''s
-\"everything\" entry uses."
+is the one value a caller can pass to unambiguously mean \"the whole
+corpus\", which is what `arc-scope-presets''s \"everything\" entry
+uses."
   keys)
 
 (defun arc-scope-empty-p (scope)
@@ -157,12 +157,12 @@ silently pick a wrong retrieval strategy rather than error."
     ("vault"      . (:collections ("vault")))
     ("options"    . (:collections ("nix options" "hm options")))
     ("home"       . (:collections ("home"))))
-  "Named scopes offered by `arc-ui-change-scope'.
+  "Named scopes offered by interactive search.
 Each entry is (NAME . SCOPE-PLIST).  \"everything\" is `(:all t)'
 rather than nil: see `arc-scope''s docstring for why a bare nil here
-would not survive `arc-ask-normalize-scope' as \"the whole corpus\".
-These are the scopes a reader can reach from inside an answer;
-`arc-ask' itself accepts any scope plist.
+would not survive `arc-scope-normalize' as \"the whole corpus\".
+These are the scopes a reader can reach from the search surface; public
+retrieval entry points accept any scope plist.
 
 A preset naming a collection that `arc-index-plan' does not build
 matches nothing and signals nothing -- the query simply returns no
@@ -243,10 +243,40 @@ option, whatever it costs."
 
 (defun arc-scope-from-collections (collections)
   "Return a scope restricting to COLLECTIONS, or an empty scope for nil.
-Callers that hold a plain list of collection names -- `arc-ask' with
-its documented list argument, `arc-enabled-collections' -- go through
-here rather than building a plist inline."
+Callers that hold a plain list of collection names, including
+`arc-enabled-collections', go through here rather than building a plist
+inline."
   (if collections (arc-scope :collections collections) (arc-scope)))
+
+(defcustom arc-enabled-collections '("builtin manuals")
+  "Collections searched when a caller names no scope of its own.
+Moved here from `arc.el' with `arc-scope-normalize', which is its only
+consumer: a collection set IS a scope, and keeping the two in separate
+files meant `arc-scope.el' could not answer the simplest scope question
+without a forward declaration.
+
+A name here that is not in `arc-index-plan' yields a scope matching
+nothing, silently -- see `arc-scope-presets' for the same trap."
+  :type '(repeat string) :group 'arc)
+
+(defun arc-scope-normalize (scope)
+  "Return SCOPE as a scope plist.
+Accepts three shapes, because the public entry points that call this
+documented their scope argument as a plain list of collection names
+before scope plists existed:
+  nil                     -- `arc-enabled-collections'
+  (\"vault\" \"home\")        -- those collections
+  (:collections (\"vault\")) -- a scope plist, used as-is
+A list of strings is unambiguous here: a scope plist's first element
+is always a keyword."
+  (cond
+   ((null scope) (arc-scope-from-collections arc-enabled-collections))
+   ((keywordp (car scope)) scope)
+   (t (arc-scope-from-collections scope))))
+
+(define-obsolete-function-alias 'arc-ask-normalize-scope
+  #'arc-scope-normalize "2026-09-18"
+  "Renamed: this compatibility alias preserves the former public name.")
 
 (provide 'arc-scope)
 ;;; arc-scope.el ends here

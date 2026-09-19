@@ -18,6 +18,7 @@
 
 (require 'cl-lib)
 (require 'arc-search)
+(require 'arc-scope)
 (require 'arc-source)
 
 (defconst arc-search-results-buffer-name "*arc-search*"
@@ -118,7 +119,7 @@ looking at to splice into rather than having to reconstruct it."
 (defun arc-search-show (query &optional scope)
   "Search for QUERY in SCOPE and show the results buffer."
   (interactive "sarc search: ")
-  (let ((scope (arc-ask-normalize-scope scope)))
+  (let ((scope (arc-scope-normalize scope)))
     (arc-search-render (arc-search-documents query scope) query scope)
     (display-buffer arc-search-results-buffer-name)))
 
@@ -394,7 +395,7 @@ consult's own standard behaviour, not a bug here.  \\<minibuffer-local-map>
 \\[arc-search-to-buffer] sends the whole result set to the results
 buffer."
     (interactive)
-    (let* ((scope (arc-ask-normalize-scope scope))
+    (let* ((scope (arc-scope-normalize scope))
            (arc-search--session-scope scope)
            (doc (consult--read
                  (consult--dynamic-collection
