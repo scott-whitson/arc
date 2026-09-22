@@ -815,7 +815,7 @@ prune against."
       ;; Record what this collection was built FROM, when that is the
       ;; freshness signal. Cheap, and it is what lets `arc-freshness-report'
       ;; answer for 37,780 derived sources with one string comparison.
-      (when-let ((prov (arc-collection-provenance-now (cdr cell))))
+      (when-let* ((prov (arc-collection-provenance-now (cdr cell))))
         (arc-set-collection-provenance name prov))
       (cond
        ((eq kept arc--reindex-skipped) nil) ; already reported; nothing to prune

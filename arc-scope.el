@@ -91,20 +91,20 @@ The expression is written against the aliases `d' (`data') and `s'
 (`sources'), which the caller must provide.  An empty scope compiles
 to \"1\", so a caller never needs a special case for it."
   (let (parts)
-    (when-let ((cols (plist-get scope :collections)))
+    (when-let* ((cols (plist-get scope :collections)))
       (push (format "d.collection_id IN (SELECT id FROM collections WHERE name IN %s)"
                     (arc-sqlite-format-string-list cols))
             parts))
-    (when-let ((kinds (plist-get scope :kinds)))
+    (when-let* ((kinds (plist-get scope :kinds)))
       (push (format "s.kind IN %s" (arc-sqlite-format-string-list kinds)) parts))
-    (when-let ((tags (plist-get scope :tags)))
+    (when-let* ((tags (plist-get scope :tags)))
       (push (format "(%s)"
                     (mapconcat (lambda (tag)
                                  (format "s.tags LIKE '%%:%s:%%' ESCAPE '\\'"
                                          (arc--scope-like-literal tag)))
                                tags " OR "))
             parts))
-    (when-let ((prefix (plist-get scope :path-prefix)))
+    (when-let* ((prefix (plist-get scope :path-prefix)))
       (push (format "s.path LIKE '%s%%' ESCAPE '\\'" (arc--scope-like-literal prefix)) parts))
     (if parts (string-join (nreverse parts) " AND ") "1")))
 
@@ -146,10 +146,10 @@ silently pick a wrong retrieval strategy rather than error."
       "everything"
     (string-join
      (delq nil
-           (list (when-let ((c (plist-get scope :collections))) (string-join c ", "))
-                 (when-let ((k (plist-get scope :kinds))) (concat "kinds " (string-join k ", ")))
-                 (when-let ((tg (plist-get scope :tags))) (concat "tags " (string-join tg ", ")))
-                 (when-let ((p (plist-get scope :path-prefix))) (concat "under " p))))
+           (list (when-let* ((c (plist-get scope :collections))) (string-join c ", "))
+                 (when-let* ((k (plist-get scope :kinds))) (concat "kinds " (string-join k ", ")))
+                 (when-let* ((tg (plist-get scope :tags))) (concat "tags " (string-join tg ", ")))
+                 (when-let* ((p (plist-get scope :path-prefix))) (concat "under " p))))
      "; ")))
 
 (defcustom arc-scope-presets

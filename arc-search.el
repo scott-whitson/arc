@@ -61,7 +61,7 @@ outside the retrieval eval path.
 
 Example:
 
-  '((:query \"disk layout\" :path-prefix \"ioshi/\" :boost 100))
+  \='((:query \"disk layout\" :path-prefix \"/srv/notes/ioshi/\" :boost 100))
 
 The default nil leaves the measured retrieval order unchanged.
 Malformed rules signal an error naming the invalid field rather than being
@@ -113,7 +113,7 @@ unknown keys or malformed data so a typo cannot silently alter ranking."
   "Return non-nil when every source matcher in RULE matches DOC."
   (cl-every
    (lambda (key)
-     (if-let ((want (and (plist-member rule key) (plist-get rule key))))
+     (if-let* ((want (and (plist-member rule key) (plist-get rule key))))
          (let ((have (plist-get doc (if (eq key :path-prefix) :path key))))
            (if (eq key :path-prefix)
                (and have (string-prefix-p want have))

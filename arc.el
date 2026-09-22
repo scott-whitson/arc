@@ -328,9 +328,9 @@ keyword arm skips that work entirely.
 SCORED, when non-nil, adds a second column to every row: the score the
 ranking already computed.  It is additive on purpose -- the standard
 retrieval and evaluation paths consume the single-column shape, so the
-default return must not move.  For the single-arm cases, which have a rank but no RRF
-score, the score is `1.0 / (arc-rrf-k + rank)': the same shape and the
-same magnitude as a one-sided fused score."
+default return must not move.  For the single-arm cases, which have a rank
+but no RRF score, the score is `1.0 / (arc-rrf-k + rank)': the same shape
+and the same magnitude as a one-sided fused score."
   ;; For collection scoping specifically, the previous version's inlined
   ;; `rowid IN (...)' filter was already effective in practice: SQLite
   ;; inlines a CTE referenced exactly once and pushes that IN-list into
@@ -545,7 +545,7 @@ When FORCE parse even if already parsed."
           (dolist (text chunks)
             (let* ((hash (secure-hash 'sha256 text))
 		   (rowid
-		    (if-let ((rowid (caar (sqlite-select
+		    (if-let* ((rowid (caar (sqlite-select
 					   (arc-db)
 					   (format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';"
 						   kind-id collection-id
