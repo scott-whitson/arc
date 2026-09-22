@@ -86,3 +86,75 @@ time, not a giant file checked into the repo."
             (should (cl-every (lambda (c) (<= (plist-get c :line-start) (plist-get c :line-end)))
                               chunks))))
       (delete-directory dir t))))
+
+;;; The `#+id:' keyword fallback
+
+;; A file's id can live in a `#+id:' keyword instead of an `:ID:' property
+;; drawer. `org-entry-get' cannot see a keyword, so before the fallback those
+;; files indexed as nothing at all -- and, worse, silently: an empty
+;; collection looks the same as a collection whose documents do not exist.
+
+(defun ao2-write-org (dir name content)
+  "Write CONTENT to NAME inside DIR and return the file's path."
+  (let ((path (expand-file-name name dir)))
+    (with-temp-file path (insert content))
+    path))
+
+(defmacro ao2-with-org-file (content &rest body)
+  "Call BODY with the path of a temp org file holding CONTENT.
+BODY is evaluated with `ao2-file' bound to that path, and the temp
+directory is removed afterwards."
+  (declare (indent 1))
+  `(let ((dir (make-temp-file "arc-org-id" t)))
+     (unwind-protect
+         (let ((ao2-file (ao2-write-org dir "page.org" ,content)))
+           ,@body)
+       (delete-directory dir t))))
+
+(ert-deftest ao2-file-node-falls-back-to-the-id-keyword ()
+  (ao2-with-org-file "#+title: A page\n#+id: keyword-only-id\n\nbody\n"
+    (let* ((nodes (arc-org-nodes-in-file ao2-file))
+           (node (car nodes)))
+      (should (= (length nodes) 1))
+      (should (equal (plist-get node :org-id) "keyword-only-id"))
+      (should (equal (plist-get node :title) "A page")))))
+
+(ert-deftest ao2-the-drawer-id-wins-over-the-keyword ()
+  (ao2-with-org-file (concat ":PROPERTIES:\n:ID: drawer-id\n:END:\n"
+                             "#+title: A page\n#+id: keyword-id\n\nbody\n")
+    (let* ((nodes (arc-org-nodes-in-file ao2-file))
+           (node (car nodes)))
+      (should (= (length nodes) 1))
+      (should (equal (plist-get node :org-id) "drawer-id")))))
+
+(ert-deftest ao2-an-empty--id-keyword-is-not-an-id ()
+  (dolist (blank '("" "   "))
+    (ao2-with-org-file (format "#+title: A page\n#+id:%s\n\nbody\n" blank)
+      (should (null (arc-org-nodes-in-file ao2-file))))))
+
+(ert-deftest ao2-a-file-with-neither-drawer-nor-keyword-produces-no-node ()
+  (ao2-with-org-file "#+title: A page\n\nbody\n"
+    (should (null (arc-org-nodes-in-file ao2-file)))))
+
+(ert-deftest ao2-keyword-fallback-does-not-invent-ids-for-headings ()
+  "The keyword is file-level only; a heading still needs its own `:ID:'."
+  (ao2-with-org-file (concat "#+title: A page\n#+id: file-id\n\n"
+                             "* Plain heading with no id\n\ntext\n")
+    (let ((nodes (arc-org-nodes-in-file ao2-file)))
+      (should (= (length nodes) 1))
+      (should (equal (plist-get (car nodes) :org-id) "file-id")))))
+
+(ert-deftest ao2-a-keyword-inside-a-block-is-not-the-file-id ()
+  "A note that DOCUMENTS the syntax must not lend the file an id.
+`org-mode' reads this line as block content, so arc must not read it as a
+keyword -- a fabricated id is a citation target that resolves to nothing."
+  (ao2-with-org-file (concat "#+title: A page\n\n"
+                             "#+begin_src org\n#+id: documented-not-real\n#+end_src\n\n"
+                             "body\n")
+    (should (null (arc-org-nodes-in-file ao2-file)))))
+
+(ert-deftest ao2-a-keyword-after-a-headline-is-not-the-file-id ()
+  "File-level keywords live in the header; one inside a section is not the file's."
+  (ao2-with-org-file (concat "#+title: A page\n\n* A heading\n\n"
+                             "#+id: section-not-file\n\nbody\n")
+    (should (null (arc-org-nodes-in-file ao2-file)))))

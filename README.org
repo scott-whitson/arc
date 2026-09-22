@@ -93,7 +93,10 @@ provenance, indexing times, and freshness; ~lifecycle~ is a read-only report
 of missing, stale, phantom, and orphaned records. The typed search filters
 (~--collection~, ~--kind~, ~--tag~, and ~--path-prefix~) are compiled into an
 intersection, not a free-form query language; an ambiguous preset/filter
-combination is rejected rather than broadened silently.
+combination is rejected rather than broadened silently. ~--path-prefix~ takes
+an *absolute* path, because stored paths are absolute: a relative prefix is
+refused rather than answered with an empty result set that reads as "no such
+document".
 
 ~mcp~ starts a local stdio MCP server. It exposes the same five read-only
 operations -- search, preview, scopes, stats, and lifecycle -- to an MCP
@@ -412,7 +415,9 @@ validated typed flags and to the MCP ~arc_search~ tool:
 + ~:kinds~ -- a list of source kinds (~"file"~, ~"info"~, ~"org-node"~,
   ~"nix-option"~, ~"hm-option"~).
 + ~:tags~ -- a list of org tags, matched colon-delimited and colon-anchored.
-+ ~:path-prefix~ -- a directory or path prefix string.
++ ~:path-prefix~ -- an absolute directory or path prefix string. Sources
+  store absolute paths, so a relative prefix matches nothing. ~bin/arc~
+  refuses a relative ~--path-prefix~ for that reason.
 
 ~(arc-scope :collections '("vault") :tags '("infra"))~ combines restrictions
 with AND. ~arc-scope-normalize~ accepts nil (use the enabled collections),
@@ -441,9 +446,12 @@ syncthing questions without changing the underlying retrieval scores:
 #+begin_src elisp
 (setopt arc-search-priority-rules
         '((:query "syncthing"
-           :path-prefix "ioshi/i-intelligence/"
+           :path-prefix "/srv/notes/ioshi/i-intelligence/"
            :boost 1000)))
 #+end_src
+
+An absolute prefix, like every other path prefix: sources store absolute
+paths, so a relative one matches nothing.
 
 The rule is a display preference, not an authority claim: source provenance,
 freshness, and the retrieved-data trust boundary still apply.
@@ -463,6 +471,10 @@ arc lifecycle --json
 
 ~bin/arc search~ returns ranked documents, matching passages, a stable
 ~source_id~, source identity, and an explicit retrieved-data trust marker.
+Every result also carries the source's ~tags~ as an array -- empty rather than
+null when a source has none -- so a caller that filtered by tag can see which
+of its hits actually carried that tag instead of inferring it from the filter
+it sent.
 ~preview~ follows that identifier to bounded source metadata and passages;
 callers should search first and preview only the sources they need. ~scopes~
 enumerates the names instead of making a caller guess. ~stats~ reports corpus

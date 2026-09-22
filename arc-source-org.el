@@ -22,6 +22,17 @@
 ;; carrying their live original's :ID: -- walked in unfiltered, those
 ;; duplicate ids make `[[id:...]]' citations ambiguous, which is exactly
 ;; the capability this file exists to deliver.
+;;
+;; A file's id may also appear as a `#+id:' KEYWORD, and arc reads that
+;; as a fallback.  The keyword is not an org-property, so
+;; `org-entry-get' never returns it; a tree that carries only the
+;; keyword therefore indexed as nothing at all, silently -- 22 files in
+;; this machine's notes tree were in exactly that state, including every
+;; page of a published website whose template prints the id from
+;; `#+id:' into the page footer, which is why the keyword is there and
+;; why it is stable enough to cite by.  The property drawer remains the
+;; real thing: when both are present the drawer wins, because a drawer
+;; is what org itself resolves `[[id:...]]' links against.
 ;;; Code:
 
 (require 'org)
@@ -42,6 +53,51 @@
   (let ((raw (arc--org-file-keyword "filetags")))
     (and raw (split-string raw ":" t))))
 
+(defun arc--org-header-keyword (key)
+  "Return file-level #+KEY from the header region, or nil.
+
+The header is everything before the first headline.  A match inside a
+source, example or export block does not count either: `org-mode' reads
+such a line as block CONTENT, not as a keyword, so a note that documents
+the `#+id:' syntax would otherwise lend the file an id it does not have
+-- and a fabricated id is a citation target that resolves to nothing.
+
+`arc--org-file-keyword' is deliberately left naive: it also serves
+`title' and `filetags', where a stricter read would change the titles of
+notes that are already indexed."
+  (save-restriction
+    (save-excursion
+      (goto-char (point-min))
+      (when (re-search-forward "^\\*+ " nil t)
+        (narrow-to-region (point-min) (match-beginning 0)))
+      ;; Point is past the new point-max after narrowing -- the headline
+      ;; match ended there -- so it must be reset before searching, or the
+      ;; keyword search starts at the end of the restriction and finds
+      ;; nothing.  (This is the bug the suite caught when the narrowing was
+      ;; first added; the naive `arc--org-file-keyword' never had it because
+      ;; it does its own `goto-char'.)
+      (goto-char (point-min))
+      (let ((pattern (format "^#\\+%s:[ \t]*\\(.*\\)$" (regexp-quote key)))
+            value)
+        (while (and (not value) (re-search-forward pattern nil t))
+          (unless (org-in-block-p '("src" "example" "export" "comment" "verse"))
+            (setq value (string-trim (match-string-no-properties 1)))))
+        value))))
+
+(defun arc--org-file-id ()
+  "Return the current buffer's file-level org id, or nil.
+The `:ID:' property drawer is the real id and wins when present.  The
+`#+id:' keyword is accepted as a fallback for trees that carry the id
+that way -- see this file's Commentary.  An empty or whitespace-only
+value is treated as no id rather than indexed as one, so a stub keyword
+left behind by a template cannot put an empty string in a citation."
+  (let ((drawer (org-entry-get (point-min) "ID"))
+        (keyword (arc--org-header-keyword "id")))
+    (or (and (stringp drawer)
+             (not (string-empty-p (string-trim drawer)))
+             (string-trim drawer))
+        (and keyword (not (string-empty-p keyword)) keyword))))
+
 (defun arc--org-node-chunks (text)
   "Return TEXT as a list of chunk plists, splitting it if it is oversized.
 `arc-chunk-text' (arc-chunk.el) keeps a small node -- the overwhelming
@@ -54,10 +110,12 @@ a vector describing only a couple of percent of its actual content."
   (arc-chunk-text text))
 
 (defun arc--org-file-node (path)
-  "Return the file-level node plist for PATH, or nil if it has no ID."
+  "Return the file-level node plist for PATH, or nil if it has no id.
+The id comes from `arc--org-file-id', so either the `:ID:' drawer or the
+`#+id:' keyword qualifies; a file with neither produces no node."
   (save-excursion
     (goto-char (point-min))
-    (let ((id (org-entry-get (point-min) "ID")))
+    (let ((id (arc--org-file-id)))
       (when id
         (let ((text (buffer-substring-no-properties (point-min) (point-max))))
           (list :kind "org-node" :org-id id :path path

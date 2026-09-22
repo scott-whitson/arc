@@ -83,12 +83,32 @@ source code or prompt policy.")
   "Return a fresh JSON-serialisable trust marker for retrieved text."
   (copy-sequence arc-tool--trust-metadata))
 
-(defun arc-tool--document-json (doc)
+(defun arc-tool--tags-by-source (docs)
+  "Return a hash of source id -> org tags for the documents in DOCS.
+A caller that filtered a search by `:tags' has no other way to see WHICH
+of the returned documents matched the tier it asked for: the tags are on
+the source, and the document plist `arc-search-documents' returns is
+built from retrieval columns that do not include them.  Resolved once
+per result set so the formatter stays a formatter; each lookup is a
+primary-key read of `sources', and the count is the number of documents
+the caller asked for, not the number of chunks behind them."
+  (let ((table (make-hash-table :test #'eql)))
+    (dolist (id (delete-dups
+                 (delq nil (mapcar (lambda (d) (plist-get d :source-id))
+                                   docs))))
+      (puthash id (plist-get (arc-source-get id) :tags) table))
+    table))
+
+(defun arc-tool--document-json (doc &optional tags-by-source)
   "Return DOC as a JSON-serialisable plist.
 The stable `:source_id' is the source identity, not a transient chunk id;
 callers can pass it to `arc-tool-preview' to retrieve more context without
-re-running ranking.  Priority metadata is included only when a configured
-rule moved this document, preserving the legacy shape when rules are nil."
+re-running ranking.  TAGS-BY-SOURCE is `arc-tool--tags-by-source''s hash,
+and `:tags' is always a JSON array -- empty rather than null when the
+source carries no tags -- so a caller never has to tell `no tags' from
+`tags not reported'.  Priority metadata is included only when a
+configured rule moved this document, preserving the legacy shape when
+rules are nil."
   (let* ((base (list :source_id (or (plist-get doc :source-id) :null)
                      :path (or (plist-get doc :path) :null)
                      :kind (or (plist-get doc :kind) :null)
@@ -99,6 +119,9 @@ rule moved this document, preserving the legacy shape when rules are nil."
                      :score (plist-get doc :score)
                      :best_rank (or (plist-get doc :best-rank) :null)
                      :chunks (plist-get doc :chunk-count)
+                     :tags (vconcat (and tags-by-source
+                                         (gethash (plist-get doc :source-id)
+                                                  tags-by-source)))
                      :trust (arc-tool--trust-json)))
          (passages (vconcat
                     (mapcar (lambda (p)
@@ -228,7 +251,16 @@ boundary for both in-Emacs callers and `bin/arc'."
           (pcase key
             (:path-prefix
              (unless (and (stringp value) (not (string-empty-p value)))
-               (error "arc: path-prefix must be a non-empty string")))
+               (error "arc: path-prefix must be a non-empty string"))
+             ;; Sources store ABSOLUTE paths and the predicate is a prefix
+             ;; match on that column, so a relative prefix matches nothing --
+             ;; silently, and indistinguishably from a prefix whose documents
+             ;; genuinely do not exist.  Refused for the same reason `bin/arc'
+             ;; refuses it: the tool surface is the primary caller here, so a
+             ;; trap closed only in the CLI would still be open where it
+             ;; matters most.
+             (unless (string-prefix-p "/" value)
+               (error "arc: path-prefix must be an absolute path, got %S (stored paths are absolute; a relative prefix matches nothing)" value)))
             (_
              (unless (and (listp value) value
                           (cl-every (lambda (v) (and (stringp v)
@@ -272,7 +304,8 @@ legacy in-Emacs callers retain `semantic' without widening the CLI."
          (limit (arc-tool--search-limit limit))
          (arc-search-limit limit)
          (start (float-time))
-         (docs (arc-search-documents query scope arm)))
+         (docs (arc-search-documents query scope arm))
+         (tags (arc-tool--tags-by-source docs)))
     (json-serialize
      (list :query query
            :scope (or scope-name "default")
@@ -281,7 +314,9 @@ legacy in-Emacs callers retain `semantic' without widening the CLI."
            :arm (symbol-name arm)
            :elapsed_ms (round (* 1000 (- (float-time) start)))
            :count (length docs)
-           :results (vconcat (mapcar #'arc-tool--document-json docs))))))
+           :results (vconcat (mapcar (lambda (d)
+                                      (arc-tool--document-json d tags))
+                                    docs))))))
 
 (defun arc-tool-search-filtered (query &optional scope-name limit arm filters)
   "Search QUERY with preset SCOPE-NAME intersected by typed FILTERS.

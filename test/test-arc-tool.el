@@ -57,7 +57,41 @@
                                              10 'keyword)))
           (result (car (alist-get 'results out))))
      (should (= (length (alist-get 'results out)) 1))
-     (should (equal (alist-get 'org_id result) "org-node-42")))))
+     (should (equal (alist-get 'org_id result) "org-node-42"))))
+
+;; A caller that filtered a search by tag cannot otherwise tell WHICH of the
+;; returned documents carried the tag it asked for: tags live on the source,
+;; and the document the search returns is built from retrieval columns.  So
+;; `:tags' is part of the result shape, and it is an ARRAY either way -- a
+;; caller must not have to read null as "no tags" and absent as "not
+;; reported" when those are different answers.
+
+(ert-deftest att-search-results-carry-the-source-tags ()
+  (arc-test-with-temp-db
+   (arc-index-source
+    '(:kind "org-node" :org-id "tagged-1" :title "A tagged note"
+      :tags ("basic")
+      :chunks ((:text "tier token" :line-start 1 :line-end 1)))
+    "test")
+   (let* ((arc-rollup-function 'max)
+          (out (att--parse (arc-tool-search "tier token" "everything"
+                                            10 'keyword)))
+          (result (car (alist-get 'results out))))
+     (should (equal (alist-get 'tags result) '("basic"))))))
+
+(ert-deftest att-search-results-report-an-empty-tags-array-not-null ()
+  (arc-test-with-temp-db
+   (arc-index-source
+    '(:kind "file" :path "/tmp/untagged.txt"
+      :chunks ((:text "untagged token" :line-start 1 :line-end 1)))
+    "test")
+   (let* ((arc-rollup-function 'max)
+          (json (arc-tool-search "untagged token" "everything" 10 'keyword))
+          (result (car (alist-get 'results (att--parse json)))))
+     ;; Both an empty array and null read back as nil through `json-read',
+     ;; so the array-ness has to be asserted on the wire form itself.
+     (should (null (alist-get 'tags result)))
+     (should (string-match-p "\"tags\":\[\]" json))))))
 
 (defun att--filter-fixtures ()
   "Index sources covering every typed filter dimension."
@@ -166,8 +200,19 @@ and fused so its wire contract is explicit."
                      (:tags (""))
                      (:path-prefix 42)
                      (:path-prefix "")
+                     (:path-prefix "docs/relative")
                      (:unknown ("x"))))
     (should-error (arc-tool-search-filtered "x" nil 10 'keyword filters))))
+
+(ert-deftest att-a-relative-path-prefix-is-refused-not-answered-with-nothing ()
+  "The CLI refuses a relative prefix; the tool surface must not stay silent.
+The predicate is a LIKE against a column holding absolute paths, so a
+relative prefix matches nothing -- and an empty result set is
+indistinguishable from one whose documents genuinely do not exist."
+  (let ((err (should-error
+              (arc-tool-search-filtered "x" nil 10 'keyword
+                                        '(:path-prefix "docs/relative")))))
+    (should (string-match-p "absolute" (error-message-string err)))))
 
 (ert-deftest att-filtered-search-escapes-literal-path-prefixes ()
   "Percent, underscore and backslash are literals, not LIKE wildcards."

@@ -16,7 +16,7 @@ usage() {
 usage: arc <command> [options]
 
   arc search QUERY [--scope NAME] [--collection NAME ...] [--kind KIND ...]
-             [--tag TAG ...] [--path-prefix PREFIX] [--limit N]
+             [--tag TAG ...] [--path-prefix ABSOLUTE-PATH] [--limit N]
              [--arm keyword|fused] [--json]
   arc preview SOURCE_ID [--limit N] [--json]
   arc scopes [--json]
@@ -102,6 +102,16 @@ while [ $# -gt 0 ]; do
         --tag) tags+=("$2") ;;
         --path-prefix)
           [ "$path_prefix_set" -eq 0 ] || die "--path-prefix may be specified only once"
+          # Stored paths are absolute, and the filter is a LIKE on that
+          # column, so a relative prefix matches NOTHING -- silently, and
+          # indistinguishably from a prefix whose documents genuinely do
+          # not exist. Refuse it here, where the mistake is still visible,
+          # rather than return an empty result set that reads as "no such
+          # document".
+          case "$2" in
+            /*) ;;
+            *) die "--path-prefix must be an absolute path, got: $2 (stored paths are absolute; a relative prefix matches nothing)" ;;
+          esac
           path_prefix="$2"; path_prefix_set=1 ;;
       esac
       shift 2 ;;
@@ -155,7 +165,11 @@ if [ "$path_prefix_set" -eq 1 ]; then
   filter_parts+=(":path-prefix $(elisp_string "$path_prefix")")
 fi
 if [ "${#filter_parts[@]}" -gt 0 ]; then
-  filter_form="(${filter_parts[*]})"
+  # `quote` is load-bearing: this form goes to `emacsclient --eval', which
+  # EVALUATES it.  Unquoted, the plist's leading keyword lands in function
+  # position and every typed filter dies with
+  # "Symbol's function definition is void: :tags".
+  filter_form="(quote (${filter_parts[*]}))"
 fi
 
 case "$cmd" in

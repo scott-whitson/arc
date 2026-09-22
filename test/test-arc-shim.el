@@ -132,6 +132,29 @@ Return (STATUS . OUTPUT), OUTPUT being combined stdout+stderr."
     (should (= (car result) 1))
     (should (string-match-p "keyword.*fused\\|fused.*keyword" (cdr result)))))
 
+;; `--path-prefix' compiles to a LIKE against the absolute `sources.path'
+;; column, so a relative prefix can only ever match nothing -- silently, and
+;; indistinguishably from a prefix whose documents genuinely do not exist.
+;; Rejecting it at parse time is the difference between a caller learning
+;; their mistake and a caller concluding the corpus lacks the document.
+
+(ert-deftest ash-shim-rejects-a-relative---path-prefix ()
+  (let ((result (ash-shim-call '("search" "foo" "--path-prefix" "docs/org"))))
+    (should (= (car result) 1))
+    (should (string-match-p "absolute" (cdr result)))))
+
+(ert-deftest ash-shim-accepts-an-absolute---path-prefix ()
+  "An absolute prefix must survive validation and reach the daemon stage.
+The socket is forced dead so this never touches the operator's real
+daemon: exit 2 is itself the proof, since a rejected prefix would have
+exited 1 before any `emacsclient' call was made."
+  (let* ((process-environment
+          (cons "EMACS_SOCKET_NAME=/nonexistent/arc-no-such-socket"
+                process-environment))
+         (result (ash-shim-call '("search" "foo" "--path-prefix" "/tmp"))))
+    (should (= (car result) 2))
+    (should (string-match-p "daemon not running" (cdr result)))))
+
 ;; Important 4: the shim must not misreport a genuine Lisp error signalled
 ;; by the daemon as a dead daemon. `case' patterns are unanchored and
 ;; first-match-wins in shell, so an unanchored `*"could not"*' branch can
