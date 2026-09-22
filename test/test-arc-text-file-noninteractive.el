@@ -213,5 +213,46 @@ decode successfully no matter how much further is read."
                                    (make-string 8 ?a))
       (should-not (arc--text-file-p f)))))
 
+;;; --- Fix round 3: the same query reached through `secure-hash' -----
+;;
+;; `arc-file-hash' read the file literally and handed the buffer to
+;; `secure-hash', which ENCODES the buffer to hash it -- and that consults
+;; `select-safe-coding-system'.  A literal read leaves every high byte as
+;; an eight-bit character, so the silent choice is `raw-text'; when the
+;; file also carries a coding cookie saying utf-8 the two disagree, and
+;; Emacs QUERIES.  Live: an HTML template with a `<meta charset>' cookie
+;; and a dangling multi-byte sequence stopped a whole dotfiles reindex in
+;; batch, and in the daemon it would have blocked the session on a modal
+;; minibuffer instead.
+;;
+;; The query is NOT used as this suite's fixture, and the reason is worth
+;; recording: a file this process has just written does not provoke it,
+;; while byte-identical content written by another process does -- so an
+;; in-process fixture cannot reproduce the failure, and only a subprocess
+;; could.  The test below pins the mechanism instead, exactly as
+;; `atn-no-prompt-on-provocative-content' pins its guarantee rather than a
+;; reproduced prompt: during hashing the selector in force is arc's own.
+
+(ert-deftest atn-hashing-pins-the-coding-system-selector ()
+  "`arc-file-hash' must choose the coding system itself, not inherit one.
+The default selector asks the user when its choice conflicts with the
+file's coding cookie, which is fatal to an unattended walk; and a caller
+supplying one would change the hash of the same file between runs, which
+is what a change-detection hash must never do."
+  (atn-with-temp-file f "ordinary text\n"
+    ;; `let*', not `let': under lexical binding a lambda created in a
+    ;; parallel `let' initializer does not capture that `let''s own
+    ;; bindings, so `setq' inside the advice would write the global `seen'
+    ;; while the assertion below read the lexical one.
+    (let* ((seen 'unset)
+           (probe (lambda (orig &rest args)
+                    (setq seen select-safe-coding-system-function)
+                    (apply orig args))))
+      (advice-add 'secure-hash :around probe)
+      (unwind-protect
+          (should (stringp (arc-file-hash f)))
+        (advice-remove 'secure-hash probe))
+      (should (eq seen 'arc-file-hash-coding-system)))))
+
 (provide 'test-arc-text-file-noninteractive)
 ;;; test-arc-text-file-noninteractive.el ends here

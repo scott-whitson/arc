@@ -382,11 +382,42 @@ files are read once for the whole walk rather than once per candidate."
     (seq-filter (lambda (file) (arc--file-indexable-p file directory ignore-regexps))
                 (directory-files-recursively directory ".*"))))
 
+(defun arc-file-hash-coding-system (&rest _)
+  "Coding system `arc-file-hash' hashes with.
+A named function rather than a lambda on purpose: Emacs requires
+`select-safe-coding-system-function' to hold a SYMBOL, and rejects a
+closure with `wrong-type-argument symbolp'."
+  'utf-8-unix)
+
 (defun arc-file-hash (path)
-  "Return the SHA-1 of PATH's contents."
+  "Return the SHA-1 of PATH's contents.
+
+The read is literal, so every high byte arrives as an eight-bit
+character, and `secure-hash' then ENCODES the buffer to hash it -- which
+consults `select-safe-coding-system'.  That function normally chooses
+silently, but it QUERIES the user when its choice is inconsistent with
+what `find-auto-coding' would take from the file's own coding cookie
+(`<meta charset=...>', `-*- coding: -*-').  A query is fatal to an
+unattended walk: in the daemon it blocks the session on a modal
+minibuffer, and in batch Emacs it dies with `end-of-file', reading an
+answer from a stdin nothing is attached to.  Found live: one HTML template
+carrying a `<meta charset>' cookie stopped a whole dotfiles reindex
+part-way through.
+
+This is the second instance of the class here -- `arc--text-file-p' was
+the first, and `test-arc-text-file-noninteractive.el' records it.  The
+rule both fixes encode: a corpus walk must never let Emacs choose a
+coding system on its own.
+
+The selector is pinned rather than defaulted so the hash of a given file
+is the same in every context that computes it.  Its job is change
+detection, not byte identity, and pinning reproduces the values already
+stored: measured against 12 readable sampled sources, 11 hashed
+identically and the one that differed had changed on disk."
   (with-temp-buffer
     (insert-file-contents-literally path)
-    (secure-hash 'sha1 (current-buffer))))
+    (let ((select-safe-coding-system-function #'arc-file-hash-coding-system))
+      (secure-hash 'sha1 (current-buffer)))))
 
 (defun arc-file-source (path)
   "Return the source plist for the single file PATH.
