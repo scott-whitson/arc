@@ -145,26 +145,37 @@ Returns the collection it was indexed into, or nil.  Only `file' and
 (defun arc-watch-sweep ()
   "Examine the next `arc-watch-sweep-batch' mutable sources and refresh drift.
 Bounded and resumable: this runs on an idle timer, and a sweep that
-rehashed 656 files in one tick would be felt."
+rehashed 656 files in one tick would be felt.
+
+Does nothing at all while a minibuffer is active.  An idle timer FIRES
+during a prompt -- that is what idle means -- so without this the sweep
+runs underneath someone else's question and collides with it.  Observed
+live: a save prompt raised by another tool, the sweep starting under it,
+and the abort landing in this function's handler, which reported it as
+`arc: sweep failed (Save aborted)'.  That is an arc failure message for
+something that was not arc's failure, and it is why a background prompt
+read as arc asking a question.  The timer repeats, so returning here
+simply means the next idle period retries."
   (interactive)
-  (condition-case err
-      (let* ((paths (arc-watch--mutable-paths))
-             (n (length paths)))
-        (when (> n 0)
-          (when (>= arc-watch--sweep-offset n) (setq arc-watch--sweep-offset 0))
-          (let ((batch (seq-take (nthcdr arc-watch--sweep-offset paths)
-                                 arc-watch-sweep-batch))
-                (refreshed 0))
-            (dolist (path batch)
-              (when (and (file-readable-p path) (arc-file-changed-p path))
-                (when (arc-watch-reindex-path path :quiet)
-                  (setq refreshed (1+ refreshed)))))
-            (setq arc-watch--sweep-offset (+ arc-watch--sweep-offset (length batch)))
-            (when (> refreshed 0)
-              (message "arc: refreshed %d changed source%s" refreshed
-                       (if (= 1 refreshed) "" "s")))
-            refreshed)))
-    (error (message "arc: sweep failed (%s)" (error-message-string err)) nil)))
+  (unless (active-minibuffer-window)
+    (condition-case err
+        (let* ((paths (arc-watch--mutable-paths))
+               (n (length paths)))
+          (when (> n 0)
+            (when (>= arc-watch--sweep-offset n) (setq arc-watch--sweep-offset 0))
+            (let ((batch (seq-take (nthcdr arc-watch--sweep-offset paths)
+                                   arc-watch-sweep-batch))
+                  (refreshed 0))
+              (dolist (path batch)
+                (when (and (file-readable-p path) (arc-file-changed-p path))
+                  (when (arc-watch-reindex-path path :quiet)
+                    (setq refreshed (1+ refreshed)))))
+              (setq arc-watch--sweep-offset (+ arc-watch--sweep-offset (length batch)))
+              (when (> refreshed 0)
+                (message "arc: refreshed %d changed source%s" refreshed
+                         (if (= 1 refreshed) "" "s")))
+              refreshed)))
+      (error (message "arc: sweep failed (%s)" (error-message-string err)) nil))))
 
 ;;;###autoload
 (define-minor-mode arc-watch-mode

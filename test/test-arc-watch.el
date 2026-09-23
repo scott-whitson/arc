@@ -205,3 +205,21 @@ still wrong -- which is exactly the state the corpus was in."
              (should (= 0 (caar (sqlite-select
                                  (arc-db) "SELECT count(*) FROM sources;")))))))
       (delete-directory home t))))
+
+;;; --- A sweep must not run inside someone else's prompt --------------
+
+(ert-deftest awa-sweep-does-nothing-while-a-minibuffer-is-active ()
+  "An idle timer fires DURING a prompt -- that is what idle means -- so the
+sweep has to refuse to start while one is up.  Observed live: the sweep
+fired under a save prompt raised by another tool, the abort that followed
+landed in the sweep's own handler, and it was reported as `arc: sweep
+failed (Save aborted)'.  An arc failure message for a failure that was not
+arc's is exactly what made a background prompt read as arc asking a
+question."
+  (awa-with-corpus
+    (let ((reached nil))
+      (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () t))
+                ((symbol-function 'arc-watch--mutable-paths)
+                 (lambda () (setq reached t) nil)))
+        (should (null (arc-watch-sweep)))
+        (should (null reached))))))
