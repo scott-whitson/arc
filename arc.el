@@ -89,8 +89,7 @@
   '(arc-parse-file
     arc-parse-directory
     arc-remove-collection
-    arc-add-file-to-collection
-    arc-recalculate-embeddings)
+    arc-add-file-to-collection)
   "Functions still written against the pre-`sources' schema.
 Task 4 replaced `data(path, hash, data)' and dropped the `files' table;
 these have not been rewritten yet.  Task 11 owns that work and deletes
@@ -99,11 +98,13 @@ Task 10 rewrote it as a pure function (see `arc-source-info.el') and
 removed its guard.  The old query-and-context function that fed the
 former prose path was here too, until Task 11 rewrote its query across
 `data' and `sources' (see `arc--retrieve-rows' below) and removed its
-guard.  The remaining five are collection-management and bulk-reindex
-functions that `arc-index.el''s `arc-index-source' and
-`arc-reindex-all' already supersede; migrating them is not required to
-prove the corpus real or to serve retrieval, so they stay guarded.
-This list may only shrink.")
+guard.  `arc-recalculate-embeddings' was here too, until it was ported
+to `data(chunk)' and enabled, because changing the embedding provider
+to a model of another dimension has no other supported path.  The
+remaining four are collection-management functions that
+`arc-index.el''s `arc-index-source' and `arc-reindex-all' already
+supersede; migrating them is not required to prove the corpus real or
+to serve retrieval, so they stay guarded.  This list may only shrink.")
 
 (defun arc--not-yet-migrated (fn)
   "Signal that FN has not been ported to the `sources' schema."
@@ -1050,29 +1051,42 @@ It does nothing if buffer file not inside one of existing collections."
       collection-id))))
 
 (defun arc-recalculate-embeddings ()
-  "Recalculate and save new embeddings after embedding provider change."
-  (arc--not-yet-migrated 'arc-recalculate-embeddings)
-  (sqlite-execute (arc-db) "DELETE FROM data WHERE data = '';") ;; remove rows without data
-  (let* ((data-rows (sqlite-select (arc-db) "SELECT rowid, data FROM data;"))
-	 (texts (mapcar #'cadr data-rows))
-	 (rowids (mapcar #'car data-rows))
-	 (embeddings (arc-embeddings texts))
-	 (len (length rowids))
-	 (i 0))
-    ;; Recreate embeddings table
-    (sqlite-execute (arc-db) (arc-data-embeddings-drop-table-sql))
-    (sqlite-execute (arc-db) (arc-data-embeddings-create-table-sql))
-    ;; Recalculate embeddings
-    (with-sqlite-transaction (arc-db)
-      (while (< i len)
-	(let ((rowid (nth i rowids))
-	      (embedding (nth i embeddings)))
-	  (sqlite-execute
-	   (arc-db)
-	   (format "INSERT INTO data_embeddings(rowid, embedding) VALUES (%s, %s);"
-		   rowid (arc-vector-to-sqlite embedding)))
-	  (setq i (1+ i)))))))
+  "Drop and rebuild every embedding for the current provider.
 
+Changing `arc-embeddings-provider' to a model of a different
+dimension cannot be done by reindexing alone: `data_embeddings' is a
+vec0 table created at a fixed width (`arc-embedding-size'), and
+`CREATE VIRTUAL TABLE IF NOT EXISTS' never re-creates it, so the old
+table rejects the new vectors and every insert fails.  This drops the
+table, re-creates it at the current width, and re-embeds every stored
+chunk from its text.  No file is re-read and no chunk is rewritten --
+the embedding is the only thing that changes.
+
+Set `arc-embedding-size' to the new model's dimension first, or the
+inserts fail against the re-created table exactly as they would have
+against the old one.
+
+Embedding runs a batch at a time and each batch is committed on its
+own, so a corpus of hundreds of thousands of chunks need not hold
+every vector in memory at once.  `arc-async-recalculate-embeddings'
+runs this in a child process so Emacs is not blocked for the
+duration."
+  (interactive)
+  (sqlite-execute (arc-db) "DELETE FROM data WHERE chunk IS NULL OR chunk = '';")
+  (sqlite-execute (arc-db) (arc-data-embeddings-drop-table-sql))
+  (sqlite-execute (arc-db) (arc-data-embeddings-create-table-sql))
+  (dolist (batch (seq-partition
+                  (sqlite-select (arc-db) "SELECT id, chunk FROM data;")
+                  arc-batch-size))
+    (let ((vecs (arc-embeddings (mapcar #'cadr batch)))
+          (i 0))
+      (with-sqlite-transaction (arc-db)
+        (while (< i (length batch))
+          (sqlite-execute
+           (arc-db)
+           (format "INSERT INTO data_embeddings(rowid, embedding) VALUES (%s, %s);"
+                   (car (nth i batch)) (arc-vector-to-sqlite (nth i vecs))))
+          (setq i (1+ i)))))))
 ;;;###autoload
 (defun arc-async-recalculate-embeddings ()
   "Recalculate embeddings asynchronously."

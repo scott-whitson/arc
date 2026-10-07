@@ -9,7 +9,7 @@
 (require 'arc)
 (require 'arc-test-helpers)
 
-(ert-deftest am-unmigrated-list-has-exactly-five-entries ()
+(ert-deftest am-unmigrated-list-has-exactly-four-entries ()
   "This list may only shrink as functions are migrated off the
 pre-`sources' schema.  If it grows, or a migrated entry is left in
 it, this test should be the thing that says so -- update the expected
@@ -19,8 +19,12 @@ now a pure function returning an alist, with its SQL moved to Task
 the query-and-context path that fed arc's former chat buffer (its
 query now joins `data' to `sources' via `arc--retrieve-rows'),
 dropping the count from 6 to 5 -- before Task 6 deleted that whole
-path outright, functions and all, once `arc-ask' replaced it."
-  (should (= (length arc--unmigrated-functions) 5)))
+path outright, functions and all, once `arc-ask' replaced it.
+`arc-recalculate-embeddings' was ported to `data(chunk)' and enabled,
+because changing the embedding provider to a model of another
+dimension has no other supported path, dropping the count from 5 to
+4."
+  (should (= (length arc--unmigrated-functions) 4)))
 
 (ert-deftest am-unmigrated-functions-still-exist ()
   "Every guarded symbol must still be a real function.
@@ -37,8 +41,7 @@ naming the owning task, rather than with a raw SQL error."
   '((arc-parse-file . (1 "x"))
     (arc-parse-directory . ("x"))
     (arc-remove-collection . ())
-    (arc-add-file-to-collection . ("x" "y"))
-    (arc-recalculate-embeddings . ()))
+    (arc-add-file-to-collection . ("x" "y")))
   "Dummy arguments, matching each guarded function's arity, used only
 to reach the `arc--not-yet-migrated' call at the top of its body.
 Values are never used -- the guard must signal before anything reads

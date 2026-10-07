@@ -121,6 +121,16 @@ configure another, potentially remote, embedding provider. The optional
 reranker is a separate service and is disabled by default. Keyword-only
 retrieval skips embedding calls.
 
+Changing ~arc-embeddings-provider~ to a model of a *different dimension*
+is not a matter of reindexing. ~data_embeddings~ is a vec0 table created
+at a fixed width (~arc-embedding-size~), and ~CREATE VIRTUAL TABLE IF NOT
+EXISTS~ never re-creates it, so the old table rejects vectors of the new
+width and every insert fails. Set ~arc-embedding-size~ to the new model's
+dimension and run ~M-x arc-recalculate-embeddings~ (or ~M-x
+arc-async-recalculate-embeddings~ to run it in a child process): it drops
+and re-creates the table at the new width and re-embeds every stored chunk
+from its text, re-reading no file.
+
 ** Installation
 
 You need Emacs 29.2 or newer to run arc at all. Loading the ~vec0~
@@ -260,6 +270,11 @@ ollama pull nomic-embed-text
 
 Set ~arc-embeddings-provider~ if the machine uses another provider. No
 chat model is installed or contacted by ARC.
+
+If the new model has a different embedding dimension, set
+~arc-embedding-size~ to match and run ~M-x arc-recalculate-embeddings~
+before the first search; see [[Models]]. A reindex alone cannot do it,
+because the vec0 table keeps the width it was first created with.
 
 *** 2. Point arc at your own files, not the author's
 

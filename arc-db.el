@@ -36,8 +36,12 @@
 (defcustom arc-embedding-size 768
   "Dimension of the embedding vectors arc stores.
 Must match the embedding model.  nomic-embed-text is 768.  Changing
-this requires reindexing, because the vec0 table is created with a
-fixed width."
+this to a different model's dimension is not a matter of reindexing:
+`data_embeddings' is a vec0 table created at a fixed width, and
+`CREATE VIRTUAL TABLE IF NOT EXISTS' never re-creates it, so the old
+table rejects the new vectors.  Set this to the model's dimension and
+run `arc-recalculate-embeddings', which drops and re-creates the table
+at this width and re-embeds every chunk."
   :type 'integer :group 'arc)
 
 (defcustom arc-sqlite-vec-path (getenv "ARC_VEC0_PATH")
