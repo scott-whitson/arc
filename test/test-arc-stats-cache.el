@@ -9,6 +9,7 @@
 (arc-test-ensure-vec0-or-skip!)
 (require 'arc)
 (require 'arc-index)
+(require 'arc-tool)
 (require 'arc-test-helpers)
 
 (defmacro asc-with-counted-stats (var &rest body)
@@ -86,3 +87,30 @@ or a batch job -- which the generation counter alone would miss."
     (cl-letf (((symbol-function 'arc--delete-from-table) (lambda (&rest _) nil)))
       (arc--delete-data '(1 2 3))
       (should (> arc-index--write-generation before)))))
+
+(ert-deftest asc-tool-stats-uses-both-caches ()
+  "`arc-tool-stats' is what an MCP client polls; neither expensive half
+may re-run inside the TTL.  The GROUP BY behind `:kinds' and the
+per-source re-hash behind `:freshness' are both counted here, and the
+shape stays the same."
+  (let ((arc-index--stats-cache nil)
+        (arc--freshness-cache nil)
+        (arc-index-stats-cache-ttl 60)
+        (arc-freshness-cache-ttl 60)
+        (stats-calls 0)
+        (freshness-calls 0))
+    (cl-letf (((symbol-function 'arc-index-stats)
+               (lambda () (setq stats-calls (1+ stats-calls))
+                 '(("file" . 7))))
+              ((symbol-function 'arc-freshness-report)
+               (lambda () (setq freshness-calls (1+ freshness-calls))
+                 '(("test" file fresh nil)))))
+      (arc-test-with-temp-db
+       (let ((first (arc-tool-stats))
+             (second (arc-tool-stats)))
+         (should (= stats-calls 1))
+         (should (= freshness-calls 1))
+         ;; the output shape is unchanged: same two calls, same keys
+         (should (equal first second))
+         (should (string-match-p "kinds" first))
+         (should (string-match-p "freshness" first)))))))

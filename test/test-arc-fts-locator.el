@@ -87,3 +87,52 @@ rebuild silently changes what is searchable."
     (let ((before arc-index--write-generation))
       (arc-index-rebuild-fts)
       (should (> arc-index--write-generation before)))))
+
+;;; --- the FTS expression builder -----------------------------------------
+;;
+;; `arc-fts-query' used to strip every double quote and OR-join the words,
+;; so a quoted phrase was silently answered as "its words, anywhere".  It
+;; now keeps an FTS5 phrase, and refuses an unbalanced quote outright
+;; rather than dropping it and answering a different query.
+
+(defmacro afl-with-fts-chunks (chunks &rest body)
+  "Index CHUNKS, a list of (TEXT . PATH), as one-chunk file sources, then BODY."
+  (declare (indent 1))
+  `(let ((arc-embedding-size 3))
+     (arc-test-with-temp-db
+      (cl-letf (((symbol-function 'llm-embedding) (lambda (_p _t) [0.1 0.2 0.3])))
+        (dolist (cell ',chunks)
+          (arc-index-source
+           (list :kind "file" :path (cdr cell)
+                 :chunks (list (list :text (car cell) :line-start 1 :line-end 1)))
+           "test"))
+        ,@body))))
+
+(ert-deftest afl-a-quoted-phrase-matches-adjacency-not-either-word ()
+  "The quote asks for adjacency; the OR-join cannot express it."
+  (afl-with-fts-chunks (("disk layout plan" . "/tmp/adjacent.txt")
+                        ("the disk needs a layout" . "/tmp/scattered.txt"))
+    ;; both chunks contain the two words, so an OR-join matches both
+    (should (= 2 (length (afl--fts-search "disk layout"))))
+    ;; only the adjacent pair is a phrase match
+    (let ((ids (afl--fts-search "\"disk layout\"")))
+      (should (= 1 (length ids)))
+      (should (equal (caar (sqlite-select
+                            (arc-db)
+                            (format "SELECT chunk FROM data WHERE id = %d;" (car ids))))
+                     "disk layout plan")))))
+
+(ert-deftest afl-an-unbalanced-quote-names-the-query ()
+  (let ((prompt "disk \"layout"))
+    (let ((err (condition-case e
+                   (progn (arc-fts-query prompt) nil)
+                 (user-error e))))
+      (should err)
+      ;; `%S' renders the quote escaped, so compare the whole rendered
+      ;; message rather than a substring of the raw prompt.
+      (should (equal (error-message-string err)
+                     (format-message "arc: unmatched double quote in query %S" prompt))))))
+
+(ert-deftest afl-an-unquoted-query-is-still-or-joined ()
+  "The measured default must not move: unquoted words stay OR'd."
+  (should (equal (arc-fts-query "How do the") "how OR do OR the")))

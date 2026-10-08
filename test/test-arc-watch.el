@@ -12,7 +12,11 @@
 (require 'arc-test-helpers)
 
 (defmacro awa-with-corpus (&rest body)
-  "A temp db plus a real directory arc indexes, bound to `dir' and `f'."
+  "A temp db plus a real directory arc indexes, bound to `dir' and `f'.
+Binds `arc-watch-async' to nil: these tests assert on the database
+immediately after a reindex call, so they are exactly the scripted
+callers the synchronous path exists for.  The non-blocking behaviour has
+its own test below."
   (declare (indent 0))
   `(let* ((arc-embedding-size 3)
           (dir (make-temp-file "awa" t))
@@ -20,7 +24,8 @@
      (unwind-protect
          (arc-test-with-temp-db
           (let ((arc-collection-directory-alist (list (cons "docs" dir)))
-                (arc-index-plan '(("docs" . file))))
+                (arc-index-plan '(("docs" . file)))
+                (arc-watch-async nil))
             (with-temp-file f (insert "first version"))
             (cl-letf (((symbol-function 'llm-embedding) (lambda (_p _t) [0.1 0.2 0.3])))
               ,@body)))
@@ -87,6 +92,57 @@ must not silently start that."
       (let ((buffer-file-name f)
             (arc-watch-after-save t))
         (should (arc-watch--after-save))))))
+
+(ert-deftest awa-saving-does-not-embed-inline ()
+  "A save must return before the blocking embedding round-trip.
+`llm-embedding' is a synchronous HTTP call; the watcher routes the
+embed through `llm-embedding-async' instead, exactly as `M-x
+arc-reindex-all' does, so saving a long note does not freeze Emacs for
+one provider round-trip per chunk.  The async stub settles immediately,
+so the write still lands -- what is asserted is which call made it."
+  (awa-with-corpus
+    (let ((arc-watch-async t)
+          (blocked nil)
+          (async-called nil))
+      (cl-letf (((symbol-function 'llm-embedding)
+                 (lambda (&rest _) (setq blocked t) [0.1 0.2 0.3]))
+                ((symbol-function 'llm-embedding-async)
+                 (lambda (_provider _text on-ok &optional _on-error)
+                   (setq async-called t)
+                   (funcall on-ok [0.1 0.2 0.3]))))
+        (let ((buffer-file-name f)
+              (arc-watch-after-save t))
+          (arc-watch--after-save))
+        (should-not blocked)
+        (should async-called)
+        (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))))))
+
+(ert-deftest awa-the-sweep-dispatches-one-async-run-per-collection ()
+  "Two changed files in one collection must be ONE async run, not two.
+A run bounds its own in-flight requests, so a run per file would put
+`arc-index-max-in-flight' times as many requests in flight as there are
+changed files -- hundreds of concurrent subprocesses on a branch switch."
+  (awa-with-corpus
+    (let ((g (expand-file-name "g.txt" dir)))
+      ;; index both under the macro's synchronous binding
+      (arc-watch-reindex-path f :quiet)
+      (with-temp-file g (insert "second"))
+      (arc-watch-reindex-path g :quiet)
+      ;; then change both, so the sweep sees two changed paths
+      (with-temp-file f (insert "f changed"))
+      (with-temp-file g (insert "g changed"))
+      (let ((arc-watch-async t)
+            (arc-watch--sweep-offset 0)
+            (arc-watch-sweep-batch 10)
+            (runs 0)
+            (sources-seen 0))
+        (cl-letf (((symbol-function 'arc--reindex-async-collection)
+                   (lambda (_run _name _cid sources _total _done)
+                     (setq runs (1+ runs))
+                     (setq sources-seen (+ sources-seen (length sources))))))
+          (arc-watch-sweep))
+        (should (= 1 runs))
+        (should (= 2 sources-seen))))))
 
 (ert-deftest awa-sweep-is-bounded-and-resumes ()
   (awa-with-corpus

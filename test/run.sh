@@ -16,6 +16,14 @@ if [ -n "${ARC_VEC0_PATH:-}" ] && [ ! -f "$ARC_VEC0_PATH" ]; then
 fi
 fail=0
 
+# `-Q' skips the init file, which is where `package-initialize' normally
+# runs, so a suite's dependencies have to be reachable without it.  Locally
+# they are (Nix puts them on the default load-path); on a bare runner they
+# are installed into `package-user-dir', so initialise it explicitly -- a
+# no-op where no elpa directory exists, and what makes CI work where one
+# does.
+emacs_args=(-Q -batch -L . --eval "(progn (require 'package) (package-initialize))")
+
 # Byte-compile gate. A missing `require' can leave every ERT suite green
 # -- phase 4's header line shipped broken exactly that way, because
 # nothing in the package required `arc-index' and six suites did not
@@ -23,7 +31,7 @@ fail=0
 # not to be negotiated with.
 echo "== byte-compile"
 bclog="$(mktemp)"
-emacs -Q -batch -L . -f batch-byte-compile arc*.el >"$bclog" 2>&1
+emacs "${emacs_args[@]}" -f batch-byte-compile arc*.el >"$bclog" 2>&1
 bcstatus=$?
 rm -f ./*.elc
 if grep -q 'Warning:' "$bclog" || [ "$bcstatus" -ne 0 ]; then
@@ -38,7 +46,7 @@ log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 for f in test/test-*.el; do
   echo "== $f"
-  emacs -Q -batch -L . -l "$f" -f ert-run-tests-batch-and-exit 2>&1 | tee "$log"
+  emacs "${emacs_args[@]}" -l "$f" -f ert-run-tests-batch-and-exit 2>&1 | tee "$log"
   status=${PIPESTATUS[0]}
   [ "$status" -eq 0 ] || fail=1
   if grep -q '^SKIP:' "$log"; then

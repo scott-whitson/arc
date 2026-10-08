@@ -233,5 +233,65 @@ why the real `nix options'-shaped scopes keep the pool they have."
          (arc-search-limit 3))
      (should (= 3 (arc-search--minimum-pool '(:collections ("test"))))))))
 
+;;; --- the exact arm -------------------------------------------------------
+;;
+;; `exact' is a literal, case-insensitive substring match over the stored
+;; chunk text: the arm to reach for when the user already knows the string
+;; and BM25's tokenizer would not land on it.  It never embeds, like
+;; `keyword', so these tests stub only the indexing call.
+
+(ert-deftest asr-exact-arm-finds-a-literal-substring-case-insensitively ()
+  (arc-test-with-temp-db
+   (let ((arc-embedding-size 3))
+     (cl-letf (((symbol-function 'llm-embedding) (lambda (_p _t) [0.1 0.2 0.3])))
+       (asr--index-file "/tmp/a.txt" "test" "The Disko Layout")
+       (let ((arc-rollup-function 'max))
+         (should (= 1 (length (arc-search-documents "disko" '(:all t) 'exact))))
+         ;; the case-insensitivity is the point: the chunk spells it `Disko'
+         (should (= 1 (length (arc-search-documents "DISKO" '(:all t) 'exact)))))))))
+
+(ert-deftest asr-exact-arm-respects-scope ()
+  "A substring present in two collections is narrowed by the scope."
+  (arc-test-with-temp-db
+   (let ((arc-embedding-size 3))
+     (cl-letf (((symbol-function 'llm-embedding) (lambda (_p _t) [0.1 0.2 0.3])))
+       (asr--index-file "/tmp/in.txt" "keep" "needle here")
+       (asr--index-file "/tmp/out.txt" "drop" "needle too")
+       (let* ((arc-rollup-function 'max)
+              (docs (arc-search-documents "needle" '(:collections ("keep")) 'exact)))
+         (should (= 1 (length docs)))
+         (should (equal (plist-get (car docs) :path) "/tmp/in.txt")))))))
+
+(ert-deftest asr-exact-arm-treats-like-wildcards-as-literal-text ()
+  "`%' and `_' in the query match themselves, not any text."
+  (arc-test-with-temp-db
+   (let ((arc-embedding-size 3))
+     (cl-letf (((symbol-function 'llm-embedding) (lambda (_p _t) [0.1 0.2 0.3])))
+       (asr--index-file "/tmp/pct.txt" "test" "50% off today")
+       (asr--index-file "/tmp/plain.txt" "test" "no percent here")
+       (let ((arc-rollup-function 'max))
+         ;; An unescaped `%' would be a LIKE wildcard matching every chunk.
+         (should (= 1 (length (arc-search-documents "%" '(:all t) 'exact)))))))))
+
+(ert-deftest asr-exact-arm-quotes-a-single-quote-in-the-query ()
+  "A `'' in the query must not end the SQL string literal early."
+  (arc-test-with-temp-db
+   (let ((arc-embedding-size 3))
+     (cl-letf (((symbol-function 'llm-embedding) (lambda (_p _t) [0.1 0.2 0.3])))
+       (asr--index-file "/tmp/q.txt" "test" "it's a quote")
+       (let ((arc-rollup-function 'max))
+         (should (= 1 (length (arc-search-documents "it's" '(:all t) 'exact)))))))))
+
+(ert-deftest asr-exact-arm-treats-a-backslash-as-literal ()
+  "A `\\' is where the escape order matters: it is doubled first, so the
+`%'/`_' escapes added after it are not themselves re-escaped."
+  (arc-test-with-temp-db
+   (let ((arc-embedding-size 3))
+     (cl-letf (((symbol-function 'llm-embedding) (lambda (_p _t) [0.1 0.2 0.3])))
+       (asr--index-file "/tmp/bs.txt" "test" "path C:\\Users\\x")
+       (asr--index-file "/tmp/nobs.txt" "test" "no backslash here")
+       (let ((arc-rollup-function 'max))
+         (should (= 1 (length (arc-search-documents "C:\\Users" '(:all t) 'exact)))))))))
+
 (provide 'test-arc-search-core)
 ;;; test-arc-search-core.el ends here

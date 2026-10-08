@@ -299,7 +299,9 @@ reimplemented here."
 SCOPE takes any shape `arc-scope-normalize' accepts; nil means
 `arc-enabled-collections'.  ARM is passed through to
 `arc--find-similar': `keyword' skips the embedding call entirely and is
-what the live-typing stage uses, nil or `fused' is the full hybrid.
+what the live-typing stage uses, `exact' is a literal, case-insensitive
+substring match that also never embeds, and nil or `fused' is the full
+hybrid.
 
 `arc-reranker-enabled' is bound off for the duration.  The reranker's
 limit would otherwise truncate the pool through `arc-get-limit' before

@@ -78,38 +78,11 @@
 ;; types, which would have silently broken the moment that unrelated
 ;; require was ever cleaned up.
 (require 'arc-source)
-(require 'arc-source-file) ; arc--file-list, for arc-parse-directory below
 (require 'arc-source-info) ; arc-find-executable, injected into async workers
 
 (defgroup arc nil
   "Local, offline, config-aware retrieval engine."
   :group 'tools)
-
-(defconst arc--unmigrated-functions
-  '(arc-parse-file
-    arc-parse-directory
-    arc-remove-collection
-    arc-add-file-to-collection)
-  "Functions still written against the pre-`sources' schema.
-Task 4 replaced `data(path, hash, data)' and dropped the `files' table;
-these have not been rewritten yet.  Task 11 owns that work and deletes
-each guard as it goes.  `arc-parse-info-manual' was here too, until
-Task 10 rewrote it as a pure function (see `arc-source-info.el') and
-removed its guard.  The old query-and-context function that fed the
-former prose path was here too, until Task 11 rewrote its query across
-`data' and `sources' (see `arc--retrieve-rows' below) and removed its
-guard.  `arc-recalculate-embeddings' was here too, until it was ported
-to `data(chunk)' and enabled, because changing the embedding provider
-to a model of another dimension has no other supported path.  The
-remaining four are collection-management functions that
-`arc-index.el''s `arc-index-source' and `arc-reindex-all' already
-supersede; migrating them is not required to prove the corpus real or
-to serve retrieval, so they stay guarded.  This list may only shrink.")
-
-(defun arc--not-yet-migrated (fn)
-  "Signal that FN has not been ported to the `sources' schema."
-  (user-error "arc: `%s' has not been migrated to the sources schema yet \
-(Task 10/11 owns this); it would fail against the current tables" fn))
 
 (defcustom arc-limit 10
   "How many chunks retrieval hands the caller.
@@ -303,14 +276,45 @@ semantic_search AS (
 )" vec k arc-knn-candidates))))
 
 (defun arc--keyword-cte (text)
-  "Return the keyword-search CTE matching TEXT, joined to `scoped'."
+  "Return the keyword-search CTE matching TEXT, joined to `scoped'.
+The MATCH expression goes through `arc--sql-quote' like the exact arm's
+pattern: `arc-fts-query' cannot emit a single quote today, but a bare
+`'%s'' is one refactor away from breaking on one."
   (format "keyword_search AS (
   SELECT f.rowid AS id, RANK () OVER (ORDER BY bm25(data_fts) ASC) AS rank
   FROM data_fts f JOIN scoped ON scoped.id = f.rowid
-  WHERE data_fts MATCH '%s'
+  WHERE data_fts MATCH %s
   ORDER BY bm25(data_fts) ASC
   LIMIT %d
-)" (arc-fts-query text) arc-knn-candidates))
+)" (arc--sql-quote (arc-fts-query text)) arc-knn-candidates))
+
+(defun arc--like-escape (text)
+  "Escape TEXT for a SQL `LIKE ... ESCAPE \\' pattern.
+Backslash first, so the escaping added for `%' and `_' is not itself
+doubled: a query of `50%_off\\' must match those three characters
+literally, not `50', any character, `off' and anything."
+  (thread-last text
+    (string-replace "\\" "\\\\")
+    (string-replace "%" "\\%")
+    (string-replace "_" "\\_")))
+
+(defun arc--exact-cte (text)
+  "Return the exact-substring-search CTE matching TEXT, joined to `scoped'.
+A literal, case-insensitive substring match over the stored chunk text --
+LIKE is case-insensitive for ASCII by default.  TEXT's `%', `_' and `\\'
+are escaped by `arc--like-escape' so they match themselves rather than
+acting as LIKE wildcards; the ESCAPE clause is what gives those escapes
+meaning, and `arc--sql-quote' quotes the whole pattern so a single quote
+in TEXT cannot end the SQL literal early.  Ranked by `scoped.id' because
+this arm is a row set, and every arm honours the same LIMIT so a scope
+cannot make the exact arm deeper than the others."
+  (format "exact_search AS (
+  SELECT scoped.id AS id, RANK () OVER (ORDER BY scoped.id ASC) AS rank
+  FROM data d JOIN scoped ON scoped.id = d.id
+  WHERE d.chunk LIKE %s ESCAPE '\\'
+  ORDER BY scoped.id ASC
+  LIMIT %d
+)" (arc--sql-quote (concat "%" (arc--like-escape text) "%")) arc-knn-candidates))
 
 (defun arc--find-similar (text scope &optional arm scored)
 "Return the SQL selecting chunks in SCOPE similar to TEXT.
@@ -321,10 +325,13 @@ the vector side and the FTS side join against the `scoped' CTE.
 ARM selects which half of the hybrid to use, and exists so retrieval
 quality can be attributed rather than guessed at: nil or `fused' is the
 real query, `semantic' the vector arm alone, `keyword' the BM25 arm
-alone.  `arc-eval' reports recall for all three, which is how you learn
-that a question is failing because one arm is weak rather than because
-retrieval is \"bad\".  Only `fused' and `semantic' embed TEXT; the
-keyword arm skips that work entirely.
+alone, `exact' a literal, case-insensitive substring match over the
+stored chunk text -- the arm for a string the user already knows.
+`arc-eval' reports recall for the fused, semantic and keyword arms,
+which is how you learn that a question is failing because one arm is
+weak rather than because retrieval is \"bad\".  Only `fused' and
+`semantic' embed TEXT; the keyword and exact arms skip that work
+entirely.
 
 SCORED, when non-nil, adds a second column to every row: the score the
 ranking already computed.  It is additive on purpose -- the standard
@@ -346,7 +353,7 @@ and the same magnitude as a one-sided fused score."
   ;; `:kinds', `:tags' or `:path-prefix', which did not exist in any form
   ;; before this task.  The `scoped' CTE joined explicitly into both arms
   ;; is what makes scoping true regardless of what the planner chooses.
-  (let ((vec (unless (eq arm 'keyword)
+  (let ((vec (unless (memq arm '(keyword exact))
                (arc-vector-to-sqlite
                 (llm-embedding arc-embeddings-provider text)))))
     (pcase (or arm 'fused)
@@ -364,6 +371,14 @@ and the same magnitude as a one-sided fused score."
                (arc--scoped-cte scope) (arc--keyword-cte text)
                (if scored
                    (format ", 1.0 / (%d + keyword_search.rank) AS score" arc-rrf-k)
+                 "")
+               (arc-get-limit)))
+      ('exact
+       (format "WITH\n%s,\n%s\nSELECT exact_search.id%s FROM exact_search
+                ORDER BY exact_search.rank ASC LIMIT %d;"
+               (arc--scoped-cte scope) (arc--exact-cte text)
+               (if scored
+                   (format ", 1.0 / (%d + exact_search.rank) AS score" arc-rrf-k)
                  "")
                (arc-get-limit)))
       (_
@@ -505,92 +520,6 @@ than T, it will be packed into single semantic chunk."
 		 (nreverse result))))
     (list (buffer-substring-no-properties (point-min) (point-max)))))
 
-(defun arc-parse-file (collection-id path &optional force)
-  "Parse file PATH for COLLECTION-ID.
-When FORCE parse even if already parsed."
-  (arc--not-yet-migrated 'arc-parse-file)
-  (let* ((opened (get-file-buffer path))
-	 (buf (or opened (find-file-noselect path t t)))
-	 (hash (secure-hash 'sha256 buf))
-	 (prev-hash (caar (sqlite-select
-			   (arc-db)
-			   (format "SELECT hash FROM files WHERE path = '%s';"
-				   (arc-sqlite-escape path))))))
-    (when (or force
-	      (not prev-hash)
-	      (not (string-equal hash prev-hash)))
-      (with-current-buffer buf
-	;; Opened rawfile (unibyte); decode to UTF-8 multibyte so non-ASCII
-	;; content (em-dashes etc.) embeds cleanly — llm's json-serialize
-	;; rejects raw unibyte bytes (wrong-type-argument json-value-p).
-	(unless enable-multibyte-characters
-	  (decode-coding-region (point-min) (point-max) 'utf-8)
-	  (set-buffer-multibyte t))
-	(let ((chunks (arc-split-semantically))
-	      (old-row-ids
-	       (flatten-tree (sqlite-select
-			      (arc-db)
-			      (format "SELECT rowid FROM data WHERE path = '%s';"
-				      (arc-sqlite-escape path)))))
-	      (row-ids nil)
-	      (kind-id (caar (sqlite-select
-			      (arc-db)
-			      "SELECT rowid FROM kinds WHERE name = 'file';"))))
-	  ;; remove old data
-	  (when prev-hash
-	    (sqlite-execute
-	     (arc-db)
-	     (format "DELETE FROM files WHERE path = '%s';"
-		     (arc-sqlite-escape path))))
-	  ;; add new data
-          (dolist (text chunks)
-            (let* ((hash (secure-hash 'sha256 text))
-		   (rowid
-		    (if-let* ((rowid (caar (sqlite-select
-					   (arc-db)
-					   (format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';"
-						   kind-id collection-id
-						   (arc-sqlite-escape path) hash)))))
-			(progn
-			  (push rowid row-ids)
-			  nil)
-		      (sqlite-execute
-		       (arc-db)
-		       (format
-			"INSERT INTO data(kind_id, collection_id, path, hash, data) VALUES (%s, %s, '%s', '%s', '%s');"
-			kind-id collection-id
-			(arc-sqlite-escape path) hash (arc-sqlite-escape text)))
-		      (caar (sqlite-select
-			     (arc-db)
-			     (format "SELECT rowid FROM data WHERE kind_id = %s AND collection_id = %s AND path = '%s' AND hash = '%s';"
-				     kind-id collection-id
-				     (arc-sqlite-escape path) hash))))))
-	      (when rowid
-		(sqlite-execute
-		 (arc-db)
-		 (format "INSERT INTO data_embeddings(rowid, embedding) VALUES (%s, %s);"
-			 rowid (arc-vector-to-sqlite
-				(llm-embedding arc-embeddings-provider text))))
-		(sqlite-execute
-		 (arc-db)
-		 (format "INSERT INTO data_fts(rowid, data) VALUES (%s, '%s');"
-			 rowid (arc-sqlite-escape text)))
-		(push rowid row-ids))))
-	  ;; remove old data
-	  (when row-ids
-	    (let ((delete-rows (cl-remove-if (lambda (id)
-					       (cl-find id row-ids))
-					     old-row-ids)))
-	      (arc--delete-data delete-rows)))
-	  ;; save hash to files table
-	  (sqlite-execute
-	   (arc-db)
-	   (format "INSERT INTO files (path, hash) VALUES ('%s', '%s');"
-		   (arc-sqlite-escape path) hash)))))
-    ;; kill buffer if it was not open before parsing
-    (when (not opened)
-      (kill-buffer buf))))
-
 (defun arc--delete-from-table (table ids)
   "Delete IDS from TABLE."
   (sqlite-execute
@@ -606,44 +535,32 @@ When FORCE parse even if already parsed."
   (arc--delete-from-table "data" ids)
   (when ids (arc-index--bump-write-generation)))
 
-(defun arc-parse-directory (dir)
-  "Parse DIR as new collection syncronously."
-  (arc--not-yet-migrated 'arc-parse-directory)
-  (setq dir (expand-file-name dir))
-  (let* ((collection-id (progn
-			  (sqlite-execute
-			   (arc-db)
-			   (format
-			    "INSERT INTO collections (name) VALUES ('%s') ON CONFLICT DO NOTHING;"
-			    (arc-sqlite-escape dir)))
-			  (caar (sqlite-select
-				 (arc-db)
-				 (format
-				  "SELECT rowid FROM collections WHERE name = '%s';"
-				  (arc-sqlite-escape dir))))))
-	 (files (arc--file-list dir))
-	 (delete-ids (flatten-tree
-		      (sqlite-select
-		       (arc-db)
-		       (format
-			"SELECT rowid FROM data WHERE collection_id = %d AND path NOT IN %s;"
-			collection-id
-			(arc-sqlite-format-string-list files))))))
-    (arc--delete-data delete-ids)
-    (dolist (file files)
-      (message "parsing %s" file)
-      (arc-parse-file collection-id file))))
-
-;;;###autoload
-(defun arc-async-parse-directory (dir)
-  "Parse DIR as new collection asyncronously."
-  (interactive "DSelect directory: ")
-  (arc--async-do (lambda ()
-		     (arc-parse-directory
-		      (expand-file-name dir)))))
+(defun arc-fts--phrase (text)
+  "Return TEXT as an FTS5 quoted phrase, or nil when it sanitises to nothing.
+Adjacency is the whole point of the quotes, so interior spaces are KEPT
+where an unquoted word list would have been OR-joined -- but the same
+characters an unquoted query sheds are shed here too.  A phrase that
+sanitises to nothing (just punctuation, say) simply drops out."
+  (let ((clean (thread-last text
+                 (string-trim)
+                 (downcase)
+                 (string-replace "-" " ")
+                 (replace-regexp-in-string "[^[:alnum:] ]+" " ")
+                 (string-trim)
+                 (replace-regexp-in-string "[[:space:]]+" " "))))
+    (unless (string-empty-p clean)
+      (format "\"%s\"" clean))))
 
 (defun arc-fts-query (prompt)
-  "Return an FTS5 MATCH expression for PROMPT: its words, OR'd together.
+  "Return an FTS5 MATCH expression for PROMPT.
+Unquoted text becomes its words, OR'd together, exactly as it always
+has.  A double-quoted span is kept as an FTS5 phrase instead: the quotes
+ask for those tokens ADJACENT, and OR-joining them throws that away --
+`\"disk layout\"' matches a document containing the two words next to
+each other, which the OR-join cannot tell from a document containing
+both words anywhere.  An odd number of quotes is a `user-error' naming
+PROMPT, because silently dropping the odd quote and degrading the
+phrase to an OR-join answers a different question than the one asked.
 
 Do not add stopword filtering here. It was tried, measured, and
 reverted, and the measurement is worth keeping because the intuition is
@@ -667,14 +584,26 @@ three to five, because `disk*' also matches `disk', `disks' and
 `diskLayout' and the extra matches drown the signal. It did not even fix
 its motivating case. Three hand-tuned interventions have now lost to
 BM25's own weighting; treat that as the prior."
-  (thread-last
-    prompt
-    (string-trim)
-    (downcase)
-    (string-replace "-" " ")
-    (replace-regexp-in-string "[^[:alnum:] ]+" "")
-    (string-trim)
-    (replace-regexp-in-string "[[:space:]]+" " OR ")))
+  (when (cl-oddp (cl-count ?\" prompt))
+    (user-error "arc: unmatched double quote in query %S" prompt))
+  (let ((phrases nil) (unquoted "") (start 0))
+    (while (string-match "\"\\([^\"]*\\)\"" prompt start)
+      (setq unquoted (concat unquoted (substring prompt start (match-beginning 0))))
+      (push (match-string 1 prompt) phrases)
+      (setq start (match-end 0)))
+    (setq unquoted (concat unquoted (substring prompt start)))
+    (let ((tokens (thread-last
+                      unquoted
+                    (string-trim)
+                    (downcase)
+                    (string-replace "-" " ")
+                    (replace-regexp-in-string "[^[:alnum:] ]+" "")
+                    (string-trim)
+                    (replace-regexp-in-string "[[:space:]]+" " OR "))))
+      (string-join
+       (delq nil (append (mapcar #'arc-fts--phrase (nreverse phrases))
+                         (unless (string-empty-p tokens) (list tokens))))
+       " OR "))))
 
 (defun arc--rerank-request (prompt ids)
   "Generate rerank request body for PROMPT and IDS."
@@ -914,22 +843,6 @@ that test instead of shipping silently uninjected."
 ;; wrapped (see the note above arc--reopen-db).
 
 ;;;###autoload
-(defun arc-reparse-current-collection ()
-  "Incrementally reparse current directory collection.
-It does nothing if buffer file not inside one of existing collections."
-  (interactive)
-  (when-let* ((collections (flatten-tree
-			    (sqlite-select
-			     (arc-db)
-			     "SELECT name FROM collections;")))
-	      (dirs (cl-remove-if-not #'file-directory-p collections))
-	      (file (buffer-file-name))
-	      (collection (cl-find-if (lambda (dir)
-					(file-in-directory-p file dir))
-				      dirs)))
-    (arc-async-parse-directory collection)))
-
-;;;###autoload
 (defun arc-disable-collection (&optional collection)
   "Disable COLLECTION."
   (interactive)
@@ -985,70 +898,6 @@ It does nothing if buffer file not inside one of existing collections."
      (format
       "INSERT INTO collections (name) VALUES ('%s') ON CONFLICT DO NOTHING;"
       (arc-sqlite-escape collection)))))
-
-;;;###autoload
-(defun arc-add-file-to-collection (file collection)
-  "Add FILE to COLLECTION."
-  (interactive
-   (list
-    (read-file-name "File: ")
-    (completing-read
-     "Enable collection: "
-     (flatten-tree
-      (sqlite-select
-       (arc-db)
-       "SELECT name FROM collections;")))))
-  (arc--not-yet-migrated 'arc-add-file-to-collection)
-  (let ((collection-id (caar (sqlite-select
-			      (arc-db)
-			      (format
-			       "SELECT rowid FROM collections WHERE name = '%s';"
-			       (arc-sqlite-escape collection))))))
-    (arc--async-do (lambda () (arc-parse-file collection-id file)))))
-
-;;;###autoload
-(defun arc-remove-collection (&optional collection)
-  "Remove COLLECTION."
-  (interactive)
-  (arc--not-yet-migrated 'arc-remove-collection)
-  (let* ((col (or collection
-		  (completing-read
-		   "Enable collection: "
-		   (flatten-tree
-		    (sqlite-select
-		     (arc-db)
-		     "SELECT name FROM collections;")))))
-	 (collection-id (caar (sqlite-select
-			       (arc-db)
-			       (format
-				"SELECT rowid FROM collections WHERE name = '%s';"
-				(arc-sqlite-escape col)))))
-	 (delete-ids (flatten-tree
-		      (sqlite-select
-		       (arc-db)
-		       (format
-			"SELECT rowid FROM data WHERE collection_id = %d;"
-			collection-id)))))
-    (arc-disable-collection col)
-    (when (file-directory-p col)
-      (let ((files
-	     (flatten-tree
-	      (sqlite-select
-	       (arc-db)
-	       (format
-		"SELECT DISTINCT path FROM data WHERE collection_id = %d;"
-		collection-id)))))
-	(sqlite-execute
-	 (arc-db)
-	 (format
-	  "DELETE FROM files WHERE path IN %s;"
-	  (arc-sqlite-format-string-list files)))))
-    (arc--delete-data delete-ids)
-    (sqlite-execute
-     (arc-db)
-     (format
-      "DELETE FROM collections WHERE rowid = %d;"
-      collection-id))))
 
 (defun arc-recalculate-embeddings ()
   "Drop and rebuild every embedding for the current provider.

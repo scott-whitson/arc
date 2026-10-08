@@ -127,6 +127,20 @@ brute-force distance pass is not cheap."
       (should (string-match-p
                (regexp-quote "3.000000 / (60 + semantic_search.rank)") sql)))))
 
+(ert-deftest aro-exact-arm-uses-a-literal-like-and-never-embeds ()
+  "The exact arm is a `LIKE' over chunk text and skips the embedding call."
+  (let ((embedded nil))
+    (cl-letf (((symbol-function 'llm-embedding)
+               (lambda (_p _t) (setq embedded t) [1.0 0.0 0.0])))
+      (let ((sql (arc--find-similar "50%_x" nil 'exact t)))
+        (should (string-match-p "exact_search" sql))
+        (should-not (string-match-p "semantic_search" sql))
+        (should-not (string-match-p "keyword_search" sql))
+        (should-not embedded)
+        ;; the wildcards are escaped and the ESCAPE clause makes it stick
+        (should (string-match-p (regexp-quote "ESCAPE '\\'") sql))
+        (should (string-match-p (regexp-quote "1.0 / (60 + exact_search.rank)") sql))))))
+
 (ert-deftest aro-defaults-are-the-measured-ones ()
   "Pinned deliberately: these three were chosen from a 33-question sweep, and
 a silent revert would undo measured recall with nothing to notice."

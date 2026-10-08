@@ -137,6 +137,14 @@ You need Emacs 29.2 or newer to run arc at all. Loading the ~vec0~
 vector-search extension below may need more: see the note at the end
 of this section.
 
+arc also needs *SQLite 3.39 or newer* (released 2022). The fused
+retrieval arm joins the semantic and keyword result sets with ~FULL OUTER
+JOIN~, which SQLite did not parse before 3.39; on an older SQLite that
+arm fails rather than returning a worse answer. This is a property of
+the SQLite library the running Emacs was built against, not of Emacs
+itself -- ~sqlite-open~ followed by =SELECT sqlite_version();= reports
+it -- so check it if an old distribution's Emacs is in play.
+
 *** Vector search extension
 
 arc stores embeddings in sqlite using the [[https://github.com/asg017/sqlite-vec][sqlite-vec]] ~vec0~ loadable
@@ -258,6 +266,11 @@ subset of collections, kinds, org tags, or a path prefix. ARC returns
 retrieval results; a caller that needs prose supplies its own model. The
 prose/chat layer was deliberately removed so the package has one clear
 responsibility: make local evidence easy to retrieve, inspect, and navigate.
+The legacy collection-management commands -- ~arc-parse-file~,
+~arc-parse-directory~, ~arc-add-file-to-collection~,
+~arc-remove-collection~, and the ~arc-async-parse-directory~ and
+~arc-reparse-current-collection~ wrappers that only routed through them
+-- were removed too, because ~arc-reindex-all~ supersedes them.
 
 *** 1. Prepare the embedding provider
 
@@ -690,12 +703,13 @@ interactive asynchronous path intentionally avoids silent destructive cleanup.
 *** Two mechanisms, because the corpus has two kinds of source
 
 The obvious design -- hash every source, compare -- is wrong here, and
-measurably so. Of 38,436 sources on a real corpus, 656 are genuinely mutable
-(files and org nodes) and 37,780 are derived from immutable inputs: Info
-manuals from a Nix store path, NixOS and Home-Manager options from a
-~flake.lock~ revision. A derived source's content cannot change unless that
-input changes, so hashing them individually is sixty times the work to learn
-one bit per collection.
+measurably so. On a real corpus roughly 11,000 sources are genuinely mutable
+(files and org nodes; the whole corpus is ~272,000 chunks) and 37,780 are derived
+from immutable inputs: Info manuals from a Nix store path, NixOS and
+Home-Manager options from a ~flake.lock~ revision. A derived source's
+content cannot change unless that input changes, so hashing each of the
+37,780 derived sources individually is three to four times the work to
+learn one bit per collection.
 
 So mutable sources are compared by recorded content hash, and derived
 collections carry a ~collections.provenance~ string -- a ~flake.lock~ hash, or the
@@ -715,11 +729,16 @@ would be the worse failure and is not done either.
 *** arc-watch-mode
 
 Re-indexes a saved file arc already knows, and sweeps for drift on a
-300-second idle timer. The sweep is what catches changes ~after-save-hook~
-never sees: a ~git pull~, a Syncthing update, an edit on another machine. It
-examines ~arc-watch-sweep-batch~ sources per tick and resumes where it stopped,
+300-second idle timer. The sweep catches a change ~after-save-hook~ never
+sees -- a ~git pull~, a Syncthing update, an edit on another machine -- but
+only for a file arc has ALREADY indexed: ~arc-watch--mutable-paths~ selects
+~DISTINCT path FROM sources~, so a file that a pull or sync newly added is
+invisible to it, and a reindex is what adds new files to the corpus. It
+examines ~arc-watch-sweep-batch~ paths per tick and resumes where it stopped,
 because a sweep that rehashed every mutable source in one tick would be the
-reason someone turned it off.
+reason someone turned it off. A changed file is re-indexed without blocking
+Emacs: the per-chunk embedding runs through ~llm-embedding-async~, bounded
+like ~arc-reindex-all~'s (see ~arc-watch-async~).
 
 A saved file is re-indexed only if it lives under a *planned* collection's
 directory AND ~arc-indexable-file-p~ agrees -- which shares its predicate with

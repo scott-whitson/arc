@@ -20,6 +20,12 @@
 ;; `make-llm-ollama' against, with identical runtime behavior.
 (require 'llm-ollama)
 
+;; Declared here so `arc-close-db' can clear them: `arc-index.el' owns
+;; these caches, but this file loads first and a closed connection must
+;; not leave a report behind (see `arc-close-db').
+(defvar arc-index--stats-cache)
+(defvar arc--freshness-cache)
+
 (defcustom arc-embeddings-provider (make-llm-ollama
 				     :embedding-model "nomic-embed-text")
   "Embeddings provider to generate embeddings."
@@ -53,10 +59,6 @@ Defaults to the ARC_VEC0_PATH environment variable (set by Nix)."
 (defvar arc--db nil
   "Live sqlite connection, or nil before first use.")
 
-(defun arc-embeddings-create-table-sql ()
-  "Generate sql for create embeddings table."
-  "DROP TABLE IF EXISTS arc_embeddings;")
-
 (defun arc-data-embeddings-create-table-sql ()
   "Generate sql for creating the vec0 embeddings table."
   (format "CREATE VIRTUAL TABLE IF NOT EXISTS data_embeddings USING vec0(embedding float[%d]);"
@@ -65,10 +67,6 @@ Defaults to the ARC_VEC0_PATH environment variable (set by Nix)."
 (defun arc-data-fts-create-table-sql ()
   "Generate sql for create full text search table."
   "CREATE VIRTUAL TABLE IF NOT EXISTS data_fts USING FTS5(data);")
-
-(defun arc-info-create-table-sql ()
-  "Generate sql for create info table."
-  "DROP TABLE IF EXISTS info;")
 
 (defun arc-collections-create-table-sql ()
   "Generate sql for create collections table."
@@ -340,11 +338,18 @@ not a table-less one silently reused from a failed first attempt."
   arc--db)
 
 (defun arc-close-db ()
-  "Close the arc database connection, if open."
+  "Close the arc database connection, if open.
+Also drops the stats and freshness caches.  Both are keyed by the write
+generation, which a reopen does not move, so serving them after the
+connection is gone would report the previous database's `:kinds' and
+`:freshness' beside live `:chunks'/`:sources' counts -- an internally
+inconsistent report for up to the cache TTL."
   (interactive)
   (when (and arc--db (sqlitep arc--db))
     (sqlite-close arc--db))
-  (setq arc--db nil))
+  (setq arc--db nil)
+  (setq arc-index--stats-cache nil)
+  (setq arc--freshness-cache nil))
 
 (defun arc-vector-to-sqlite (data)
   "Convert DATA to sqlite vector representation."

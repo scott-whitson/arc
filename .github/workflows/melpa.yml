@@ -44,3 +44,34 @@ jobs:
           file: ${{ matrix.file }}
           ignore_warnings: ${{ matrix.ignore_warnings }}
           warnings_as_errors: ${{ matrix.warnings_as_errors }}
+
+  test-suite:
+    # The MELPA lint above checks one file; it does not run a single test.
+    # This job runs the ERT suites and the byte-compile gate that `run.sh`
+    # owns, so "the suite passes / clean byte-compile" is a checked claim and
+    # a local-only one.  A runner with no sqlite-vec (vec0) extension --
+    # ubuntu-latest has none by default -- makes the vec0 suites skip
+    # cleanly (they exit 0 with a SKIP line), which `run.sh` reports and
+    # does not count as a failure.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: purcell/setup-emacs@master
+        with:
+          version: "30.1"
+      - name: Install package dependencies
+        # `run.sh' runs Emacs with `-Q', so it calls `package-initialize'
+        # itself and finds these.  The set is the package's own
+        # Package-Requires (arc.el); `llm' provides the `llm-ollama' that
+        # arc-db.el requires at load time.  `consult' is optional by design.
+        run: |
+          emacs -Q --batch --eval "(progn
+            (require 'package)
+            (setq package-archives '((\"gnu\" . \"https://elpa.gnu.org/packages/\")
+                                     (\"melpa\" . \"https://melpa.org/packages/\")))
+            (package-initialize)
+            (package-refresh-contents)
+            (dolist (p '(llm async plz transient))
+              (unless (package-installed-p p) (package-install p))))"
+      - name: Byte-compile gate and ERT suite
+        run: ./test/run.sh

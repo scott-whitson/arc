@@ -17,7 +17,7 @@ usage: arc <command> [options]
 
   arc search QUERY [--scope NAME] [--collection NAME ...] [--kind KIND ...]
              [--tag TAG ...] [--path-prefix ABSOLUTE-PATH] [--limit N]
-             [--arm keyword|fused] [--json]
+             [--arm keyword|fused|exact] [--json]
   arc preview SOURCE_ID [--limit N] [--json]
   arc scopes [--json]
   arc stats  [--json]
@@ -125,8 +125,8 @@ while [ $# -gt 0 ]; do
     --arm)
       [ $# -ge 2 ] || die "--arm needs a value"
       case "$2" in
-        keyword|fused) arm="(quote $2)" ;;
-        *) die "--arm must be 'keyword' or 'fused', got: $2" ;;
+        keyword|fused|exact) arm="(quote $2)" ;;
+        *) die "--arm must be 'keyword', 'fused' or 'exact', got: $2" ;;
       esac
       shift 2 ;;
     --json)  json=1; shift ;;

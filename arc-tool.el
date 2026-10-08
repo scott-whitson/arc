@@ -31,7 +31,7 @@
 (require 'arc-scope)
 
 (defun arc-tool--arm (arm)
-  "Normalise ARM to `keyword' or `fused', or signal for anything else.
+  "Normalise ARM to `keyword', `fused' or `exact', or signal for anything else.
 `arc--find-similar' silently treats an unrecognised ARM as `fused' --
 harmless there, since its only other callers pass a value they chose
 themselves.  `arc-tool-search' instead echoes ARM back in its JSON
@@ -41,8 +41,8 @@ ran; e.g. `--arm bogus' would report `\"arm\":\"bogus\"' while quietly
 having run the fused query."
   (pcase arm
     ((or 'nil 'fused) 'fused)
-    ('keyword 'keyword)
-    (_ (error "arc: unknown arm %S (try: keyword, fused)" arm))))
+    ((or 'keyword 'exact) arm)
+    (_ (error "arc: unknown arm %S (try: keyword, fused, exact)" arm))))
 
 (defun arc-tool--legacy-arm (arm)
   "Normalise the in-Emacs ARM contract, including `semantic'.
@@ -53,8 +53,8 @@ narrow, validated CLI-facing contract.
 "
   (pcase arm
     ((or 'nil 'fused) 'fused)
-    ((or 'keyword 'semantic) arm)
-    (_ (error "arc: unknown arm %S (try: keyword, semantic, fused)" arm))))
+    ((or 'keyword 'semantic 'exact) arm)
+    (_ (error "arc: unknown arm %S (try: keyword, semantic, exact, fused)" arm))))
 
 (defun arc-tool--scope (name)
   "Return the scope plist NAME names in `arc-scope-presets', or signal."
@@ -321,9 +321,9 @@ legacy in-Emacs callers retain `semantic' without widening the CLI."
 (defun arc-tool-search-filtered (query &optional scope-name limit arm filters)
   "Search QUERY with preset SCOPE-NAME intersected by typed FILTERS.
 FILTERS is a plist accepted by `arc-tool--normalize-filters'.  This
-agent/CLI-facing entry point deliberately accepts only `keyword' and
-`fused'; the legacy `arc-tool-search' entry point additionally accepts
-`semantic'."
+agent/CLI-facing entry point deliberately accepts only `keyword',
+`fused' and `exact' (the arms that never embed); the legacy
+`arc-tool-search' entry point additionally accepts `semantic'."
   (arc-tool--search-json query scope-name limit (arc-tool--arm arm) filters))
 
 (defun arc-tool-search (query &optional scope-name limit arm)
@@ -503,14 +503,22 @@ the source to tell the difference.
 `arc-index-collection-stats' rows are (NAME SOURCES CHUNKS
 LAST-INDEXED) -- see its docstring.  LAST-INDEXED is
 `sources.indexed_at', seconds since the epoch, or `:null' for a
-collection with nothing indexed yet."
+collection with nothing indexed yet.
+
+The `:kinds' and `:freshness' fields come from the CACHED accessors
+(`arc-index-stats-cached' and `arc-freshness-report-cached').  This is
+what an MCP client polls, and the freshness report's per-source half
+re-hashes every mutable source; the cache keeps that off the tool path
+without changing the shape or the TTL-bounded freshness of either
+field.  (`:collections' and the per-source counts remain live; they
+are index reads, not corpus hashes.)"
   (json-serialize
    (list :chunks (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))
          :sources (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))
          :kinds (vconcat
                  (mapcar (lambda (kv)
                            (list :kind (car kv) :chunks (cdr kv)))
-                         (arc-index-stats)))
+                         (arc-index-stats-cached)))
          :collections (vconcat
                        (mapcar (lambda (r)
                                  (let ((name (format "%s" (nth 0 r))))
@@ -527,7 +535,7 @@ collection with nothing indexed yet."
                                      :kind (format "%s" (nth 1 r))
                                      :state (format "%s" (nth 2 r))
                                      :detail (or (nth 3 r) :null)))
-                             (arc-freshness-report))))))
+                             (arc-freshness-report-cached))))))
 
 ;;; MCP stdio ---------------------------------------------------------------
 
@@ -549,7 +557,7 @@ empty-object representation."
                 :query (list :type "string" :description "Search text.")
                 :scope (list :type "string" :description "Named ARC scope preset.")
                 :limit (list :type "integer" :minimum 1 :description "Maximum documents.")
-                :arm (list :type "string" :enum (vector "keyword" "fused"))
+                :arm (list :type "string" :enum (vector "keyword" "fused" "exact"))
                 :filters (list :type "object"
                                 :properties
                                 (list
@@ -709,7 +717,8 @@ adds the trust boundary required by callers that only inspect content text."
                   (arm (pcase arm-name
                          ("keyword" 'keyword)
                          ("fused" 'fused)
-                         (_ (error "arc MCP: arm must be keyword or fused"))))
+                         ("exact" 'exact)
+                         (_ (error "arc MCP: arm must be keyword, fused or exact"))))
                   (filters (arc-tool--mcp-filters
                             (arc-tool--mcp-param arguments "filters"))))
              (unless (or (null scope) (stringp scope))

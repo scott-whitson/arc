@@ -40,7 +40,7 @@ The adapter exposes five read-only tools:
 
 - `arc_search` — ranked document search with optional preset scope, typed
   filters (`collections`, `kinds`, `tags`, `path_prefix`), result limit, and
-  keyword/fused retrieval arm.
+  keyword/fused/exact retrieval arm.
 - `arc_preview` — retrieve bounded passages and source metadata by stable
   `source_id` from a search result.
 - `arc_scopes` — enumerate named scopes and their current sizes.

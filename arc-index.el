@@ -13,9 +13,10 @@
 ;; (`arc-file-sources', `arc-org-nodes', `arc-nixopt-parse-json' (twice,
 ;; for NixOS and Home-Manager options) and `arc-info-sources'), so this
 ;; file requires all of their defining libraries itself rather than
-;; relying on `arc.el', which only happens to require two of them (for
-;; unrelated reasons of its own) and never required `arc-source-org' or
-;; `arc-source-nixopt' at all.  It does NOT require `arc-source' --
+;; relying on `arc.el', which requires only one of them (`arc-source-info',
+;; for the `arc-find-executable' value it injects into its async workers)
+;; and never required `arc-source-org' or `arc-source-nixopt' at all.
+;; It does NOT require `arc-source' --
 ;; nothing here calls any of that file's symbols; `arc.el' requires it
 ;; instead, which is also where `arc-source-link'/`arc-source-label'
 ;; will eventually be used to render a citation.
@@ -64,11 +65,11 @@
 ;; docstring and `arc--reindex-async-next-cell'.
 ;;
 ;; This is deliberately NOT built on `async-start' (the `arc--async-do'
-;; pattern arc.el's still-unmigrated ELISA functions use).  That would
-;; fork a second Emacs process to do the writing, which raises exactly
-;; the question this file's `arc--write-chunk' exists to make moot: two
-;; different sqlite handles -- one per process -- writing to the same
-;; file.  WAL supports one writer at a time across processes (a second
+;; pattern `arc-find-similar' and `arc-async-recalculate-embeddings' use).
+;; That would fork a second Emacs process to do the writing, which raises
+;; exactly the question this file's `arc--write-chunk' exists to make
+;; moot: two different sqlite handles -- one per process -- writing to the
+;; same file.  WAL supports one writer at a time across processes (a second
 ;; writer just gets SQLITE_BUSY, it does not corrupt anything), but the
 ;; parent process in `arc--async-do''s own pattern keeps its handle
 ;; open across the whole child run and only closes and reopens it in
@@ -1172,9 +1173,9 @@ active."
   "Kinds whose freshness is a per-source content hash.
 Everything else is derived from immutable inputs -- Info manuals from a
 Nix store path, options from a flake.lock revision -- and cannot change
-without that input changing. Measured on this corpus: 656 sources are
-mutable and 37,780 are not, so hashing everything would be sixty times
-the work to learn one bit per collection.")
+without that input changing. Measured on this corpus: roughly 11,000
+sources are mutable and 37,780 are not, so hashing everything would be
+three to four times the work to learn one bit per collection.")
 
 (defun arc--flake-provenance (dir)
   "Return a provenance string for the flake at DIR, or nil."
@@ -1333,13 +1334,12 @@ single recorded provenance value, as the normal freshness report does."
                       ", ")))))))))
    arc-index-plan))
 
-(defun arc-freshness-summary ()
-  "Return a compact summary of `arc-freshness-report', or nil if all fresh.
+(defun arc-freshness--summarize (report)
+  "Return a compact summary of REPORT, or nil if all fresh.
 Counts rather than names: stats and search callers need a compact status,
 and appending six collection names made it unreadable.  `M-x arc-freshness'
 has the detail."
-  (let* ((report (arc-freshness-report))
-         (n (lambda (state) (cl-count-if (lambda (r) (eq (nth 2 r) state)) report)))
+  (let* ((n (lambda (state) (cl-count-if (lambda (r) (eq (nth 2 r) state)) report)))
          (stale (funcall n 'stale))
          (unknown (funcall n 'unknown))
          (absent (funcall n 'absent)))
@@ -1349,6 +1349,11 @@ has the detail."
                        (and (> unknown 0) (format "%d unknown" unknown))
                        (and (> absent 0) (format "%d unindexed" absent))))
        " · "))))
+
+(defun arc-freshness-summary ()
+  "Return a compact summary of `arc-freshness-report', or nil if all fresh.
+See `arc-freshness--summarize'."
+  (arc-freshness--summarize (arc-freshness-report)))
 
 ;;;###autoload
 (defun arc-freshness ()
@@ -1369,20 +1374,25 @@ has the detail."
       (pop-to-buffer (current-buffer)))))
 
 (defcustom arc-freshness-cache-ttl 30
-  "Seconds `arc-freshness-summary-cached' may reuse a result.
+  "Seconds `arc-freshness-report-cached' may reuse a result.
 Longer than `arc-index-stats-cache-ttl' because the per-source half
-re-hashes every mutable source -- 656 files on this corpus -- and the
-status callers ask repeatedly.  Staleness that is 30 seconds out of
-date is still staleness you can see."
+re-hashes every mutable source -- roughly 11,000 of the corpus's
+~272,000 chunks -- and the status callers ask repeatedly.  Staleness
+that is 30 seconds out of date is still staleness you can see."
   :type 'number :group 'arc)
 
 (defvar arc--freshness-cache nil
-  "Cached summary as (GENERATION TIMESTAMP SUMMARY), or nil.")
+  "Cached `arc-freshness-report' answer as (GENERATION TIMESTAMP REPORT), or nil.")
 
-(defun arc-freshness-summary-cached ()
-  "Like `arc-freshness-summary', but reuse a recent answer.
-Invalidated by `arc-index--write-generation' or the TTL, exactly as
-`arc-index-stats-cached' is."
+(defun arc-freshness-report-cached ()
+  "Like `arc-freshness-report', but reuse a recent answer.
+The per-source half of a freshness report re-hashes every mutable
+source, and `arc-tool-stats' -- what an MCP client polls -- asks for it
+on every call.  Caching the whole report rather than only the summary
+keeps that surface from reading and hashing the mutable corpus each
+time while leaving the report's shape unchanged.  Invalidated by
+`arc-index--write-generation' or by `arc-freshness-cache-ttl' elapsing,
+exactly as `arc-index-stats-cached' is."
   (unless (pcase arc--freshness-cache
             (`(,gen ,ts ,_)
              (and (eq gen arc-index--write-generation)
@@ -1390,8 +1400,7 @@ Invalidated by `arc-index--write-generation' or the TTL, exactly as
                   (< (float-time (time-since ts)) arc-freshness-cache-ttl)))
             (_ nil))
     (setq arc--freshness-cache
-          (list arc-index--write-generation (current-time)
-                (condition-case nil (arc-freshness-summary) (error "unknown")))))
+          (list arc-index--write-generation (current-time) (arc-freshness-report))))
   (nth 2 arc--freshness-cache))
 
 (provide 'arc-index)
