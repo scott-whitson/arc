@@ -24,6 +24,18 @@ fail=0
 # does.
 emacs_args=(-Q -batch -L . --eval "(progn (require 'package) (package-initialize))")
 
+# No suite may reach the operator's real database. `arc-db-directory'
+# defaults to ~/.config/emacs/arc, and a test that calls `arc-db' without
+# `arc-test-with-temp-db' opens THAT file: a schema init and a DELETE
+# against the live index, and -- while a reindex holds the write lock --
+# an intermittent `database is locked' failure, which is how this was
+# found. Every suite starts with the directory pointed at a scratch one
+# instead (a defcustom keeps a value already bound when it loads), and
+# the run fails if anything was created there, so the test that did it
+# is named rather than silently tolerated.
+scratch_db="$(mktemp -d)"
+emacs_args+=(--eval "(setq arc-db-directory \"$scratch_db\")")
+
 # Byte-compile gate. A missing `require' can leave every ERT suite green
 # -- phase 4's header line shipped broken exactly that way, because
 # nothing in the package required `arc-index' and six suites did not
@@ -41,14 +53,21 @@ if grep -q 'Warning:' "$bclog" || [ "$bcstatus" -ne 0 ]; then
 fi
 rm -f "$bclog"
 total_tests=0
+unisolated=()
 skipped=0
 log="$(mktemp)"
-trap 'rm -f "$log"' EXIT
+trap 'rm -f "$log"; rm -rf "$scratch_db"' EXIT
 for f in test/test-*.el; do
   echo "== $f"
   emacs "${emacs_args[@]}" -l "$f" -f ert-run-tests-batch-and-exit 2>&1 | tee "$log"
   status=${PIPESTATUS[0]}
   [ "$status" -eq 0 ] || fail=1
+  if [ -n "$(ls -A "$scratch_db")" ]; then
+    echo "$f opened the default arc database (use arc-test-with-temp-db)" >&2
+    unisolated+=("$f")
+    fail=1
+    rm -rf "${scratch_db:?}"/*
+  fi
   if grep -q '^SKIP:' "$log"; then
     skipped=$((skipped + 1))
   else
@@ -63,5 +82,6 @@ done
 # 149 tests and running all 149 print exactly the same "exit 0" and are
 # not otherwise distinguishable from the shell's own exit status alone.
 echo "---"
+for f in "${unisolated[@]}"; do echo "unisolated suite: $f"; done
 echo "arc test summary: ${total_tests} test(s) run across $(( $(ls test/test-*.el | wc -l) - skipped )) suite(s), ${skipped} suite(s) skipped (no vec0 extension found), exit ${fail}"
 exit "$fail"

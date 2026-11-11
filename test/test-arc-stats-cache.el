@@ -81,12 +81,22 @@ or a batch job -- which the generation counter alone would miss."
        (should (> arc-index--write-generation before))))))
 
 (ert-deftest asc-deleting-data-bumps-the-generation ()
-  (let ((before arc-index--write-generation))
-    (arc--delete-data nil)
-    (should (= arc-index--write-generation before))   ; nothing deleted, no bump
-    (cl-letf (((symbol-function 'arc--delete-from-table) (lambda (&rest _) nil)))
-      (arc--delete-data '(1 2 3))
-      (should (> arc-index--write-generation before)))))
+  "Ran with no temporary database, so its empty delete opened the
+operator's real one -- and failed `database is locked' whenever a live
+reindex held the write lock.  It now runs against a scratch database,
+and an empty delete no longer opens one at all."
+  (arc-test-with-temp-db
+   (let ((before arc-index--write-generation))
+     (arc--delete-data nil)
+     (should (= arc-index--write-generation before))   ; nothing deleted, no bump
+     (cl-letf (((symbol-function 'arc--delete-from-table) (lambda (&rest _) nil)))
+       (arc--delete-data '(1 2 3))
+       (should (> arc-index--write-generation before))))))
+
+(ert-deftest asc-deleting-nothing-never-opens-the-database ()
+  (cl-letf (((symbol-function 'arc-db)
+             (lambda () (error "arc-db opened for an empty delete"))))
+    (should-not (arc--delete-data nil))))
 
 (ert-deftest asc-tool-stats-uses-both-caches ()
   "`arc-tool-stats' is what an MCP client polls; neither expensive half

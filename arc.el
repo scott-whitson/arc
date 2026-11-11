@@ -529,11 +529,16 @@ than T, it will be packed into single semantic chunk."
 	   (arc-sqlite-format-int-list ids))))
 
 (defun arc--delete-data (ids)
-  "Delete data with IDS."
-  (arc--delete-from-table "data_fts" ids)
-  (arc--delete-from-table "data_embeddings" ids)
-  (arc--delete-from-table "data" ids)
-  (when ids (arc-index--bump-write-generation)))
+  "Delete data with IDS.  Return nil, touching nothing, when IDS is empty.
+An empty delete used to open the database and run three statements that
+matched no row -- harmless in itself, but it made a caller with nothing
+to delete contend for the write lock, and a test calling it that way
+reached whatever database `arc-db-directory' named."
+  (when ids
+    (arc--delete-from-table "data_fts" ids)
+    (arc--delete-from-table "data_embeddings" ids)
+    (arc--delete-from-table "data" ids)
+    (arc-index--bump-write-generation)))
 
 (defun arc-fts--phrase (text)
   "Return TEXT as an FTS5 quoted phrase, or nil when it sanitises to nothing.
