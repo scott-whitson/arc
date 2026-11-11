@@ -114,9 +114,25 @@ function that tries to read a yes/no or coding-system answer from the
 minibuffer reads from stdin, and with nothing attached to stdin that
 is `(end-of-file \"Error reading from stdin\")' -- not a hang, not a
 silent default.  This is what made the original crash look like an
-unrelated stdin error far from `arc--text-file-p'."
-  (skip-unless noninteractive)
-  (should-error (y-or-n-p "does this eof in batch? ") :type 'end-of-file))
+unrelated stdin error far from `arc--text-file-p'.
+
+The prompt runs in a child Emacs whose stdin is /dev/null, not in this
+process.  Asked here, it read THIS process's stdin, so the test held
+only when the caller had redirected it: with stdin an open pipe or a
+terminal -- `test/run.sh' from an interactive shell, or a harness that
+keeps a pipe open -- `y-or-n-p' waited for an answer that never came
+and the suite hung here.  The child's stdin is the condition the test
+is about, so the child is where it is pinned."
+  (let* ((emacs (expand-file-name invocation-name invocation-directory))
+         (out (with-temp-buffer
+                (call-process emacs "/dev/null" t nil "-Q" "-batch" "--eval"
+                              (prin1-to-string
+                               '(condition-case err
+                                    (progn (y-or-n-p "does this eof in batch? ")
+                                           (princ "ANSWERED"))
+                                  (end-of-file (princ (format "EOF:%S" err))))))
+                (buffer-string))))
+    (should (string-match-p "EOF:(end-of-file" out))))
 
 (ert-deftest atn-no-prompt-on-provocative-content ()
   "None of these fixtures may reach `find-file-noselect' or
