@@ -106,6 +106,20 @@ so a build failure on stderr never becomes a spurious path."
                  (and desc (concat "\n" desc))))
      "\n")))
 
+(defun arc--nixopt-declaration-path (decls)
+  "Return the first entry of DECLS as a path string, or nil.
+NixOS's options.json lists each declaration as a plain store-path
+string; Home-Manager's lists an object with a \"name\" (such as
+\"<nixpkgs/lib/modules.nix>\") and a \"url\".  Taking the object
+whole put a hash table where every consumer expects a string, and the
+first one to touch it stopped the async run before any hm option, or
+any collection after it, was indexed."
+  (let ((first (and decls (> (length decls) 0) (aref decls 0))))
+    (cond ((stringp first) first)
+          ((hash-table-p first)
+           (let ((name (gethash "name" first)))
+             (and (stringp name) name))))))
+
 (defun arc-nixopt-parse-json (path kind)
   "Parse the options.json at PATH into source plists of KIND.
 Each plist has :kind, :option-name, :path (the first declaration),
@@ -126,7 +140,7 @@ to need splitting the way an org-roam node can be)."
               (text (arc--nixopt-text name spec)))
          (push (list :kind kind
                      :option-name name
-                     :path (and decls (> (length decls) 0) (aref decls 0))
+                     :path (arc--nixopt-declaration-path decls)
                      :text text
                      :chunks (list (list :text text :line-start 1 :line-end 1)))
                out)))

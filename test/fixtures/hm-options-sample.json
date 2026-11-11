@@ -1,0 +1,14 @@
+{
+  "programs.example.enable": {
+    "declarations": [{"name": "<home-manager/modules/programs/example.nix>",
+                      "url": "https://github.com/nix-community/home-manager/blob/master/modules/programs/example.nix"}],
+    "description": "Whether to enable example.",
+    "type": "boolean",
+    "default": {"_type": "literalExpression", "text": "false"}
+  },
+  "programs.example.package": {
+    "declarations": [],
+    "description": "The example package.",
+    "type": "package"
+  }
+}

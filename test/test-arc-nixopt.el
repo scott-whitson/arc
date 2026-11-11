@@ -63,3 +63,19 @@ just :text -- `arc-index-source' reads only :chunks."
   (dolist (o (arc-nixopt-parse-json an-fixture "nix-option"))
     (should (= (length (plist-get o :chunks)) 1))
     (should (equal (plist-get (car (plist-get o :chunks)) :text) (plist-get o :text)))))
+
+(ert-deftest an-hm-declaration-objects-become-path-strings ()
+  "Home-Manager's options.json lists a declaration as an object, not a
+string.  The parser must hand back the object's name as :path -- a hash
+table there stopped the whole async reindex at the first hm option."
+  (let* ((fixture (expand-file-name "test/fixtures/hm-options-sample.json" an-root))
+         (opts (arc-nixopt-parse-json fixture "hm-option"))
+         (by-name (lambda (n) (seq-find (lambda (o) (equal (plist-get o :option-name) n))
+                                        opts))))
+    (should (= (length opts) 2))
+    (should (equal (plist-get (funcall by-name "programs.example.enable") :path)
+                   "<home-manager/modules/programs/example.nix>"))
+    (should (null (plist-get (funcall by-name "programs.example.package") :path)))
+    (dolist (o opts) (should (or (null (plist-get o :path))
+                                 (stringp (plist-get o :path)))))))
+
