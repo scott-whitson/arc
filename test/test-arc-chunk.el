@@ -110,6 +110,119 @@
                          (plist-get (nth 1 chunks) :line-end))
                    '(5 7)))))
 
+;;; --- The ceiling applies to every chunk, not only to text blobs -------
+;; The `file' chunker split on blank lines (or a boundary regexp) and
+;; stopped there, so a file with no blank line in it -- a log, a lock
+;; file, a long note written without paragraph breaks -- was one chunk
+;; however long it was, and `nomic-embed-text' embedded only its head.
+
+(defun ac-lines-of (text from to)
+  "Return lines FROM..TO (1-based, inclusive) of TEXT, joined and trimmed."
+  (string-trim (string-join (seq-subseq (split-string text "\n") (1- from) to) "\n")))
+
+(defun ac-chunk-string (text &optional boundary)
+  (with-temp-buffer (insert text) (arc-chunk-buffer boundary)))
+
+(defun ac-numbered-lines (n)
+  (mapconcat (lambda (i) (format "line %03d of a paragraph with no break" i))
+             (number-sequence 1 n) "\n"))
+
+(ert-deftest ac-oversized-paragraph-splits-at-line-breaks-under-the-ceiling ()
+  (let* ((arc-chunk-size-ceiling 200)
+         (text (ac-numbered-lines 40))
+         (chunks (ac-chunk-string text)))
+    (should (> (length chunks) 1))
+    (dolist (c chunks)
+      (should (<= (length (plist-get c :text)) 200))
+      ;; cut at a line break: the chunk is exactly the lines it cites
+      (should (equal (plist-get c :text)
+                     (ac-lines-of text (plist-get c :line-start) (plist-get c :line-end)))))
+    ;; contiguous and complete: no line lost, none repeated
+    (should (= (plist-get (car chunks) :line-start) 1))
+    (should (= (plist-get (car (last chunks)) :line-end) 40))
+    (cl-loop for (a b) on chunks while b
+             do (should (= (1+ (plist-get a :line-end)) (plist-get b :line-start))))))
+
+(ert-deftest ac-ceiling-applies-to-a-real-file ()
+  "Through `arc-chunk-file', the `file' chunker's own entry point."
+  (let ((arc-chunk-size-ceiling 200)
+        (f (make-temp-file "arc-chunk-ceiling" nil ".txt" (ac-numbered-lines 40))))
+    (unwind-protect
+        (let ((chunks (arc-chunk-file f)))
+          (should (> (length chunks) 1))
+          (should (cl-every (lambda (c) (<= (length (plist-get c :text)) 200)) chunks)))
+      (delete-file f))))
+
+(ert-deftest ac-a-line-longer-than-the-ceiling-is-hard-split-losslessly ()
+  "With no paragraph, line or space break, the last resort is a cut at
+the ceiling itself; the pieces still concatenate to the original."
+  (let* ((arc-chunk-size-ceiling 100)
+         (text (make-string 350 ?x))
+         (chunks (ac-chunk-string text)))
+    (should (equal (mapcar (lambda (c) (length (plist-get c :text))) chunks)
+                   '(100 100 100 50)))
+    (should (equal (apply #'concat (mapcar (lambda (c) (plist-get c :text)) chunks)) text))
+    (should (cl-every (lambda (c) (= 1 (plist-get c :line-start) (plist-get c :line-end)))
+                      chunks))))
+
+(ert-deftest ac-a-long-line-prefers-a-space-to-a-mid-word-cut ()
+  (let* ((arc-chunk-size-ceiling 50)
+         (text (mapconcat #'identity (make-list 30 "word") " "))
+         (chunks (ac-chunk-string text)))
+    (dolist (c chunks)
+      (should (<= (length (plist-get c :text)) 50))
+      (should (string-match-p "\\`\\(word\\)\\( word\\)*\\'" (plist-get c :text))))))
+
+(ert-deftest ac-an-oversized-definition-splits-at-its-own-blank-lines-first ()
+  "Boundary mode: one huge top-level form with paragraph breaks inside is
+cut at a paragraph break, and keeps its real line numbers."
+  (let* ((arc-chunk-size-ceiling 120)
+         (para (lambda (tag) (mapconcat (lambda (i) (format "  ;; %s %d" tag i))
+                                        (number-sequence 1 4) "\n")))
+         (text (concat "(defun small () 1)\n"
+                       "(defun big ()\n" (funcall para "alpha") "\n\n"
+                       (funcall para "beta") "\n\n" (funcall para "gamma") ")\n"))
+         (chunks (ac-chunk-string text "^(")))
+    (should (equal (plist-get (car chunks) :text) "(defun small () 1)"))
+    (dolist (c (cdr chunks))
+      (should (<= (length (plist-get c :text)) 120))
+      (should (equal (plist-get c :text)
+                     (ac-lines-of text (plist-get c :line-start) (plist-get c :line-end))))
+      ;; never two paragraphs' tags torn across a line
+      (should-not (string-match-p "\\`[ \t]*\n\\|\n[ \t]*\\'" (plist-get c :text))))
+    (should (= (plist-get (nth 1 chunks) :line-start) 2))
+    (should (= (plist-get (car (last chunks)) :line-end) 16))))
+
+(ert-deftest ac-line-start-skips-leading-blank-lines ()
+  "Two blank lines between paragraphs used to leave the second chunk's
+:line-start on the blank line; it names the first line of text now."
+  (let ((chunks (ac-chunk-string "\n\nfirst\n\n\n\nsecond\n")))
+    (should (equal (mapcar (lambda (c) (plist-get c :line-start)) chunks) '(3 7)))
+    (should (equal (mapcar (lambda (c) (plist-get c :line-end)) chunks) '(3 7)))))
+
+(ert-deftest ac-merge-target-nil-keeps-one-paragraph-per-chunk ()
+  (should (= 3 (length (ac-chunk-string "a\n\nb\n\nc\n")))))
+
+(ert-deftest ac-merge-target-joins-adjacent-small-paragraphs ()
+  (let* ((arc-chunk-merge-target 12)
+         ;; "aaaa\n\nbbbb" is 10 <= 12; adding "\n\ncccc" makes 16 > 12
+         (chunks (ac-chunk-string "aaaa\n\nbbbb\n\ncccc\n\ndddd\n\n\n\neeeeeeeeeeeeeeeeeeee\n")))
+    (should (equal (mapcar (lambda (c) (plist-get c :text)) chunks)
+                   '("aaaa\n\nbbbb" "cccc\n\ndddd" "eeeeeeeeeeeeeeeeeeee")))
+    (should (equal (mapcar (lambda (c) (list (plist-get c :line-start) (plist-get c :line-end)))
+                           chunks)
+                   '((1 3) (5 7) (11 11))))))
+
+(ert-deftest ac-merge-target-is-capped-by-the-ceiling ()
+  (let ((arc-chunk-merge-target 1000)
+        (arc-chunk-size-ceiling 12))
+    (dolist (c (ac-chunk-string "aaaa\n\nbbbb\n\ncccc\n\ndddd\n"))
+      (should (<= (length (plist-get c :text)) 12)))))
+
+(ert-deftest ac-merge-target-leaves-boundary-chunks-alone ()
+  (let ((arc-chunk-merge-target 1000))
+    (should (= 2 (length (ac-chunk-string "(defun a () 1)\n(defun b () 2)\n" "^("))))))
+
 ;;; --- arc-chunk-text: a size ceiling for oversized nodes ---------------
 ;; Live org-roam notes as large as 436 KB have been seen as a single node
 ;; with no chunking at all; `nomic-embed-text' truncates far below that, so

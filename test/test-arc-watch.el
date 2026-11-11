@@ -299,5 +299,55 @@ and the idle sweep re-embedded unchanged notes on every tick."
            (should (arc-file-changed-p f))))
       (delete-directory dir t))))
 
+;;; --- arc-reindex-oversized: redo only what an old chunker left too long
+
+(ert-deftest awa-oversized-reindex-rechunks-only-the-oversized-source ()
+  (awa-with-corpus
+    (let ((big (expand-file-name "big.txt" dir)))
+      (with-temp-file big
+        (insert (mapconcat (lambda (i) (format "line %02d with no paragraph break" i))
+                           (number-sequence 1 30) "\n")))
+      ;; indexed as the old chunker would have: no ceiling to speak of
+      (let ((arc-chunk-size-ceiling 100000))
+        (arc-watch-reindex-path f t)
+        (arc-watch-reindex-path big t))
+      (let ((small-row (sqlite-select (arc-db) "SELECT d.id FROM data d JOIN sources s
+                                                ON s.id = d.source_id WHERE s.path = ?;"
+                                      (list f)))
+            (arc-chunk-size-ceiling 200))
+        (should (equal (arc-oversized-paths) (list big)))
+        (should (= 1 (arc-reindex-oversized nil)))
+        (should (null (arc-oversized-paths)))
+        (let ((lens (mapcar #'car (sqlite-select (arc-db) "SELECT length(d.chunk) FROM data d
+                                    JOIN sources s ON s.id = d.source_id WHERE s.path = ?;"
+                                                 (list big)))))
+          (should (> (length lens) 1))
+          (should (cl-every (lambda (n) (<= n 200)) lens)))
+        ;; the small file was not touched: same row, not a rewrite of it
+        (should (equal small-row
+                       (sqlite-select (arc-db) "SELECT d.id FROM data d JOIN sources s
+                                                ON s.id = d.source_id WHERE s.path = ?;"
+                                      (list f))))))))
+
+(ert-deftest awa-oversized-paths-counts-an-org-file-once-and-skips-derived-kinds ()
+  (let ((arc-embedding-size 3)
+        (arc-chunk-size-ceiling 10))
+    (arc-test-with-temp-db
+     (cl-letf (((symbol-function 'llm-embedding) (lambda (_p _t) [0.1 0.2 0.3])))
+       (dolist (id '("n1" "n2"))
+         (arc-index-source (list :kind "org-node" :org-id id :path "/tmp/awa-notes.org"
+                                 :chunks (list (list :text (make-string 50 ?o)
+                                                     :line-start 1 :line-end 1)))
+                           "vault"))
+       (arc-index-source (list :kind "info" :info-node "(awa)Top"
+                               :chunks (list (list :text (make-string 50 ?i)
+                                                   :line-start 1 :line-end 1)))
+                         "manuals")
+       (should (equal (arc-oversized-paths) '("/tmp/awa-notes.org")))))))
+
+(ert-deftest awa-oversized-reindex-refuses-during-a-running-reindex ()
+  (let ((arc--reindex-async-active (list :cancelled nil)))
+    (should-error (arc-reindex-oversized nil) :type 'user-error)))
+
 (provide 'test-arc-watch)
 ;;; test-arc-watch.el ends here

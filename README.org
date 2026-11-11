@@ -419,6 +419,16 @@ Both paths prune sources that have left a collection (deleted, newly
 ignored, or emptied to nothing) once that collection's pass completes;
 a cancelled pass prunes nothing.
 
+No chunk is longer than ~arc-chunk-size-ceiling~ (4,000 characters): a
+longer paragraph or definition is cut at a paragraph break, then a line
+break, then a space. An index built before that held for files (before
+2026-11-11) still has chunks as long as whole files, whose embeddings saw
+only their head; ~M-x arc-reindex-oversized~ re-chunks just the sources
+holding one, without a full rebuild. ~arc-chunk-merge-target~ (default
+nil) packs adjacent small paragraphs into one chunk; on the author's
+=home= it takes the census from 181,967 chunks to 75,382, but what it
+does to retrieval is unmeasured, so it is off.
+
 *** 4. Enable the collections you actually want searched
 
 ~arc-enabled-collections~ -- the collections used when a caller supplies

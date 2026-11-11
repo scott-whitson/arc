@@ -300,5 +300,50 @@ commentary."
     (when arc-watch--timer (cancel-timer arc-watch--timer))
     (setq arc-watch--timer nil)))
 
+;;; Re-chunking what an older chunker left oversized
+
+(defun arc-oversized-paths (&optional ceiling)
+  "Return the paths of indexed sources holding a chunk over CEILING.
+CEILING defaults to `arc-chunk-size-ceiling'.  Only the mutable kinds
+are asked -- `file' and `org-node' -- since only they have a path to
+re-read; an org file counts once however many of its nodes are
+oversized.  Reads the database only; nothing is written."
+  (mapcar #'car
+          (sqlite-select
+           (arc-db)
+           (format "SELECT DISTINCT s.path FROM data d
+  JOIN sources s ON s.id = d.source_id
+  WHERE s.kind IN ('file', 'org-node') AND s.path IS NOT NULL
+    AND length(d.chunk) > %d
+  ORDER BY s.path;" (or ceiling arc-chunk-size-ceiling)))))
+
+;;;###autoload
+(defun arc-reindex-oversized (&optional async)
+  "Re-index only the sources that hold a chunk over `arc-chunk-size-ceiling'.
+A chunk that long was written before the ceiling applied to the `file'
+chunker, or to a single paragraph of an org node, and its embedding
+saw only the head of it.  Re-chunking those sources is a few hundred
+files' work; a full `arc-reindex-all' is every file's.
+
+The paths come from `arc-oversized-paths' and go through
+`arc-watch--reindex-paths', the watcher's own route, so each lands in
+the collection the walk assigns it, a path no longer indexable is
+skipped, and an org file is re-read whole.  With ASYNC non-nil (always,
+interactively) the embedding goes through the bounded asynchronous
+queue; nil indexes synchronously, so a script sees every write before
+this returns.  Return the number of paths that produced sources.
+
+Refuses while an asynchronous `arc-reindex-all' is running: that run
+is rewriting the same sources, and the two would race."
+  (interactive (list t))
+  (when arc--reindex-async-active
+    (user-error "arc: a reindex is running; run this once it finishes"))
+  (let* ((paths (arc-oversized-paths))
+         (handled (let ((arc-watch-async async))
+                    (arc-watch--reindex-paths paths))))
+    (message "arc: re-chunking %d of %d source path(s) with an oversized chunk"
+             handled (length paths))
+    handled))
+
 (provide 'arc-watch)
 ;;; arc-watch.el ends here
