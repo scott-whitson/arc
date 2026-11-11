@@ -135,3 +135,33 @@ reported as median and p95 with the first query dropped as warm-up.
   transcripts into 344,484 chunks averaging 203 characters; merging small
   paragraphs would change every file collection's numbers and needs its own
   measurement.
+
+## First measurement on the full corpus (2026-11-11 15:14)
+
+227,187 chunks after the hm-option fix and the oversized re-chunk; 70
+questions, dev 45+4 negative, test 19+2. `arc-eval-final-report`, fusion
+tuned on dev only.
+
+| config | dev doc R@10 | dev doc MRR | test doc R@10 | test doc MRR |
+|---|---|---|---|---|
+| shipped rrf k=60 w=2 | 0.826 | 0.456 | 0.850 | 0.580 |
+| best rrf (k=10 w=0.5) | 0.826 | 0.506 | 0.850 | 0.498 |
+| cc min-max w=0.4 | 0.870 | 0.520 | 0.850 | 0.517 |
+| cc tmm w=0.9 | 0.848 | 0.480 | 0.900 | 0.633 |
+| cc z-score w=0.4 | 0.891 | 0.527 | 0.850 | 0.556 |
+| cc dbsf w=0.5 | 0.891 | 0.449 | 0.850 | 0.597 |
+
+**Decision: the shipped fusion stays.** No family improves dev and test
+together. cc-tmm is best on test, but it gives up dev chunk R@5 (0.717
+against 0.739), and the test split is 19 questions, where one question
+moves R@10 by 0.05.
+
+**The refusal threshold stays unset.** The nearest distance separates the
+two sets cleanly: negatives run 0.37–0.44, positives 0.154–0.347, and
+T=0.35 refuses 6/6 negatives and 0/64 positives. But the positive margin
+is 0.003, and it rests on six negatives. `arc-retrieval-max-distance` is
+also not yet applied on the retrieval path. Grow the negatives first;
+wire the threshold only once a margin survives that.
+
+Latency median: embed 0.025 s, semantic arm 0.61 s, keyword arm 0.12 s,
+live fused query 0.70 s (p95 0.93 s). The semantic arm is the cost.
