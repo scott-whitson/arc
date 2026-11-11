@@ -66,9 +66,20 @@ Without it, split on blank lines.  Return a list of plists with :text,
       (nreverse chunks))))
 
 (defun arc-chunk-file (path)
-  "Return the chunks of the file at PATH."
+  "Return the chunks of the file at PATH.
+The read bypasses `jka-compr', Emacs's transparent decompression.  A
+file only reaches here once `arc--text-file-p' has read its bytes and
+found text, so a name ending `.gz' or `.bz2' is a lie about its
+contents -- and `jka-compr' believes the name, tries to decompress, and
+signals.  Found live: a 9-byte text file named `yazi.tar.gz' under
+$HOME aborted the whole walk, and with it every collection queued
+behind it.  A genuinely compressed file is binary to the probe and
+never gets this far."
   (with-temp-buffer
-    (insert-file-contents path)
+    (let ((inhibit-file-name-handlers
+           (cons 'jka-compr-handler inhibit-file-name-handlers))
+          (inhibit-file-name-operation 'insert-file-contents))
+      (insert-file-contents path))
     (arc-chunk-buffer (arc--boundary-for path))))
 
 (defcustom arc-chunk-size-ceiling 4000

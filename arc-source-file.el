@@ -355,12 +355,45 @@ slash for `/\\.[^/]*' to match.  A second pattern, `$\\.[^/]*', once
 sat beside that one for the same job and never did it: a leading `$'
 is literal in a regexp, so it matched no hidden file at all, while
 false-excluding any path containing the two characters `$.'."
-  (let ((relative (file-relative-name file root)))
-    (and (not (seq-some (lambda (regexp) (string-match-p regexp relative))
-                        ignore-regexps))
-         (not (and arc-ignore-invisible-files
-                   (string-match-p "/\\.[^/]*" (concat "/" relative))))
-         (not (arc--denylisted-p file)))))
+  (arc--relative-path-indexable-p (file-relative-name file root) file ignore-regexps))
+
+(defun arc--relative-path-indexable-p (relative absolute ignore-regexps)
+  "Return non-nil when RELATIVE, ABSOLUTE's path under its collection
+root, passes every path rule.  The body of `arc--path-indexable-p',
+split out so `arc--directory-descendable-p' can ask the same rules
+about a probe string that is not a real file name."
+  (and (not (seq-some (lambda (regexp) (string-match-p regexp relative))
+                      ignore-regexps))
+       (not (and arc-ignore-invisible-files
+                 (string-match-p "/\\.[^/]*" (concat "/" relative))))
+       (not (arc--denylisted-p absolute))))
+
+(defun arc--directory-descendable-p (dir root ignore-regexps)
+  "Return non-nil unless no file under DIR could pass the path rules.
+DIR is a directory under ROOT; IGNORE-REGEXPS are ROOT's.  This is the
+walk's descend predicate, and it must never prune a directory holding
+a file the per-file rules would admit -- it is an optimisation of
+`arc--file-list', not a second set of rules.
+
+The test is the per-file rules asked about DIR's path with a child
+named by a single NUL byte appended.  No real file name contains NUL,
+and `wildcard-to-regexp' translates `*' and `?' to classes that exclude
+it, so no pattern can match the probe BY its last component: a pattern
+that matches it must have matched at a `/' boundary inside DIR's own
+path, which is exactly the case where it matches every file under DIR
+too.  A pattern that names only an exact path (an interior slash, no
+trailing one) has to consume the NUL to match and so never prunes
+anything -- correct, because under arc's ignore rules such a pattern
+excludes that one path and nothing beneath it.
+
+Why it exists: `directory-files-recursively' used to descend into
+everything and filter afterwards, so a `home' walk listed every file
+under ~/.local, ~/.cache, every `node_modules' and every ignored build
+tree before discarding them.  That walk is now on the freshness path
+too (see `arc-freshness-report'), which is what made its cost matter."
+  (let ((probe (concat (file-name-as-directory (file-relative-name dir root)) "\0")))
+    (arc--relative-path-indexable-p
+     probe (concat (file-name-as-directory dir) "\0") ignore-regexps)))
 
 (defun arc--file-indexable-p (file root ignore-regexps)
   "Return non-nil when FILE belongs in the collection rooted at ROOT.
@@ -373,14 +406,27 @@ corpus.  IGNORE-REGEXPS are ROOT's; see `arc--path-indexable-p'."
   (and (arc--path-indexable-p file root ignore-regexps)
        (arc--text-file-p file)))
 
+(defun arc--file-candidates (directory)
+  "Return every file under DIRECTORY that passes the PATH rules alone.
+No file is opened: `arc--text-file-p' is what `arc--file-list' adds on
+top.  The walk never descends into a directory
+`arc--directory-descendable-p' rules out, so an ignored or dotted tree
+costs one predicate call rather than a full listing.  DIRECTORY's
+ignore files are read once for the whole walk."
+  (let* ((directory (file-name-as-directory (expand-file-name directory)))
+         (ignore-regexps (arc--read-ignore-file-regexps directory)))
+    (seq-filter (lambda (file) (arc--path-indexable-p file directory ignore-regexps))
+                (directory-files-recursively
+                 directory ".*" nil
+                 (lambda (dir) (arc--directory-descendable-p dir directory ignore-regexps))))))
+
 (defun arc--file-list (directory)
   "List of files to parse in DIRECTORY.
-A walk plus a filter over `arc--file-indexable-p', which is where every
-rule about what belongs in the corpus now lives.  DIRECTORY's ignore
-files are read once for the whole walk rather than once per candidate."
-  (let ((ignore-regexps (arc--read-ignore-file-regexps directory)))
-    (seq-filter (lambda (file) (arc--file-indexable-p file directory ignore-regexps))
-                (directory-files-recursively directory ".*"))))
+`arc--file-candidates' -- the path rules -- filtered through
+`arc--text-file-p', the content rule; together they are
+`arc--file-indexable-p', which is where every rule about what belongs
+in the corpus lives."
+  (seq-filter #'arc--text-file-p (arc--file-candidates directory)))
 
 (defun arc-file-hash-coding-system (&rest _)
   "Coding system `arc-file-hash' hashes with.

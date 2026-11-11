@@ -150,3 +150,19 @@ chunk exceeds the ceiling."
 
 (ert-deftest act-empty-text-produces-no-chunks ()
   (should (null (arc-chunk-text "   \n\n  "))))
+
+(ert-deftest act-a-text-file-named-like-an-archive-is-read-as-text ()
+  "A plain-text file whose name ends `.tar.gz' must chunk as the text it
+is: transparent decompression believed the name and signalled, which
+aborted a whole collection's walk."
+  (let* ((plain (make-temp-file "arc-chunk" nil ".txt" "not gzip"))
+         (f (concat (file-name-sans-extension plain) ".tar.gz")))
+    ;; Written under a plain name and renamed: writing to a `.gz' name
+    ;; directly would have `jka-compr' really compress it.
+    (rename-file plain f)
+    (unwind-protect
+        (progn
+          (require 'jka-compr)
+          (auto-compression-mode 1)
+          (should (equal "not gzip" (plist-get (car (arc-chunk-file f)) :text))))
+      (delete-file f))))
