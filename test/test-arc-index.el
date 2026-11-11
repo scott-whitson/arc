@@ -317,7 +317,7 @@ left exactly as the baseline run left it."
   "A collection directory that exists but currently has nothing in it
 -- e.g. mounted but not yet caught up by a sync tool -- must not be
 mistaken for \"every source in this collection was deleted\": an empty
-enumeration is indistinguishable, from `arc--prune-collection', from a
+enumeration is indistinguishable, from `arc--prune-departed', from a
 directory that is merely momentarily empty, and deleting a whole
 collection is never the right answer to that ambiguity.  Reproduced
 against the unfixed version: 2 real sources went to 0 on exactly this
@@ -343,17 +343,53 @@ entirely and matched every source with data in the collection."
              (should (= 2 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))))
        (delete-directory dir t)))))
 
-(ert-deftest ai-prune-collection-refuses-an-empty-kept-ids ()
-  "Direct unit test of the guard in `arc--prune-collection' itself:
-called with an empty KEPT-IDS against a collection that has real data
-in it, it must remove nothing and return 0 -- not treat the missing
-`NOT IN' clause as \"no filter, match everything\"."
+(ert-deftest ai-prune-departed-refuses-an-empty-enumeration ()
+  "Direct unit test of the guard in `arc--prune-departed' itself: called
+with nothing enumerated against a collection that has real data in it,
+it must remove nothing and return 0 -- an empty walk is
+indistinguishable from a directory that is not ready yet."
   (ai-with-temp-db
    (arc-index-source '(:kind "file" :path "/tmp/x.txt" :chunks ((:text "a" :line-start 1 :line-end 1)))
                       "test")
    (let ((cid (arc--collection-id "test")))
-     (should (= 0 (arc--prune-collection cid nil)))
+     (should (= 0 (arc--prune-departed cid (make-hash-table :test 'equal) 0)))
      (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;")))))))
+
+(ert-deftest ai-prune-departed-keeps-by-identity ()
+  (ai-with-temp-db
+   (arc-index-source '(:kind "file" :path "/tmp/keep.txt" :chunks ((:text "a" :line-start 1 :line-end 1)))
+                      "test")
+   (arc-index-source '(:kind "file" :path "/tmp/gone.txt" :chunks ((:text "b" :line-start 1 :line-end 1)))
+                      "test")
+   (let* ((cid (arc--collection-id "test"))
+          (enumeration (arc--enumeration-keep
+                        '((:kind "file" :path "/tmp/keep.txt" :chunks ((:text "a")))))))
+     (should (= 1 (arc--prune-departed cid (car enumeration) (cdr enumeration))))
+     (should (equal '(("/tmp/keep.txt")) (sqlite-select (arc-db) "SELECT path FROM sources;")))
+     (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_embeddings;"))))
+     (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_fts;")))))))
+
+(ert-deftest ai-emptying-a-collections-only-source-removes-it ()
+  "The documented gap, closed: a collection's sole source edited down to
+zero chunks used to keep its OLD content indexed and citable forever,
+because the run wrote nothing and an empty written-id list is refused.
+The file is still enumerated -- it exists, it is merely empty -- so the
+prune now has the evidence it needs."
+  (ai-with-temp-db
+   (let ((dir (make-temp-file "arc-sole" t)))
+     (unwind-protect
+         (let ((f (expand-file-name "only.txt" dir))
+               (arc-index-plan '(("sole" . file)))
+               (arc-collection-directory-alist `(("sole" . ,dir))))
+           (with-temp-file f (insert "old content worth citing\n"))
+           (arc-reindex-all)
+           (should (= 1 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
+           (with-temp-file f (insert "   \n"))
+           (arc-reindex-all)
+           (should (= 0 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+           (should (= 0 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
+           (should (= 0 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data_embeddings;")))))
+       (delete-directory dir t)))))
 
 ;;; --- Round 5, item 2: no eager upsert ahead of a source's real write -
 
@@ -363,7 +399,7 @@ must leave no `sources' row behind at all.  Reproduced against the
 unfixed version: `arc--index-sources-with-progress' upserted every
 source eagerly, before indexing it, so an embedding failure for a
 brand-new source still left its (chunkless) row sitting in `sources'
-forever -- `arc--prune-collection' joins through `data' and can never
+forever -- `arc--prune-departed' joins through `data' and can never
 see, let alone remove, a row with no `data' rows of its own."
   (ai-with-temp-db
    (let ((dir (make-temp-file "arc-interrupt-tree" t)))
@@ -425,7 +461,7 @@ its stale old chunks kept answering queries under the new hash."
   "`arc-index-source' offered a source with zero :chunks (what
 `arc-file-sources' produces for an empty or whitespace-only file) must
 create no `sources' row at all -- one with no `data' rows for
-`arc--prune-collection' to join through, and so never be able to
+`arc--prune-departed' to join through, and so never be able to
 remove, is exactly the \"phantom source\" this file's own docstrings
 already promise cannot happen."
   (ai-with-temp-db

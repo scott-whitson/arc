@@ -188,19 +188,18 @@ hundreds in a buffer."
      (should (= 5 (caar (sqlite-select (arc-db) "SELECT count(*) FROM data;"))))
      (should (aia-consistency-ok-p)))))
 
-(ert-deftest aia-async-reindex-never-prunes-a-source-the-producer-stopped-returning ()
-  "The asynchronous path does not prune at all, by design (see
-`arc-reindex-all''s and `arc--prune-collection''s docstrings): a
-second, full (uncancelled) run whose producer legitimately stopped
-returning some sources must leave them exactly as they were, not
-delete them.  Only a synchronous reindex prunes -- see
-`ai-reindex-all-prunes-sources-removed-from-the-corpus' in
-test-arc-index.el for that."
+(ert-deftest aia-async-reindex-prunes-a-source-the-producer-stopped-returning ()
+  "A second, complete (uncancelled) run whose producer legitimately
+stopped returning some sources removes them -- the same prune the
+synchronous path runs, against the same evidence: what the walk
+enumerated, not what the run wrote.  This was a known limitation; the
+reason it was one (a written-id list is never complete mid-run) does
+not apply to an enumeration gathered before the first embedding."
   (aia-with-temp-db
    (let* ((arc-index-plan '(("m" . info)))
           (arc-index-info-cap nil)
-          (first-run (aia-fake-sources 3 "stillhere")) ; (stillhere)Node1..3
-          (second-run (aia-fake-sources 1 "new")))     ; (new)Node1
+          (first-run (aia-fake-sources 3 "old"))
+          (second-run (append (take 1 first-run) (aia-fake-sources 1 "new"))))
      (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
                ((symbol-function 'arc-info-sources) (lambda (&rest _) first-run)))
        (arc-reindex-all nil t)
@@ -209,14 +208,135 @@ test-arc-index.el for that."
                ((symbol-function 'arc-info-sources) (lambda (&rest _) second-run)))
        (arc-reindex-all nil t)
        (aia-drain-all))
-     ;; the second run's producer never mentioned (stillhere)Node1..3 at
-     ;; all -- an async prune, if one existed, would read that as "gone"
-     (should (= 4 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;")))) ; 3 + 1
+     (should (= 2 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+     (should (= 1 (aia-source-count-for-node "(old)Node1")))
      (should (= 1 (aia-source-count-for-node "(new)Node1")))
-     (should (= 1 (aia-source-count-for-node "(stillhere)Node1")))
-     (should (= 1 (aia-source-count-for-node "(stillhere)Node2")))
-     (should (= 1 (aia-source-count-for-node "(stillhere)Node3")))
+     (should (= 0 (aia-source-count-for-node "(old)Node2")))
      (should (aia-consistency-ok-p)))))
+
+(ert-deftest aia-a-cancelled-run-over-a-shrunken-corpus-prunes-nothing ()
+  "Cancelling is the case that once deleted sources the run had not
+reached.  A cancelled pass reports no enumeration, so nothing goes --
+even sources the producer genuinely stopped returning."
+  (aia-with-temp-db
+   (let* ((arc-index-plan '(("m" . info)))
+          (arc-index-max-in-flight 1)
+          (first-run (aia-fake-sources 6 "old"))
+          (second-run (take 4 first-run)))
+     (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+               ((symbol-function 'arc-info-sources) (lambda (&rest _) first-run)))
+       (arc-reindex-all nil t)
+       (aia-drain-all))
+     (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+               ((symbol-function 'arc-info-sources) (lambda (&rest _) second-run)))
+       (arc-reindex-all nil t)
+       (aia-drain-one)
+       (arc-reindex-cancel)
+       (aia-drain-all))
+     (should (= 6 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+     (should (aia-consistency-ok-p)))))
+
+(ert-deftest aia-a-source-whose-embedding-fails-is-kept-not-pruned ()
+  "The third way the old async prune destroyed data: a source that
+failed to embed was missing from the kept list.  It is in the
+enumeration, so it keeps its old content."
+  (aia-with-temp-db
+   (let* ((arc-index-plan '(("m" . info)))
+          (fake (aia-fake-sources 3 "e")))
+     (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+               ((symbol-function 'arc-info-sources) (lambda (&rest _) fake)))
+       (arc-reindex-all nil t)
+       (aia-drain-all))
+     (let ((aia-error-texts '("e text 2")))
+       (cl-letf (((symbol-function 'llm-embedding-async) #'aia-fake-embedding-async-with-errors)
+                 ((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+                 ((symbol-function 'arc-info-sources) (lambda (&rest _) fake)))
+         (arc-reindex-all nil t)
+         (aia-drain-all)))
+     (should (= 3 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+     (should (equal '("e text 2") (aia-chunk-texts-for-node "(e)Node2")))
+     (should (aia-consistency-ok-p)))))
+
+(ert-deftest aia-a-completed-pass-records-provenance ()
+  "The asynchronous path never recorded provenance, so every derived
+collection it built read `unknown' forever after."
+  (aia-with-temp-db
+   (let ((arc-index-plan '(("m" . info)))
+         (fake (aia-fake-sources 2)))
+     (cl-letf (((symbol-function 'arc-get-builtin-manuals) (lambda () '("m")))
+               ((symbol-function 'arc-info-sources) (lambda (&rest _) fake))
+               ((symbol-function 'arc-collection-provenance-now) (lambda (_) "prov-1")))
+       (arc-reindex-all nil t)
+       (aia-drain-all))
+     (should (equal "prov-1" (arc-collection-provenance "m"))))))
+
+;;; --- file collections are read lazily, as the run reaches each file ---
+
+(defmacro aia-with-file-collection (dir-var &rest body)
+  (declare (indent 1))
+  `(let* ((,dir-var (file-name-as-directory (make-temp-file "aia-files" t)))
+          (arc-index-plan '(("f" . file)))
+          (arc-collection-directory-alist (list (cons "f" ,dir-var))))
+     (unwind-protect (progn ,@body)
+       (delete-directory ,dir-var t))))
+
+(ert-deftest aia-file-sources-are-read-only-when-the-run-reaches-them ()
+  "Gathering a file collection used to read, hash and chunk every file
+before the first embedding -- one synchronous call over all of $HOME,
+which on a host where Emacs is the compositor freezes the display."
+  (aia-with-temp-db
+   (aia-with-file-collection dir
+     (dotimes (i 4)
+       (with-temp-file (expand-file-name (format "f%d.txt" i) dir)
+         (insert (format "file %d\n" i))))
+     (let ((arc-index-max-in-flight 1)
+           (read 0)
+           (orig (symbol-function 'arc-file-source)))
+       (cl-letf (((symbol-function 'arc-file-source)
+                  (lambda (p) (cl-incf read) (funcall orig p))))
+         (arc-reindex-all nil t)
+         (should (= 1 read))
+         (aia-drain-all)
+         (should (= 4 read))))
+     (should (= 4 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+     (should (aia-consistency-ok-p)))))
+
+(ert-deftest aia-async-file-run-prunes-a-deleted-file-and-an-emptied-sole-source ()
+  (aia-with-temp-db
+   (aia-with-file-collection dir
+     (let ((a (expand-file-name "a.txt" dir))
+           (b (expand-file-name "b.txt" dir)))
+       (with-temp-file a (insert "alpha\n"))
+       (with-temp-file b (insert "beta\n"))
+       (arc-reindex-all nil t) (aia-drain-all)
+       (should (= 2 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+       (delete-file b)
+       (arc-reindex-all nil t) (aia-drain-all)
+       (should (equal (list (list a)) (sqlite-select (arc-db) "SELECT path FROM sources;")))
+       ;; now the sole source is emptied
+       (with-temp-file a (insert "  \n"))
+       (arc-reindex-all nil t) (aia-drain-all)
+       (should (= 0 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+       (should (aia-consistency-ok-p))))))
+
+(ert-deftest aia-a-file-that-cannot-be-read-stops-the-prune ()
+  "A deferred entry that signals leaves the enumeration incomplete: the
+pass goes on, but prunes nothing, because the unread file's identity
+is not in the set it would keep."
+  (aia-with-temp-db
+   (aia-with-file-collection dir
+     (let ((a (expand-file-name "a.txt" dir))
+           (b (expand-file-name "b.txt" dir)))
+       (with-temp-file a (insert "alpha\n"))
+       (with-temp-file b (insert "beta\n"))
+       (arc-reindex-all nil t) (aia-drain-all)
+       (let ((orig (symbol-function 'arc-file-source)))
+         (cl-letf (((symbol-function 'arc-file-source)
+                    (lambda (p) (if (equal p b) (error "induced read failure") (funcall orig p)))))
+           (arc-reindex-all nil t) (aia-drain-all)))
+       (should (= 2 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+       (should-not arc--reindex-async-active)
+       (should (aia-consistency-ok-p))))))
 
 ;;; --- the in-flight window is actually bounded ------------------------
 
@@ -239,15 +359,15 @@ tiny corpus, at least that many really do overlap."
        (should (= aia-max-concurrent 2))
        (should (= 9 aia-issued))))))
 
-;;; --- cancel never removes a source, by design (async never prunes) --
+;;; --- cancel never removes a source: a cancelled pass never prunes ----
 
 (ert-deftest aia-cancel-mid-run-does-not-remove-sources-the-run-never-reached ()
   "Originally a C1 regression test against a since-deleted prune call:
 `arc-reindex-cancel' partway through a collection used to delete
 sources this run had not gotten to yet, because the run's own
-(now-removed) prune ran against an incomplete kept-list.  Pruning is
-gone from the asynchronous path entirely now (see `arc-reindex-all''s
-docstring), so nothing here CAN delete anything -- this test now
+(since-replaced) prune ran against an incomplete kept-list.  The
+asynchronous prune now keeps what the walk enumerated, and a cancelled
+pass does not prune at all (see `arc--prune-departed'), so this test
 checks the more basic property that a cancel genuinely leaves
 untouched sources untouched, end to end, by `info_node' identity and
 not just a count.
@@ -652,8 +772,8 @@ the run's own (now-removed) end-of-collection prune then read the
 incomplete kept-list and deleted every OTHER source in the collection
 too -- measured before the fix: 30 chunks / 10 sources reindexed with
 one upsert failure among them converged cleanly reporting \"removed 10
-stale source(s)\".  Pruning is gone from the asynchronous path
-entirely now, so this reproduction must be inert: build a baseline,
+stale source(s)\".  The prune now keeps by enumerated identity, and
+the failing source is enumerated, so this reproduction must be inert: build a baseline,
 reindex again with one source's upsert failing exactly once (a
 transient failure -- a momentary sqlite lock, say), and confirm every
 OTHER source's chunk texts are byte-identical to baseline and nothing

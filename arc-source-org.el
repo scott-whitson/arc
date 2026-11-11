@@ -175,14 +175,21 @@ exactly as a full walk does."
     (append (delq nil (list (arc--org-file-node path)))
             (arc--org-heading-nodes path))))
 
+(defun arc-org-files (directory)
+  "Return every org file under DIRECTORY that `arc-org-nodes' parses.
+Dot-directories (.git, .stversions, and the like) are never descended
+into.  Split out so the asynchronous reindex, the census and the
+freshness check enumerate exactly the files the walk does without
+parsing any of them."
+  (directory-files-recursively directory "\\.org\\'" nil #'arc--org-not-dotdir-p))
+
 (defun arc-org-nodes (directory)
   "Return node plists for every org file under DIRECTORY.
 Dot-directories (.git, .stversions, and the like) are never descended
 into, so a stale or hidden copy of a note never shadows or duplicates
 its live :org-id."
   (let (out)
-    (dolist (path (directory-files-recursively
-                   directory "\\.org\\'" nil #'arc--org-not-dotdir-p))
+    (dolist (path (arc-org-files directory))
       (setq out (nconc out (arc-org-nodes-in-file path))))
     out))
 

@@ -251,7 +251,7 @@ lost 7 of a 10-chunk source's chunks the same way (synchronous).
 Upserting here too, not before, also means a `sources' row is never
 created without the `data' rows that go with it -- the \"phantom
 source\" a version of this that upserted eagerly used to allow: a row
-`arc--prune-collection', joining through `data', can never see and so
+`arc--prune-departed', joining through `data', can never see and so
 can never remove.  CHUNKS being empty (a producer -- `arc-file-sources'
 for an empty or whitespace-only file, say -- can legitimately yield
 zero of them for an otherwise-valid source) is handled the same way,
@@ -261,15 +261,11 @@ zero inserts, which is exactly how a phantom row -- one `sources' row
 with nothing in `data' for it to join through -- used to get created
 even after the fix above.  A source that already had real content and
 is reindexed down to zero chunks keeps its old row and old chunks
-here (nothing here decides whether that is now stale); ordinarily the
-synchronous path's `arc--prune-collection' pass, run once per whole
-collection with a complete kept-ids list, is what resolves that -- this
-source simply will not be in it.  That does not cover every case,
-though: if the emptied source was the collection's *only* source,
-KEPT-IDS comes back empty and `arc--prune-collection' refuses to prune
-an empty KEPT-IDS at all (by design -- see its docstring), so the
-emptied source's old content stays indexed and citable indefinitely.
-See the README's Known Limitations for this."
+here (nothing here decides whether that is now stale); the
+collection-level `arc--prune-departed' pass resolves that, because a
+source enumerated with no chunks is not in the set it keeps -- and that
+now holds even when the emptied source was the collection's only one,
+which used to stay indexed and citable indefinitely."
   (if (null chunks)
       nil
     (with-sqlite-transaction (arc-db)
@@ -288,9 +284,8 @@ just CHUNK-COUNT, SID being whatever `arc--replace-source-chunks'
 returned (nil for a zero-chunk SOURCE).  `arc-index-source' is the
 public, documented entry point and keeps its existing chunk-count
 contract; this is the one other caller, `arc--index-sources-with-
-progress', actually needs -- it has to build a trustworthy KEPT-IDS
-list for `arc--prune-collection' out of the source ids indexing
-*actually wrote*, not out of a separate, eager upsert of its own (see
+progress', actually needs -- it reports the source ids indexing
+*actually wrote*, not those of a separate, eager upsert of its own (see
 `arc--index-sources-with-progress')."
   (let* ((cid (arc--collection-id collection))
          (locator (and arc-embed-locator
@@ -546,81 +541,121 @@ order.  See `arc-index-info-priority-manuals' for what \"matches\" means."
                                    priority))))
     (append first (cl-remove-if (lambda (m) (member m first)) manuals))))
 
-(defun arc--prune-collection (cid kept-ids)
-  "Delete every source belonging to collection CID that is not in
-KEPT-IDS, cascading its chunks, embeddings and FTS rows via
-`arc-source-delete'.  Return how many sources were removed, or 0
-without touching the database at all when KEPT-IDS is empty -- see
-below.
-Upstream's directory walk deleted `data' rows for paths the current
-walk no longer yielded; nothing replaced that when `sources' gained
-its own identity, so anything deleted, newly gitignored, or newly
-excluded from the corpus stayed citable forever.  KEPT-IDS is the set
-of source ids this run's own walk of CID just touched (threaded from
-`arc-source-upsert', not recomputed), so a source that moved to a
-different collection in the very same `arc-reindex-all' run is not
-mistaken for one that vanished.
+(defun arc--source-identity (source)
+  "Return SOURCE's identity as a string, matching the `sources' unique key.
+That key is (kind, path, org_id, option_name, info_node) with NULLs read
+as empty strings -- see `arc-sources-create-index-sql' -- so two plists
+with the same identity here are the same `sources' row, whichever
+collection or run produced them.  A NUL separates the fields because no
+field can contain one."
+  (mapconcat (lambda (key) (or (plist-get source key) ""))
+             '(:kind :path :org-id :option-name :info-node)
+             "\0"))
 
-Only `arc--reindex-all-sync' calls this.  The asynchronous path does
-not prune at all: it enumerates its sources up front but writes them
-one at a time over what can be a very long run, so a KEPT-IDS built as
-it goes is never trustworthy until every source has actually been
-replaced -- a cancel, a producer error partway through the plan, or
-even just an unusually persistent per-source failure each turned an
-incomplete KEPT-IDS into a real, reproduced way to delete sources the
-run had simply not gotten to yet, not sources that had left the corpus.
-`arc-reindex-all''s synchronous path, by contrast, builds its KEPT-IDS
-by walking the *entire* source list before writing anything and lets
-any producer error propagate out and abort the whole run rather than
-silently truncate KEPT-IDS, so its list is complete by construction --
-see `arc-reindex-all''s docstring.
+(defun arc--prune-departed (cid keep enumerated)
+  "Remove from collection CID every source whose identity is not in KEEP.
+KEEP is a hash table of `arc--source-identity' strings: every source
+this run's walk of CID ENUMERATED that has at least one chunk.
+ENUMERATED is how many sources the walk produced at all, chunked or
+not.  Return how many sources were removed, or 0 without touching the
+database when ENUMERATED is zero.
 
-KEPT-IDS empty is refused outright rather than treated as \"nothing to
-keep, so delete everything this collection has\": a walk that
-genuinely found zero sources is indistinguishable, from here, from one
-whose directory was simply not ready yet -- unmounted, a sync tool
-mid-catch-up, a transient listing error a producer swallowed instead
-of signalling -- and the two cases call for opposite actions.  Since
-`arc--prune-collection' cannot tell them apart and deleting a whole
-collection is never the right answer to that ambiguity, an empty
-KEPT-IDS prunes nothing at all, every time, on purpose; reproduced
-live, this is exactly what turned an org-roam directory Syncthing
-simply had not finished syncing yet into 428 deleted sources on one
-`(arc-reindex-all)' run."
-  (if (null kept-ids)
+Removal is per collection: the source's `data' rows in CID go, with
+their `data_embeddings' and `data_fts' rows, and the `sources' row goes
+only once no collection has data for it.  A file can legitimately move
+between collections (an `.arcignore' edit hands it from `home' to
+`emacs', say), and pruning the collection it left must not take the
+copy the other one already wrote.
+
+WHY IDENTITY AND NOT WRITTEN IDS.  This used to be
+`arc--prune-collection', which kept the source ids a run had actually
+WRITTEN.  Two holes followed from that choice, and both are closed by
+keeping what the walk SAW instead:
+
+- The asynchronous path could not prune at all.  A list of written ids
+  is only complete once every source has been written, and a cancel, a
+  producer error or one stubborn embedding failure each left it short
+  -- three separate attempts each turned that into a reproduced way to
+  delete sources the run had simply not reached.  The enumeration is
+  complete from the start: it is gathered before any embedding begins.
+  A source whose embedding fails is still in it, so it is kept, with
+  its old content, exactly as before.
+- A collection's only source, emptied to zero chunks, was never removed.
+  Its walk wrote nothing, so the written-id list was empty, and an empty
+  list is refused (below).  An emptied file is still ENUMERATED -- the
+  walk found it, it just has nothing in it -- so ENUMERATED is 1, the
+  guard does not fire, and the source's old content goes.
+
+ENUMERATED zero is refused outright, and that guard is unchanged: a
+walk that found nothing at all is indistinguishable, from here, from a
+directory that was not ready yet -- unmounted, a sync tool mid-catch-up
+-- and deleting a whole collection is never the right answer to that
+ambiguity.  Reproduced live, that case once turned an org-roam
+directory Syncthing had not finished syncing into 428 deleted sources."
+  (if (zerop enumerated)
       0
-    (let ((stale (flatten-tree
-                  (sqlite-select
-                   (arc-db)
-                   (format "SELECT DISTINCT s.id FROM sources s
-                            JOIN data d ON d.source_id = s.id
-                            WHERE d.collection_id = %d AND s.id NOT IN %s;"
-                           cid
-                           (arc-sqlite-format-int-list kept-ids))))))
-      (dolist (sid stale) (arc-source-delete sid))
-      (when stale (arc-index--bump-write-generation))
-      (length stale))))
+    (let ((removed 0))
+      (dolist (row (sqlite-select
+                    (arc-db)
+                    (format "SELECT DISTINCT s.id, s.kind, s.path, s.org_id,
+                                    s.option_name, s.info_node
+                             FROM sources s JOIN data d ON d.source_id = s.id
+                             WHERE d.collection_id = %d;" cid)))
+        (pcase-let ((`(,sid ,kind ,path ,org-id ,option-name ,info-node) row))
+          (unless (gethash (arc--source-identity
+                            (list :kind kind :path path :org-id org-id
+                                  :option-name option-name :info-node info-node))
+                           keep)
+            (with-sqlite-transaction (arc-db)
+              (let ((ids (flatten-tree
+                          (sqlite-select
+                           (arc-db)
+                           (format "SELECT id FROM data WHERE source_id = %d
+                                    AND collection_id = %d;" sid cid)))))
+                (when ids
+                  (let ((idlist (arc-sqlite-format-int-list ids)))
+                    ;; The two virtual tables carry no foreign key, so
+                    ;; their rows go explicitly, by rowid, before `data'.
+                    (sqlite-execute (arc-db) (format "DELETE FROM data_embeddings WHERE rowid IN %s;" idlist))
+                    (sqlite-execute (arc-db) (format "DELETE FROM data_fts WHERE rowid IN %s;" idlist))
+                    (sqlite-execute (arc-db) (format "DELETE FROM data WHERE id IN %s;" idlist)))))
+              (when (zerop (caar (sqlite-select
+                                  (arc-db)
+                                  (format "SELECT count(*) FROM data WHERE source_id = %d;"
+                                          sid))))
+                (sqlite-execute (arc-db) (format "DELETE FROM sources WHERE id = %d;" sid))))
+            (setq removed (1+ removed)))))
+      (when (> removed 0) (arc-index--bump-write-generation))
+      removed)))
+
+(defun arc--enumeration-keep (sources)
+  "Return (KEEP . ENUMERATED) for SOURCES, a fully expanded source list.
+See `arc--prune-departed' for what each half means."
+  (let ((keep (make-hash-table :test 'equal)))
+    (dolist (s sources)
+      (when (plist-get s :chunks)
+        (puthash (arc--source-identity s) t keep)))
+    (cons keep (length sources))))
 
 (defconst arc--reindex-skipped :arc-reindex-skipped
-  "Sentinel `arc--reindex-directory-collection' (and, for the
-asynchronous path, `arc--plan-cell-source-list') returns for a missing
-directory, distinct from an empty list of kept ids, so callers never
-mistake \"this collection's directory is not on this host\" for
-\"everything in it was deleted\" and prune rows that are still
-perfectly good.  Note that an empty list of kept ids is not itself
-treated as a reason to prune either -- see `arc--prune-collection' --
-this sentinel exists to keep a third, still different case (no
-directory at all) from being folded into that same empty-list value
-and skipping the \"directory does not exist\" `message' that reports
-it.")
+  "Sentinel `arc--candidate-paths' (and so `arc--plan-cell-entries' and
+`arc--plan-cell-source-list') returns for a missing directory,
+distinct from an empty enumeration, so callers never mistake \"this
+collection's directory is not on this host\" for \"everything in it
+was deleted\" and prune rows that are still perfectly good.  Note that
+an empty enumeration is not itself treated as a reason to prune either
+-- see `arc--prune-departed' -- this sentinel exists to keep a third,
+still different case (no directory at all) from being folded into that
+same empty value and skipping the \"directory does not exist\"
+`message' that reports it.")
 
 (defun arc--index-sources-with-progress (name sources)
   "Index each of SOURCES into collection NAME, in order.
-Return the list of source ids actually written (for
-`arc--prune-collection'), omitting any SOURCES entry that came back
-with no chunks to write -- `arc--replace-source-chunks' gives such a
-source no row at all, so there is no id to include, and it must not be
-treated as \"kept\" (see `arc--replace-source-chunks').  Reports
+Return the list of source ids actually written, omitting any SOURCES
+entry that came back with no chunks to write --
+`arc--replace-source-chunks' gives such a source no row at all, so
+there is no id to include.  Pruning does not read this list (see
+`arc--prune-departed'); the count is what the run reports.  Reports
 progress via `message' every `arc-index-progress-every' sources (and
 always for the last one) plus an upfront total, since a real full
 ingest can run thousands of sources through here and, before this,
@@ -645,24 +680,6 @@ unchanged and it never got re-indexed at all."
                       (when (or (= i total) (zerop (mod i arc-index-progress-every)))
                         (message "arc: %s: %d/%d source(s) indexed" name i total))))
                   sources))))
-
-(defun arc--reindex-directory-collection (name dir producer)
-  "Index every source PRODUCER (a function of one DIR argument) returns
-for collection NAME under DIR, or skip with a `message' when DIR does
-not exist on this host.  Return the list of source ids indexed, or
-`arc--reindex-skipped'.
-`arc-collection-directory-alist' can name a directory that is simply
-absent here -- a collection whose checkout this host does not have,
-for instance -- and `directory-files-recursively' used to signal
-`file-missing' the moment such a plan entry's turn came up, aborting
-every collection still queued behind it.  A missing directory is now
-an ordinary, reported skip instead -- and, importantly, not a reason
-to prune every row this collection already has: the corpus here is
-merely unbuilt, not emptied."
-  (if (not (file-directory-p dir))
-      (progn (message "arc: skipping %s, directory does not exist: %s" name dir)
-             arc--reindex-skipped)
-    (arc--index-sources-with-progress name (funcall producer dir))))
 
 (defun arc-index--collection-overlaps ()
   "Return the planned collection pairs whose corpora overlap unexcluded.
@@ -753,12 +770,14 @@ each chunk's embedding is fetched with `llm-embedding-async' instead,
 at most `arc-index-max-in-flight' of them outstanding at a time, so
 the *embedding* step -- the tens-of-minutes-long part -- never blocks
 the command loop.  Gathering each collection's sources first
-(`arc--plan-cell-source-list': parsing options.json, walking the Info
-manuals) is still a plain, synchronous call and does briefly block
-Emacs, same as any other function call -- measured around 7.44s for
-`info' on the real corpus, not nothing, but not the multi-minute
-freeze this exists to fix either.  Called interactively -- `M-x
-arc-reindex-all' -- ASYNC is always
+(`arc--plan-cell-entries': parsing options.json, walking the Info
+manuals, listing a file collection's candidate paths) is still a plain,
+synchronous call and does briefly block Emacs, same as any other
+function call -- measured around 7.44s for `info' on the real corpus,
+not nothing, but not the multi-minute freeze this exists to fix
+either.  A file or org collection's per-file work -- reading, hashing,
+chunking -- is deferred to the moment the run reaches that file.
+Called interactively -- `M-x arc-reindex-all' -- ASYNC is always
 non-nil: unlimited caps are the default (see `arc-index-nixopt-cap'
 and friends), and a real full ingest is a 20-40 minute run that must
 not freeze Emacs to get.  Progress is reported via `message' either
@@ -771,15 +790,13 @@ and not a refusal: the default layout overlaps on purpose (`vault' is
 inside `home'), and it is an operator-written `.arcignore', outside
 this repository, that separates them.
 
-KNOWN LIMITATION: the asynchronous path never prunes.  A source that
-has genuinely left the corpus (deleted, gitignored, excluded) keeps
-whatever it was last indexed as and stays citable until a *synchronous*
-reindex of that collection runs and prunes it -- `(arc-reindex-all
-COLLECTIONS)' or `(arc-reindex-all)' with no ASYNC argument, exactly
-how the test suite and any scripted ingest already call it.  This is
-not an oversight: see `arc--prune-collection''s docstring for why a
-long-running asynchronous walk cannot build a trustworthy kept-list to
-prune against."
+Both paths prune: a source the collection's walk no longer yields --
+deleted, gitignored, newly excluded, or emptied to zero chunks -- is
+removed once that collection's pass completes.  The asynchronous path
+prunes only a pass that ran to the end uncancelled with every deferred
+entry expanded, and neither path prunes a walk that found nothing; see
+`arc--prune-departed' for why keeping what the walk SAW, rather than
+what the run wrote, is what made the asynchronous prune safe."
   (interactive (list nil t))
   (arc-index--warn-overlapping-collections)
   (if async
@@ -787,44 +804,31 @@ prune against."
     (arc--reindex-all-sync collections)))
 
 (defun arc--reindex-all-sync (&optional collections)
-  "Synchronous implementation of `arc-reindex-all'.  See its docstring."
+  "Synchronous implementation of `arc-reindex-all'.  See its docstring.
+Gathers each collection through `arc--plan-cell-source-list', the same
+enumeration the asynchronous path and `arc-index-plan-census' use, so
+the three cannot disagree about what a collection contains."
   (dolist (cell (if collections
                      (seq-filter (lambda (c) (member (car c) collections)) arc-index-plan)
                    arc-index-plan))
     (let* ((name (car cell))
            (cid (arc--collection-id name))
-           (kept
-            (pcase (cdr cell)
-              ('file (arc--reindex-directory-collection name (arc-collection-directory name)
-                                                          #'arc-file-sources))
-              ('org  (arc--reindex-directory-collection name (arc-collection-directory name)
-                                                          #'arc-org-nodes))
-              ('nixopt
-               (arc--index-sources-with-progress
-                name (let ((all (arc-nixopt-parse-json (arc-nixopt-options-json-path) "nix-option")))
-                       (if arc-index-nixopt-cap (take arc-index-nixopt-cap all) all))))
-              ('hmopt
-               (arc--index-sources-with-progress
-                name (let ((all (arc-nixopt-parse-json (arc-hm-options-json-path) "hm-option")))
-                       (if arc-index-hmopt-cap (take arc-index-hmopt-cap all) all))))
-              ('info
-               (arc--index-sources-with-progress
-                name (arc-info-sources
-                      (arc--prioritize-manuals (arc-get-builtin-manuals)
-                                                arc-index-info-priority-manuals)
-                      arc-index-info-cap))))))
+           (sources (arc--plan-cell-source-list name (cdr cell)))
+           (written (unless (eq sources arc--reindex-skipped)
+                      (arc--index-sources-with-progress name sources))))
       ;; Record what this collection was built FROM, when that is the
       ;; freshness signal. Cheap, and it is what lets `arc-freshness-report'
       ;; answer for 37,780 derived sources with one string comparison.
       (when-let* ((prov (arc-collection-provenance-now (cdr cell))))
         (arc-set-collection-provenance name prov))
       (cond
-       ((eq kept arc--reindex-skipped) nil) ; already reported; nothing to prune
-       ((null kept)
-        (message "arc: %s: 0 source(s) found; not pruning (see `arc--prune-collection')" name))
+       ((eq sources arc--reindex-skipped) nil) ; already reported; nothing to prune
+       ((null sources)
+        (message "arc: %s: 0 source(s) found; not pruning (see `arc--prune-departed')" name))
        (t
-        (message "arc: %s: %d source(s) indexed" name (length kept))
-        (let ((removed (arc--prune-collection cid kept)))
+        (message "arc: %s: %d source(s) indexed" name (length written))
+        (let* ((enumeration (arc--enumeration-keep sources))
+               (removed (arc--prune-departed cid (car enumeration) (cdr enumeration))))
           (when (> removed 0)
             (message "arc: %s: removed %d stale source(s)" name removed)))))))
   (message "arc: %S" (arc-index-stats)))
@@ -851,37 +855,204 @@ own bookkeeping in `arc--reindex-async-next-cell' decides it is truly
 finished -- which is why that cleanup checks `eq' against this
 variable rather than setting it to nil unconditionally.")
 
+(defun arc--candidate-paths (name kind)
+  "Return the paths collection NAME's KIND walk would read, unread.
+Only the `file' and `org' kinds walk a directory; any other KIND
+returns nil.  Returns `arc--reindex-skipped', with a `message', when
+the collection's directory is absent on this host.  Nothing is opened:
+for `file' this is `arc--file-candidates', the path rules alone, and
+`arc--candidate-sources' applies the content rule per path."
+  (pcase kind
+    ((or 'file 'org)
+     (let ((dir (arc-collection-directory name)))
+       (if (not (file-directory-p dir))
+           (progn (message "arc: skipping %s, directory does not exist: %s" name dir)
+                  arc--reindex-skipped)
+         (if (eq kind 'file) (arc--file-candidates dir) (arc-org-files dir)))))
+    (_ nil)))
+
+(defun arc--candidate-sources (kind path)
+  "Return the source plists PATH yields under KIND (`file' or `org').
+For `file' that is no source at all when `arc--text-file-p' says PATH
+is not text, else exactly `arc-file-source''s; for `org' it is every
+node `arc-org-nodes-in-file' finds.  `arc-file-sources' and
+`arc-org-nodes' produce precisely the union of this over
+`arc--candidate-paths' -- the same path rules, the same content rule,
+the same constructors."
+  (pcase kind
+    ('file (when (arc--text-file-p path) (list (arc-file-source path))))
+    ('org (arc-org-nodes-in-file path))))
+
+(defun arc--plan-cell-entries (name kind)
+  "Return collection NAME's KIND enumeration, with directory walks DEFERRED.
+Like `arc--plan-cell-source-list', except that a `file' or `org'
+collection comes back as one zero-argument function per candidate path,
+each returning that path's source plists (see `arc--candidate-sources')
+when called.  The other kinds come back as source plists, exactly as
+before.  `arc--reindex-async-collection' calls each function only when
+it reaches that entry.
+
+Why: the asynchronous reindex used to gather every source of a
+collection eagerly, before its first embedding -- and for a file
+collection that meant reading, hashing and chunking EVERY file in one
+synchronous call.  On a host where Emacs is the Wayland compositor that
+is the whole display frozen for as long as the walk of $HOME takes.
+Deferring the per-file work leaves only the path walk up front, and
+`arc--directory-descendable-p' keeps that walk out of ignored trees."
+  (let ((paths (arc--candidate-paths name kind)))
+    (cond
+     ((eq paths arc--reindex-skipped) paths)
+     ((memq kind '(file org))
+      (mapcar (lambda (path) (lambda () (arc--candidate-sources kind path))) paths))
+     (t
+      (pcase kind
+        ('nixopt (let ((all (arc-nixopt-parse-json (arc-nixopt-options-json-path) "nix-option")))
+                   (if arc-index-nixopt-cap (take arc-index-nixopt-cap all) all)))
+        ('hmopt (let ((all (arc-nixopt-parse-json (arc-hm-options-json-path) "hm-option")))
+                  (if arc-index-hmopt-cap (take arc-index-hmopt-cap all) all)))
+        ('info (arc-info-sources (arc--prioritize-manuals (arc-get-builtin-manuals)
+                                                           arc-index-info-priority-manuals)
+                                  arc-index-info-cap)))))))
+
+(defun arc--expand-entry (entry)
+  "Return the source plists ENTRY stands for, as a list.
+ENTRY is an element of `arc--plan-cell-entries': a deferred function,
+called here, or a source plist, returned in a list of one."
+  (if (functionp entry) (funcall entry) (list entry)))
+
 (defun arc--plan-cell-source-list (name kind)
   "Return the list of source plists collection NAME's KIND would index,
-or `arc--reindex-skipped' when its directory is absent.  This is the
-asynchronous path's counterpart to the producer calls inlined in
-`arc--reindex-all-sync': it only gathers sources -- parsing JSON,
-walking a directory, walking Info manuals -- none of which talks to
-the embedding model, so none of it is the *tens-of-minutes-long* part
--- but it is not free either, and it stays a plain, eager, synchronous
-call that briefly blocks Emacs like any other: gathering `info''s
-sources alone (walking 94 builtin manuals) measured around 7.44s on
-the real corpus.  `arc--reindex-async-collection' is what then drives
-the actual slow part, the per-chunk embedding step, without blocking,
-one bounded batch at a time."
-  (pcase kind
-    ('file (let ((dir (arc-collection-directory name)))
-             (if (not (file-directory-p dir))
-                 (progn (message "arc: skipping %s, directory does not exist: %s" name dir)
-                        arc--reindex-skipped)
-               (arc-file-sources dir))))
-    ('org (let ((dir (arc-collection-directory name)))
-            (if (not (file-directory-p dir))
-                (progn (message "arc: skipping %s, directory does not exist: %s" name dir)
-                       arc--reindex-skipped)
-              (arc-org-nodes dir))))
-    ('nixopt (let ((all (arc-nixopt-parse-json (arc-nixopt-options-json-path) "nix-option")))
-               (if arc-index-nixopt-cap (take arc-index-nixopt-cap all) all)))
-    ('hmopt (let ((all (arc-nixopt-parse-json (arc-hm-options-json-path) "hm-option")))
-              (if arc-index-hmopt-cap (take arc-index-hmopt-cap all) all)))
-    ('info (arc-info-sources (arc--prioritize-manuals (arc-get-builtin-manuals)
-                                                       arc-index-info-priority-manuals)
-                              arc-index-info-cap))))
+or `arc--reindex-skipped' when its directory is absent.  This is
+`arc--plan-cell-entries' with every deferred entry expanded: the
+synchronous reindex and `arc-index-plan-census' want the whole list in
+hand, the asynchronous one does not.  None of it talks to the embedding
+model, so none of it is the tens-of-minutes-long part, but it is not
+free either: gathering `info''s sources alone (walking 94 builtin
+manuals) measured around 7.44s on the real corpus, and a `file'
+collection reads, hashes and chunks every file it admits."
+  (let ((entries (arc--plan-cell-entries name kind)))
+    (if (eq entries arc--reindex-skipped)
+        entries
+      (mapcan #'arc--expand-entry entries))))
+
+;;; Census: what a reindex WOULD produce
+
+(defun arc--census-dir-key (path root depth)
+  "Return PATH's first DEPTH directory components under ROOT, as a key.
+A file directly in ROOT keys as \"./\"."
+  (let* ((rel (file-relative-name path root))
+         (parts (butlast (split-string rel "/"))))
+    (if (null parts)
+        "./"
+      (concat (string-join (take depth parts) "/") "/"))))
+
+(defun arc-index-plan-census (&optional collections depth)
+  "Count what each `arc-index-plan' collection would index, embedding nothing.
+Return one plist per collection -- COLLECTIONS, a list of names, or the
+whole plan when nil -- with keys :collection, :chunker, :sources,
+:chunks, :chars (characters across every chunk, the embedding input),
+:walk-seconds (listing candidate paths, the part an asynchronous
+reindex blocks on), :gather-seconds (reading, hashing and chunking
+them), and :skipped (non-nil when the directory is absent).  With DEPTH,
+a positive integer, a `file' or `org' collection also carries :by-dir,
+an alist of (DIR SOURCES CHUNKS CHARS) keyed by a source's first DEPTH
+directory components under the collection root, largest first -- what
+an `.arcignore' is written from.
+
+This goes through `arc--plan-cell-entries' and `arc--expand-entry', the
+enumeration and the chunkers a real reindex uses, so the counts are the
+corpus a reindex would build, not an estimate of it.  It costs what
+gathering costs and nothing more: no embedding request is made, nothing
+is written, and the database is never opened.  Derived collections
+still build their inputs -- `nix options' and `hm options' run `nix
+build' -- so leave them out of COLLECTIONS to count the directories
+alone.
+
+Why it exists: the corpus was widened to the whole of $HOME on
+2026-09-17 and then measured AFTER the fact, at 310,767 chunks and a
+projected ten hours of embedding, which is why that index was never
+built.  Measuring before embedding is the only order in which an
+`.arcignore' can be written from numbers."
+  (mapcar
+   (lambda (cell)
+     (let* ((name (car cell))
+            (kind (cdr cell))
+            (root (and (memq kind '(file org))
+                       (file-name-as-directory
+                        (expand-file-name (arc-collection-directory name)))))
+            (t0 (float-time))
+            (entries (arc--plan-cell-entries name kind))
+            (t1 (float-time))
+            (by-dir (make-hash-table :test 'equal))
+            (nsources 0) (nchunks 0) (nchars 0))
+       (if (eq entries arc--reindex-skipped)
+           (list :collection name :chunker kind :sources 0 :chunks 0 :chars 0
+                 :walk-seconds (- t1 t0) :gather-seconds 0.0 :skipped t)
+         (dolist (entry entries)
+           (dolist (source (arc--expand-entry entry))
+             (let* ((chunks (plist-get source :chunks))
+                    (chars (apply #'+ (mapcar (lambda (c) (length (plist-get c :text)))
+                                              chunks))))
+               ;; A chunkless source is enumerated but writes nothing, so
+               ;; it is no source of the index either.
+               (when chunks
+                 (setq nsources (1+ nsources)
+                       nchunks (+ nchunks (length chunks))
+                       nchars (+ nchars chars))
+                 (when (and depth root (plist-get source :path))
+                   (let* ((key (arc--census-dir-key (plist-get source :path) root depth))
+                          (row (or (gethash key by-dir) (list 0 0 0))))
+                     (puthash key (list (+ (nth 0 row) 1)
+                                        (+ (nth 1 row) (length chunks))
+                                        (+ (nth 2 row) chars))
+                              by-dir)))))))
+         (let ((t2 (float-time))
+               (rows nil))
+           (maphash (lambda (k v) (push (cons k v) rows)) by-dir)
+           (append
+            (list :collection name :chunker kind :sources nsources :chunks nchunks
+                  :chars nchars :walk-seconds (- t1 t0) :gather-seconds (- t2 t1)
+                  :skipped nil)
+            (when depth
+              (list :by-dir (sort rows (lambda (a b) (> (nth 2 a) (nth 2 b)))))))))))
+   (if collections
+       (seq-filter (lambda (c) (member (car c) collections)) arc-index-plan)
+     arc-index-plan)))
+
+(defun arc-index-census-format (census &optional seconds-per-chunk top)
+  "Render CENSUS, from `arc-index-plan-census', as a plain-text table.
+With SECONDS-PER-CHUNK, add the embedding time it projects -- measure
+the rate on this machine rather than borrowing one; see the census's
+own docstring for what a borrowed one cost.  TOP caps how many :by-dir
+rows each collection lists (default 15)."
+  (let ((total-chunks 0) (total-sources 0))
+    (concat
+     (format "%-16s %9s %9s %12s %7s %7s%s\n" "collection" "sources" "chunks"
+             "chars" "walk s" "read s" (if seconds-per-chunk "  embed h" ""))
+     (mapconcat
+      (lambda (c)
+        (setq total-chunks (+ total-chunks (plist-get c :chunks))
+              total-sources (+ total-sources (plist-get c :sources)))
+        (concat
+         (format "%-16s %9d %9d %12d %7.1f %7.1f%s%s\n"
+                 (plist-get c :collection) (plist-get c :sources) (plist-get c :chunks)
+                 (plist-get c :chars) (plist-get c :walk-seconds)
+                 (plist-get c :gather-seconds)
+                 (if seconds-per-chunk
+                     (format "  %7.2f" (/ (* seconds-per-chunk (plist-get c :chunks)) 3600.0))
+                   "")
+                 (if (plist-get c :skipped) "  (directory absent)" ""))
+         (mapconcat (lambda (row)
+                      (format "    %-40s %7d %8d %12d\n"
+                              (truncate-string-to-width (nth 0 row) 40)
+                              (nth 1 row) (nth 2 row) (nth 3 row)))
+                    (take (or top 15) (plist-get c :by-dir))
+                    "")))
+      census "")
+     (format "%-16s %9d %9d%s\n" "TOTAL" total-sources total-chunks
+             (if seconds-per-chunk
+                 (format "%35s%7.2f" "" (/ (* seconds-per-chunk total-chunks) 3600.0))
+               "")))))
 
 (defun arc--reindex-async-embed-chunk (chunk settle)
   "Embed one CHUNK via `llm-embedding-async'.  Calls SETTLE with `ok'
@@ -938,22 +1109,33 @@ reaching -- cancelled, or one of its own chunks failed to embed -- is
 therefore simply never passed to `arc--replace-source-chunks' at all,
 and keeps whatever it already had, exactly as it was.
 
-This does NOT prune: see `arc-reindex-all' and `arc--prune-collection's
-docstrings for why -- a long-running asynchronous walk never has a
-trustworthy \"every source this collection actually has\" list to prune
-against, only a \"what this run has reached so far\" one, and three
-separate ways of trying to use the latter for the former each turned
-into a real, reproduced way to delete sources this run had simply not
-gotten to yet.  Only `arc--reindex-all-sync' prunes.
+An element of SOURCES may also be a deferred entry from
+`arc--plan-cell-entries' -- a function returning the source plists one
+path yields.  It is called only when the run reaches it, and what it
+returns is processed in its place; TOTAL, the progress denominator, is
+adjusted to match.  A deferred entry that signals is reported and
+skipped, and marks this pass's enumeration incomplete (below).
 
-Calls ON-COLLECTION-DONE with (SOURCES-REPLACED NOT-REPLACED-COUNT) --
+This does not prune: it is also the watcher's entry point, handed a
+few changed paths rather than a whole collection, and pruning against
+that would delete everything else.  It REPORTS what it enumerated
+instead, and `arc--reindex-async-next-cell' -- which alone knows SOURCES
+was a whole collection -- decides.
+
+Calls ON-COLLECTION-DONE with (SOURCES-REPLACED NOT-REPLACED-COUNT
+ENUMERATION) --
 SOURCES-REPLACED how many sources were actually, successfully replaced
 (not merely attempted: reporting otherwise once said \"2 source(s)
 indexed\" after a cancel that had replaced only 1), NOT-REPLACED-COUNT
 how many had at least one chunk fail to embed, or failed at the
 replace itself -- once every source either has been fully replaced,
 given up on, or RUN was cancelled, and either every source in SOURCES
-has been started, or RUN was cancelled.  Called exactly once: `finished'
+has been started, or RUN was cancelled.  ENUMERATION is (KEEP .
+ENUMERATED) in `arc--enumeration-keep''s shape, covering every source
+this pass reached, or nil when it cannot be trusted as the whole
+collection: RUN was cancelled, or a deferred entry failed to expand.
+A source whose embedding failed IS in KEEP -- the enumeration is what
+the walk found, not what got written.  Called exactly once: `finished'
 guards not just entry but the completion branch itself, because a
 `settle' that fires synchronously (a stub, a cache, any future local
 embedder that does not genuinely defer) would otherwise re-enter `pump'
@@ -968,6 +1150,9 @@ the end of that outer call would fire ON-COLLECTION-DONE a second time."
         (sources-done 0)
         (sources-replaced 0)
         (in-flight 0)
+        (keep (make-hash-table :test 'equal)) ; identities enumerated with chunks
+        (enumerated 0)
+        (incomplete nil)
         (finished nil))
     (cl-labels
         ((enqueue (source chunks)
@@ -1005,9 +1190,24 @@ the end of that outer call would fire ON-COLLECTION-DONE a second time."
              (if (<= left 0) (source-settled source) (puthash source left remaining-in-source)))
            (pump))
          (start-next-source ()
-           (let* ((source (car remaining))
-                  (chunks (plist-get source :chunks)))
+           (let ((entry (car remaining)))
              (setq remaining (cdr remaining))
+             (if (functionp entry)
+                 (let ((expanded
+                        (condition-case err
+                            (arc--expand-entry entry)
+                          ((error quit)
+                           (setq incomplete t)
+                           (message "arc: %s: could not read a source, skipped; this pass will not prune: %s"
+                                    name (error-message-string err))
+                           nil))))
+                   (setq total (+ total (length expanded) -1))
+                   (setq remaining (append expanded remaining)))
+               (start-source entry))))
+         (start-source (source)
+           (let ((chunks (plist-get source :chunks)))
+             (cl-incf enumerated)
+             (when chunks (puthash (arc--source-identity source) t keep))
              (if (null chunks)
                  ;; a chunk-less source has nothing to wait on; its
                  ;; (empty) replacement happens right away.
@@ -1038,7 +1238,9 @@ the end of that outer call would fire ON-COLLECTION-DONE a second time."
              (when (and (not finished) (zerop in-flight)
                         (or (plist-get run :cancelled) (and (null queue) (null remaining))))
                (setq finished t)
-               (funcall on-collection-done sources-replaced (hash-table-count not-replaced))))))
+               (funcall on-collection-done sources-replaced (hash-table-count not-replaced)
+                        (unless (or incomplete (plist-get run :cancelled))
+                          (cons keep enumerated)))))))
       (pump))))
 
 (defun arc--reindex-async-next-cell (run cells)
@@ -1054,12 +1256,13 @@ chunk's embedding callback -- reachable with no stub at all, since
 `arc-nixopt-parse-json' then calls `(insert-file-contents nil)'.  Left
 unprotected, that signal used to be swallowed by the `plz' sentinel
 that was calling this indirectly, silently stopping the whole run
-mid-plan with `arc--reindex-async-active' left set.  Pruning is gone
-from this path entirely now, so a failure here can no longer destroy
-anything -- but it must still not be silent, and it does not try to
-skip the bad cell and continue with the rest of the plan: a producer
-that fails once for a cell is likely to fail again, and guessing
-otherwise is exactly the kind of recovery logic this does not attempt."
+mid-plan with `arc--reindex-async-active' left set.  A failure here
+happens before the cell's pass and therefore before its prune, so it
+cannot destroy anything -- but it must still not be silent, and it
+does not try to skip the bad cell and continue with the rest of the
+plan: a producer that fails once for a cell is likely to fail again,
+and guessing otherwise is exactly the kind of recovery logic this
+does not attempt."
   (if (or (plist-get run :cancelled) (null cells))
       (progn
         (when (plist-get run :cancelled)
@@ -1080,20 +1283,40 @@ otherwise is exactly the kind of recovery logic this does not attempt."
         (let* ((cell (car cells))
                (name (car cell))
                (cid (arc--collection-id name))
-               (sources (arc--plan-cell-source-list name (cdr cell))))
+               (sources (arc--plan-cell-entries name (cdr cell))))
           (if (eq sources arc--reindex-skipped)
               (arc--reindex-async-next-cell run (cdr cells))
             (progn
               (message "arc: %s: %d source(s) to index" name (length sources))
               (arc--reindex-async-collection
                run name cid sources (length sources)
-               (lambda (sources-replaced not-replaced-count)
+               (lambda (sources-replaced not-replaced-count &optional enumeration)
                  (message "arc: %s: %d source(s) replaced%s%s" name sources-replaced
                           (if (plist-get run :cancelled) " (cancelled)" "")
                           (if (> not-replaced-count 0)
                               (format " -- %d source(s) not replaced (a chunk failed to embed, or the replace itself failed), old content kept, see messages above"
                                       not-replaced-count)
                             ""))
+                 ;; The same prune the synchronous path runs, against the
+                 ;; same kind of evidence: everything this pass's walk
+                 ;; enumerated.  ENUMERATION is nil for a cancelled pass
+                 ;; or one whose walk did not fully expand -- see
+                 ;; `arc--reindex-async-collection' -- and then nothing
+                 ;; is pruned at all.
+                 (when (and enumeration (not (plist-get run :cancelled)))
+                   (when-let* ((prov (arc-collection-provenance-now (cdr cell))))
+                     (arc-set-collection-provenance name prov))
+                   ;; This runs from an embedding callback, where an
+                   ;; unhandled signal is swallowed by the `plz' sentinel
+                   ;; and would stop the run silently with
+                   ;; `arc--reindex-async-active' still set.
+                   (condition-case err
+                       (let ((removed (arc--prune-departed cid (car enumeration)
+                                                           (cdr enumeration))))
+                         (when (> removed 0)
+                           (message "arc: %s: removed %d stale source(s)" name removed)))
+                     (error (message "arc: %s: pruning departed sources failed: %s"
+                                     name (error-message-string err)))))
                  (arc--reindex-async-next-cell run (cdr cells)))))))
       (error
        (message "arc: reindexing %s failed and the async run has stopped: %s"
@@ -1206,9 +1429,45 @@ nil means this collection's freshness is per-source instead."
     ('hmopt (arc--flake-provenance arc-hm-flake))
     (_ nil)))
 
+(defcustom arc-freshness-unindexed-probe-max 200
+  "Most unindexed candidate paths one freshness report opens.
+`arc-freshness-report' lists a file or org collection's candidate
+paths -- the path rules only, see `arc--candidate-paths' -- and every
+one with no indexed source is a file the collection may be missing.
+Whether it really is takes a read (a binary, an empty file, an org file
+with no id all yield no source), so this bounds how many such reads one
+report may make.  The report is on `arc-tool-stats''s path, which an
+MCP client polls; a collection that was never fully built can have
+thousands of candidates, and a precise count of them is not worth a
+stall.  When the bound is hit the count is reported as a floor."
+  :type 'natnum :group 'arc)
+
+(defun arc--collection-unindexed (name chunker indexed-paths)
+  "Return (CONFIRMED . FLOOR-P) for collection NAME's unindexed sources.
+CONFIRMED counts candidate paths of CHUNKER's walk (`file' or `org')
+that are not among INDEXED-PATHS, a hash table, and that DO yield a
+source with chunks when read; FLOOR-P is non-nil when
+`arc-freshness-unindexed-probe-max' stopped the reading early, so
+CONFIRMED is a lower bound.  Return nil when NAME has no configured,
+existing directory -- there is then nothing to compare against."
+  (let ((dir (alist-get name arc-collection-directory-alist nil nil #'equal)))
+    (when (and (memq chunker '(file org)) dir (file-directory-p dir))
+      (let ((confirmed 0) (probed 0) (floor nil))
+        (catch 'done
+          (dolist (path (arc--candidate-paths name chunker))
+            (unless (gethash path indexed-paths)
+              (when (>= probed arc-freshness-unindexed-probe-max)
+                (setq floor t)
+                (throw 'done nil))
+              (setq probed (1+ probed))
+              (when (seq-some (lambda (s) (plist-get s :chunks))
+                              (ignore-errors (arc--candidate-sources chunker path)))
+                (setq confirmed (1+ confirmed))))))
+        (cons confirmed floor)))))
+
 (defun arc-freshness-report ()
   "Return a per-collection freshness list of (NAME KIND STATE DETAIL).
-STATE is `fresh', `stale', `unknown' or `absent'.
+STATE is `fresh', `stale', `partial', `unknown' or `absent'.
 
 Two mechanisms, because the corpus holds two kinds of source. For
 collections built from files or org nodes, recorded hashes are compared
@@ -1221,7 +1480,18 @@ indexed before provenance recording, or sources indexed before hashing.
 It is deliberately not folded into `stale'. They are different claims,
 and an index predating hashing would otherwise read as \"everything just
 changed\", which is noise a reader learns to ignore -- and a freshness
-report nobody reads is the thing this replaces."
+report nobody reads is the thing this replaces.
+
+`partial' is a third claim: everything indexed is current, but the
+collection's walk would index sources it does not have.  Comparing only
+the sources already indexed could never see that, and it reported a
+`home' collection holding 1 source out of thousands on disk as
+`fresh'.  The walk is `arc--candidate-paths', the reindex's own, and
+`arc--collection-unindexed' reads at most
+`arc-freshness-unindexed-probe-max' of the candidates it finds missing.
+A collection that is both drifted and missing sources is `stale', with
+the missing count in its detail; one whose missing candidates could
+not all be read, none of them confirmed, is `unknown'."
   (mapcar
    (lambda (cell)
      (let* ((name (car cell))
@@ -1250,26 +1520,44 @@ report nobody reads is the thing this replaces."
                                WHERE s.path IS NOT NULL AND d.collection_id =
                                  (SELECT id FROM collections WHERE name = %s);"
                               (arc--sql-quote name))))
+               (paths (make-hash-table :test 'equal))
                (gone 0) (changed 0) (unhashed 0))
            (dolist (row rows)
              (let ((path (nth 0 row)) (hash (nth 1 row)))
+               (puthash path t paths)
                (cond ((not (file-readable-p path)) (setq gone (1+ gone)))
                      ((null hash) (setq unhashed (1+ unhashed)))
                      ((not (equal hash (arc-file-hash path)))
                       (setq changed (1+ changed))))))
-           (cond
-            ((and (zerop gone) (zerop changed) (zerop unhashed))
-             (list name chunker 'fresh nil))
-            ((and (zerop gone) (zerop changed))
-             (list name chunker 'unknown
-                   (format "%d source(s) indexed before hashing" unhashed)))
-            (t (list name chunker 'stale
+           (let* ((missing (arc--collection-unindexed name chunker paths))
+                  (unindexed (or (car missing) 0))
+                  (unindexed-text
+                   (and (> unindexed 0)
+                        (format "%s%d unindexed" (if (cdr missing) "at least " "")
+                                unindexed))))
+             (cond
+              ((and (zerop gone) (zerop changed) (zerop unhashed) (zerop unindexed))
+               (if (cdr missing)
+                   (list name chunker 'unknown
+                         (format "the first %d unindexed candidate(s) yield nothing; the rest were not read"
+                                 arc-freshness-unindexed-probe-max))
+                 (list name chunker 'fresh nil)))
+              ((and (zerop gone) (zerop changed) (zerop unhashed))
+               (list name chunker 'partial unindexed-text))
+              ((and (zerop gone) (zerop changed))
+               (list name chunker 'unknown
                      (string-join
-                      (delq nil
-                            (list (and (> changed 0) (format "%d changed" changed))
-                                  (and (> gone 0) (format "%d gone" gone))
-                                  (and (> unhashed 0) (format "%d unhashed" unhashed))))
-                      ", ")))))))))
+                      (delq nil (list (format "%d source(s) indexed before hashing" unhashed)
+                                      unindexed-text))
+                      ", ")))
+              (t (list name chunker 'stale
+                       (string-join
+                        (delq nil
+                              (list (and (> changed 0) (format "%d changed" changed))
+                                    (and (> gone 0) (format "%d gone" gone))
+                                    (and (> unhashed 0) (format "%d unhashed" unhashed))
+                                    unindexed-text))
+                        ", "))))))))))
    arc-index-plan))
 
 (defun arc-freshness-report-metadata-only ()
@@ -1341,11 +1629,13 @@ and appending six collection names made it unreadable.  `M-x arc-freshness'
 has the detail."
   (let* ((n (lambda (state) (cl-count-if (lambda (r) (eq (nth 2 r) state)) report)))
          (stale (funcall n 'stale))
+         (partial (funcall n 'partial))
          (unknown (funcall n 'unknown))
          (absent (funcall n 'absent)))
-    (when (> (+ stale unknown absent) 0)
+    (when (> (+ stale partial unknown absent) 0)
       (string-join
        (delq nil (list (and (> stale 0) (format "%d stale" stale))
+                       (and (> partial 0) (format "%d partial" partial))
                        (and (> unknown 0) (format "%d unknown" unknown))
                        (and (> absent 0) (format "%d unindexed" absent))))
        " · "))))

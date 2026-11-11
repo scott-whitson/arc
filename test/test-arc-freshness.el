@@ -118,6 +118,105 @@
      (let ((arc-index-plan '(("nothing here" . file))))
        (should (eq 'absent (nth 2 (car (arc-freshness-report)))))))))
 
+;;; partial: indexed content current, but the walk would index more ------
+
+(defmacro afr-with-dir-collection (dir-var &rest body)
+  "Run BODY with DIR-VAR a fresh directory planned as collection \"docs\"."
+  (declare (indent 1))
+  `(let* ((arc-embedding-size 3)
+          (,dir-var (file-name-as-directory (make-temp-file "afr-dir" t)))
+          (arc-index-plan '(("docs" . file)))
+          (arc-collection-directory-alist (list (cons "docs" ,dir-var))))
+     (unwind-protect
+         (arc-test-with-temp-db
+          (cl-letf (((symbol-function 'llm-embedding) (lambda (_p _t) [0.1 0.2 0.3])))
+            ,@body))
+       (delete-directory ,dir-var t))))
+
+(defun afr-write (dir name text)
+  (let ((f (expand-file-name name dir)))
+    (with-temp-file f (insert text))
+    f))
+
+(ert-deftest afr-a-collection-missing-files-on-disk-is-partial-not-fresh ()
+  "The bug: freshness compared only sources already indexed, so a
+collection holding 1 source out of thousands on disk read `fresh'."
+  (afr-with-dir-collection dir
+    (let ((a (afr-write dir "a.txt" "alpha"))
+          (_b (afr-write dir "b.txt" "beta"))
+          (_c (afr-write dir "c.txt" "gamma")))
+      (arc-index-source (arc-file-source a) "docs")
+      (let ((row (car (arc-freshness-report))))
+        (should (eq 'partial (nth 2 row)))
+        (should (equal "2 unindexed" (nth 3 row))))
+      (should (string-match-p "1 partial" (arc-freshness-summary))))))
+
+(ert-deftest afr-a-fully-indexed-collection-is-still-fresh ()
+  (afr-with-dir-collection dir
+    (afr-write dir "a.txt" "alpha")
+    (afr-write dir "b.txt" "beta")
+    (arc-reindex-all)
+    (should (eq 'fresh (nth 2 (car (arc-freshness-report)))))))
+
+(ert-deftest afr-files-that-yield-no-source-are-not-unindexed ()
+  "An empty file, a whitespace-only one and a binary one are candidates
+by path and still produce nothing: they must not hold a collection in
+`partial' forever."
+  (afr-with-dir-collection dir
+    (afr-write dir "a.txt" "alpha")
+    (afr-write dir "empty.txt" "")
+    (afr-write dir "blank.txt" "  \n\n \t\n")
+    (afr-write dir "bin.dat" (concat "x" (string 0) "y"))
+    (arc-reindex-all)
+    (should (eq 'fresh (nth 2 (car (arc-freshness-report)))))))
+
+(ert-deftest afr-an-org-file-with-no-id-is-not-unindexed ()
+  (let* ((arc-embedding-size 3)
+         (dir (file-name-as-directory (make-temp-file "afr-org" t)))
+         (arc-index-plan '(("notes" . org)))
+         (arc-collection-directory-alist (list (cons "notes" dir))))
+    (unwind-protect
+        (arc-test-with-temp-db
+         (cl-letf (((symbol-function 'llm-embedding) (lambda (_p _t) [0.1 0.2 0.3])))
+           (afr-write dir "with-id.org" ":PROPERTIES:\n:ID: aaaa-1\n:END:\n#+title: A\nbody\n")
+           (afr-write dir "no-id.org" "#+title: B\njust text\n")
+           (arc-reindex-all)
+           (should (eq 'fresh (nth 2 (car (arc-freshness-report)))))
+           (afr-write dir "new.org" ":PROPERTIES:\n:ID: bbbb-2\n:END:\n#+title: C\nmore\n")
+           (should (eq 'partial (nth 2 (car (arc-freshness-report)))))))
+      (delete-directory dir t))))
+
+(ert-deftest afr-drift-plus-missing-is-stale-and-says-both ()
+  (afr-with-dir-collection dir
+    (let ((a (afr-write dir "a.txt" "alpha")))
+      (arc-index-source (arc-file-source a) "docs")
+      (afr-write dir "a.txt" "alpha edited")
+      (afr-write dir "b.txt" "beta")
+      (let ((row (car (arc-freshness-report))))
+        (should (eq 'stale (nth 2 row)))
+        (should (equal "1 changed, 1 unindexed" (nth 3 row)))))))
+
+(ert-deftest afr-the-probe-bound-turns-the-count-into-a-floor ()
+  (afr-with-dir-collection dir
+    (let ((a (afr-write dir "a.txt" "alpha"))
+          (arc-freshness-unindexed-probe-max 2))
+      (dotimes (i 5) (afr-write dir (format "n%d.txt" i) "new"))
+      (arc-index-source (arc-file-source a) "docs")
+      (let ((row (car (arc-freshness-report))))
+        (should (eq 'partial (nth 2 row)))
+        (should (equal "at least 2 unindexed" (nth 3 row)))))))
+
+(ert-deftest afr-unread-candidates-that-yielded-nothing-are-unknown ()
+  "Every candidate read so far yielded no source, and the bound stopped
+the reading: that is no evidence either way, so neither fresh nor partial."
+  (afr-with-dir-collection dir
+    (let ((a (afr-write dir "a.txt" "alpha"))
+          (arc-freshness-unindexed-probe-max 1))
+      (afr-write dir "e1.txt" "")
+      (afr-write dir "e2.txt" "")
+      (arc-index-source (arc-file-source a) "docs")
+      (should (eq 'unknown (nth 2 (car (arc-freshness-report))))))))
+
 (ert-deftest afr-summary-is-nil-when-everything-is-fresh ()
   (let ((arc-embedding-size 3))
     (arc-test-with-temp-db
