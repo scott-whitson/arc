@@ -8,6 +8,7 @@
 ;;; Code:
 
 (require 'sqlite)
+(require 'cl-lib)
 (require 'json)
 (require 'seq)
 
@@ -351,9 +352,33 @@ inconsistent report for up to the cache TTL."
   (setq arc-index--stats-cache nil)
   (setq arc--freshness-cache nil))
 
+(defun arc--unit-vector (data)
+  "Return DATA, a sequence of numbers, scaled to unit length.
+DATA comes back as it is when it already has unit length, to within
+float32 rounding, or is all zeros, which has no direction to keep."
+  (let ((norm (sqrt (seq-reduce (lambda (acc x) (+ acc (* x x))) data 0.0))))
+    (if (or (zerop norm) (< (abs (- norm 1.0)) 1e-6))
+        data
+      (cl-map 'vector (lambda (x) (/ x norm)) data))))
+
 (defun arc-vector-to-sqlite (data)
-  "Convert DATA to sqlite vector representation."
-  (format "vec_f32('%s')" (json-encode data)))
+  "Convert DATA to sqlite vector representation, scaled to unit length.
+Every vector arc stores and every vector it queries with passes through
+here, and the two vector paths measure distance differently: the KNN
+operator orders by vec0's column metric, L2, while brute force orders
+by `vec_distance_cosine'.  On unit vectors those orderings are the same
+-- squared L2 distance is exactly twice cosine distance -- and on
+anything else they are not, so a scope crossing
+`arc-scope-bruteforce-max' would change which chunks rank first.
+Normalising here makes that impossible rather than true by luck.
+
+It was true by luck: Ollama's /api/embed returns unit vectors for
+`nomic-embed-text', and every stored vector measured unit length, but
+its older /api/embeddings returns the same model's vectors unscaled
+(norm about 23), and nothing about another provider promises either.
+A stored vector already of unit length is passed through untouched, so
+this re-embeds nothing."
+  (format "vec_f32('%s')" (json-encode (arc--unit-vector data))))
 
 (defun arc-sqlite-escape (string)
   "Escape single quotes in STRING for sqlite.

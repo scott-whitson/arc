@@ -179,6 +179,12 @@ and `nil' is the value that actually means no filtering."
 
 (defcustom arc-retrieval-max-distance nil
   "Cosine distance past which a retrieved chunk is treated as no match.
+Cosine on both vector paths: brute force computes it directly, and the
+KNN operator's L2 distance d relates to it as d^2/2, exactly, because
+`arc-vector-to-sqlite' stores and queries unit vectors only -- so a
+threshold compared against the KNN path must be compared as d^2/2,
+never against d itself.  `arc-eval' already reads `vec_distance_cosine'
+on both.
 nil disables the check, which is the default on purpose: the spec puts
 the threshold's *value* behind phase 5's eval harness, because picking
 one by intuition is how a retrieval layer quietly starts refusing
