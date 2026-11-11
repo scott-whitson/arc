@@ -279,3 +279,25 @@ question."
                  (lambda () (setq reached t) nil)))
         (should (null (arc-watch-sweep)))
         (should (null reached))))))
+
+(ert-deftest awa-an-unchanged-org-file-is-not-changed ()
+  "An org file's sources are org nodes, not `file' sources.  Asking for a
+`file' source by path found none, so every vault file read as changed
+and the idle sweep re-embedded unchanged notes on every tick."
+  (let* ((arc-embedding-size 3)
+         (dir (file-name-as-directory (make-temp-file "awa-org" t)))
+         (f (expand-file-name "note.org" dir)))
+    (unwind-protect
+        (arc-test-with-temp-db
+         (cl-letf (((symbol-function 'llm-embedding) (lambda (&rest _) [0.1 0.2 0.3])))
+           (with-temp-file f
+             (insert ":PROPERTIES:\n:ID: n-1\n:END:\n#+title: N\n* H\n:PROPERTIES:\n:ID: n-2\n:END:\nbody\n"))
+           (dolist (n (arc-org-nodes-in-file f)) (arc-index-source n "notes"))
+           (should (= 2 (caar (sqlite-select (arc-db) "SELECT count(*) FROM sources;"))))
+           (should-not (arc-file-changed-p f))
+           (with-temp-file f (insert ":PROPERTIES:\n:ID: n-1\n:END:\n#+title: N\nedited\n"))
+           (should (arc-file-changed-p f))))
+      (delete-directory dir t))))
+
+(provide 'test-arc-watch)
+;;; test-arc-watch.el ends here

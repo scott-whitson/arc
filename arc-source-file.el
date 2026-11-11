@@ -16,7 +16,7 @@
 ;;; Code:
 
 (require 'arc-chunk)
-(require 'arc-db)   ; arc-source-by-path, used by arc-file-changed-p
+(require 'arc-db)   ; arc-db and arc--sql-quote, used by arc-file-changed-p
 
 (defcustom arc-ignore-patterns-files '(".gitignore" ".ignore" ".rgignore" ".arcignore")
   "Files with patterns to ignore during file parsing.
@@ -509,10 +509,25 @@ Each plist has :kind, :path, :hash, :mtime and :chunks."
   (mapcar #'arc-file-source (arc--file-list directory)))
 
 (defun arc-file-changed-p (path)
-  "Return non-nil when PATH's content differs from what is indexed."
-  (let ((known (arc-source-by-path path)))
-    (or (null known)
-        (not (equal (plist-get known :hash) (arc-file-hash path))))))
+  "Return non-nil when PATH's content differs from what is indexed.
+Every source recorded at PATH counts, of either mutable kind: an org
+file's nodes are `org-node' sources that all record the FILE's hash
+\(see `arc--org-heading-nodes'), so PATH is unchanged exactly when every
+one of them holds its current hash.
+
+This used to ask `arc-source-by-path', which looks up `file' sources
+only.  An org file has none, so every vault path read as changed, and
+`arc-watch-sweep' re-embedded up to `arc-watch-sweep-batch' unchanged
+vault files on every idle tick -- found live, competing with a full
+reindex for the embedding service."
+  (let ((hashes (mapcar #'car
+                        (sqlite-select
+                         (arc-db)
+                         (format "SELECT DISTINCT hash FROM sources
+                                  WHERE path = %s AND kind IN ('file', 'org-node');"
+                                 (arc--sql-quote path))))))
+    (or (null hashes)
+        (not (equal hashes (list (arc-file-hash path)))))))
 
 (provide 'arc-source-file)
 ;;; arc-source-file.el ends here
