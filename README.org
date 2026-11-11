@@ -351,9 +351,36 @@ blocked by =arc-secret-denylist=, which covers the case where you have pointed
 =arc-db-directory= somewhere else; the line here is the belt to that pair of
 braces.
 
-Nothing else needs excluding: =arc-ignore-invisible-files= is =t=, so every
-other dotted directory under =$HOME= -- =~/.cache=, =~/.local=, =~/.pi=,
-browser and password-manager caches -- is already out of =home=.
+=arc-ignore-invisible-files= is =t=, so every dotted directory under =$HOME=
+-- =~/.cache=, =~/.local=, =~/.pi=, browser and password-manager caches -- is
+already out of =home=, and the walk never descends into one.
+
+That is not the end of it on a developer's machine. arc reads ignore files at a
+*collection root only*: a project's own =.gitignore= is not consulted, so a
+vendored upstream checkout, a =node_modules= or a generated =site/= that the
+project hides from git is still in =home= unless =~/.arcignore= names it. Bare
+names (=node_modules/=, =build/=, =__pycache__/=) match at any depth; a path
+with a slash (=projects/foo/vendor/=) is anchored at =$HOME=. Measure before
+writing it -- see "Count before you embed" below.
+
+*** 2c. Count before you embed
+
+~arc-index-plan-census~ counts what each collection *would* index -- sources,
+chunks, characters, and the time the walk and the reads take -- through the
+reindex's own enumeration and chunkers, without embedding anything or opening
+the database. With a depth argument it breaks a collection down by directory,
+which is what an =.arcignore= is written from:
+
+#+begin_src sh
+emacs -Q -batch -L /path/to/arc --eval "(progn (require 'arc-index) \
+  (princ (arc-index-census-format (arc-index-plan-census '(\"home\") 2) nil 40)))"
+#+end_src
+
+Measured on the author's machine on 2026-11-11: the five directory collections
+came to 1,287,365 chunks with no =.arcignore= -- 889,759 of them in =home=,
+264,411 of those a second, org-id-less copy of the vault -- and to 196,984
+with one. Leave the option collections out of the list to count the
+directories alone: counting them runs =nix build=.
 
 If you skip this step, ~arc-reindex-all~ says so before it starts: it warns,
 once per run, for every planned collection whose directory sits inside another
@@ -371,20 +398,26 @@ misconfiguration, not a corruption -- but an unheeded one costs you a doubled
 Do this once, from Lisp (~M-:~ or a scratch buffer), before searching --
 there is nothing to retrieve until the index has been built. A first full
 index over real corpora (all of NixOS's and Home-Manager's options, plus
-every configured directory) is genuinely slow: 20–40 minutes of sustained
-CPU/GPU is normal, dominated by computing one embedding per chunk.
+every configured directory) is genuinely slow, dominated by computing one
+embedding per chunk: cost tracks characters more than chunks. Measured on the
+author's laptop (integrated GPU, =nomic-embed-text=, 2026-11-11), the
+asynchronous path embedded the 20,005-chunk vault in about six minutes and a
+227,000-chunk corpus is a run of a few hours. Count your own with
+~arc-index-plan-census~ before starting one.
 ~arc-index-nixopt-cap~ and ~arc-index-hmopt-cap~ can shrink this drastically
 for a quick first try -- set either to a small number like 300 before
 reindexing.
 
 Calling ~M-x arc-reindex-all~ *interactively* instead runs the
 asynchronous path: it returns immediately and reports progress via
-~message~, so Emacs is never frozen for the full run. Cancel an
-in-progress asynchronous reindex with ~M-x arc-reindex-cancel~ --
-work already committed for a source stays committed, nothing is left
-half-written. Only a *synchronous* call (the Lisp form above, or
-~(arc-reindex-all COLLECTIONS)~) prunes sources that have genuinely
-disappeared from a collection; see "Known limitations" below.
+~message~, so Emacs is never frozen for the full run. A file or org
+collection's files are read, hashed and chunked only as the run reaches
+each one; only the path walk happens up front. Cancel an in-progress
+asynchronous reindex with ~M-x arc-reindex-cancel~ -- work already
+committed for a source stays committed, nothing is left half-written.
+Both paths prune sources that have left a collection (deleted, newly
+ignored, or emptied to nothing) once that collection's pass completes;
+a cancelled pass prunes nothing.
 
 *** 4. Enable the collections you actually want searched
 
@@ -520,16 +553,18 @@ because a passage tells it to.
 *** 8. Freshness and evaluation
 
 ~M-x arc-freshness~ reports which collections have drifted from their indexed
-inputs. ~arc-watch-mode~ reindexes changed file and org-node sources after a
+inputs, and which are ~partial~ -- current as far as they go, but missing
+sources their walk would index. ~arc-watch-mode~ reindexes changed file and org-node sources after a
 save and during bounded idle sweeps. Derived option and manual collections are
 reported stale rather than rebuilt automatically: a full re-embedding run is
 too expensive to start silently.
 
-~M-x arc-eval~ runs the private retrieval question set and reports recall at
-the configured cutoffs. It never calls a chat model. The harness can compare
-the fused, semantic, and keyword arms, and can measure document-level recall
-and rollup strategies. Use this measurement before changing an embedding
-provider, retrieval limit, or rollup function.
+~M-x arc-eval~ runs the private retrieval question set and reports recall,
+MRR and nDCG at the configured cutoffs. It never calls a chat model. ~M-x
+arc-eval-final-report~ tunes fusion on the set's dev split and reports dev and
+test, the negative questions' score profile, and latency; see "Measuring
+retrieval" below. Use this measurement before changing an embedding provider,
+retrieval limit, fusion setting or rollup function.
 
 The prose-generation layer and chat-model reranker have been removed. ARC now
 has one responsibility: index, search, measure, and expose citable local
@@ -625,7 +660,11 @@ keep the harness itself tested; it is a shape, not a measurement.
 
 An entry is a plist. Every key in an ~:expect~ clause must match a retrieved
 source for that clause to count, and ~:path-suffix~ matches the tail of a path so
-a set survives being read on another machine:
+a set survives being read on another machine. ~:expect~ is an AND of OR-groups:
+each element is one thing the question needs, a plain clause being a group of
+one, and ~(:any CLAUSE ...)~ a group any member of which counts. ~:negative t~
+marks a question the corpus genuinely cannot answer (no ~:expect~), and
+~:split dev~ or ~:split test~ pins a question to a half:
 
 #+begin_src elisp
 ((:question "how do I turn on syncthing in home-manager"
@@ -641,6 +680,19 @@ Recognized ~:expect~ keys are ~:kind~, ~:option-name~, ~:org-id~, ~:info-node~,
 ~:path~ (exact) and ~:path-suffix~. An unrecognized key is a hard error rather
 than a silent non-match -- a typo would otherwise read as a permanent retrieval
 failure.
+
+*** Metrics, splits and the fusion sweep
+
+Every metric counts *groups*, never the flattened members of one: recall@k is
+groups found at or above k over all groups; MRR is, per question, the mean over
+its groups of 1/rank (0 when missed); nDCG@k takes its ideal from the number of
+groups. A question without ~:split~ is assigned by a stable hash of its text,
+about 70% ~dev~. ~arc-eval-cache-arms~ runs each question's two arms once and
+keeps their raw scores; ~arc-eval-sweep~ then scores RRF over a k-by-weight
+grid and convex-combination fusion under four normalisations offline, on ~dev~
+only, and ~arc-eval-final-report~ scores the winners and the shipped setting on
+~dev~ and ~test~. The definitions and the reasoning are in
+=docs/superpowers/specs/2026-11-11-eval-discipline-design.md=.
 
 *** What it found
 
@@ -671,6 +723,13 @@ what a harness is for:
   594,549-character ~(elisp.info)Index~; across 330 retrieved results it was
   never returned once. BM25's length normalisation had it handled.
 
+*Every number in this section was measured on the 63,302-chunk corpus of
+2026-09, over the original 33 questions, with no held-out split, and nine of
+those questions name files at paths that no longer exist.* They are the record
+of why the current defaults were chosen, not a measurement of the corpus arc
+indexes now; re-measure with ~arc-eval-final-report~ before relying on any of
+them.
+
 One change survived, plus one default. Weighting the vector arm at 2 against the
 keyword arm's 1 (~arc-rrf-semantic-weight~) is better at every cutoff, and
 ~arc-limit~ moved from 5 to 10 because the target is so often just below the old
@@ -696,9 +755,8 @@ keeps the mutable half current on its own.
 ~arc-tool-lifecycle~ and ~bin/arc lifecycle~ add a bounded, read-only report
 for missing indexed files, stale or absent freshness, phantom sources, and
 orphaned data rows. The report is an inspection aid for an operator or agent;
-it never deletes, prunes, or reindexes. A synchronous ~arc-reindex-all~ remains
-the explicit operation that can reconcile departed sources, while the
-interactive asynchronous path intentionally avoids silent destructive cleanup.
+it never deletes, prunes, or reindexes. ~arc-reindex-all~, synchronous or not,
+is the operation that reconciles departed sources.
 
 *** Two mechanisms, because the corpus has two kinds of source
 
@@ -761,44 +819,27 @@ leaves ~arc-reindex-all~ to the operator, who knows whether now is a good time.
 
 ** Known limitations
 
-*** Asynchronous reindex never removes departed sources
+*** Nested ignore files are not read
 
-~M-x arc-reindex-all~ (the interactive, non-blocking path -- see its
-docstring) does not prune. A source that has genuinely left the corpus
-(deleted, gitignored, newly excluded) keeps whatever content it was
-last indexed with and stays citable indefinitely under this path
-alone. This is deliberate, not an oversight: a long-running
-asynchronous walk only ever knows "what this run has reached so far",
-never "everything this collection currently has", and three separate
-attempts to prune from the former each turned into a real, reproduced
-way to delete sources the run had simply not gotten to yet.
+A collection's ignore files are read at its root only (see 2b). A vendored
+tree a project hides with its own =.gitignore= is indexed unless the root's
+=.arcignore= names it.
 
-Only a *synchronous* reindex prunes -- run one occasionally to actually
-remove departed sources:
+*** Freshness reads a bounded number of missing files
 
-#+begin_src elisp
-(arc-reindex-all)                  ; every collection in `arc-index-plan'
-(arc-reindex-all '("home"))        ; just one collection
-#+end_src
+To tell a missing source from a binary or empty file, ~arc-freshness-report~
+reads up to ~arc-freshness-unindexed-probe-max~ (200) unindexed candidates per
+collection. Past that the unindexed count is reported as a floor ("at least
+N"), and a collection whose first 200 candidates all turned out to yield
+nothing reads ~unknown~ rather than ~fresh~.
 
-*** Emptying a collection's only source leaves it indexed
+*** Pruning trusts a complete walk, and refuses an empty one
 
-The synchronous prune above refuses to prune anything when a
-collection's walk comes back with zero sources, on purpose -- see
-~arc--prune-collection~'s docstring -- because an empty result is
-indistinguishable from a directory that is merely momentarily empty
-(unmounted, a sync tool mid-catch-up), and deleting a whole collection
-is never the right answer to that ambiguity. One consequence: if a
-collection has exactly one source and that source is edited down to
-zero chunks (an emptied or now-whitespace-only file, say), the walk
-that reindexes it also comes back with zero kept ids, the same refusal
-applies, and that now-empty source's *old* content stays indexed and
-citable indefinitely -- reindexing never removes it, because from
-here a genuinely-emptied sole source and a not-yet-ready directory
-look identical. Adding an unrelated second source to the same
-collection is enough to make the emptied one prunable again on the
-next synchronous reindex, since the walk then yields a non-empty
-kept-ids list to check it against.
+A collection whose walk finds nothing at all is never pruned: that is
+indistinguishable from a directory not mounted yet or mid-sync, and deleting a
+whole collection is never the right answer to that ambiguity. Removing every
+file from a collection's directory therefore leaves its old content indexed
+until at least one indexable file returns.
 
 ** Running the tests
 
